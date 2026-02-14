@@ -1,0 +1,92 @@
+.ace-tool/
+
+# ============================================
+# Dependencies
+# ============================================
+# Node.js
+node_modules/
+frontend/node_modules/
+backend/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Rust
+backend/target/
+target/
+Cargo.lock
+
+# ============================================
+# Build outputs
+# ============================================
+# Frontend build
+dist/
+build/
+frontend/dist/
+frontend/build/
+
+# Rust build artifacts
+*.rs.bk
+*.rlib
+*.rmeta
+
+# ============================================
+# Cache files
+# ============================================
+.cache/
+.parcel-cache/
+.vite/
+.eslintcache
+.stylelintcache
+*.tsbuildinfo
+
+# ============================================
+# Environment & Config files
+# ============================================
+.env
+.env.local
+.env.*.local
+backend/.env
+
+# ============================================
+# IDE & Editor files
+# ============================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ============================================
+# Log files
+# ============================================
+*.log
+logs/
+ace.log
+server.log
+start.log
+
+# ============================================
+# Testing
+# ============================================
+coverage/
+.nyc_output/
+
+# ============================================
+# Temporary files
+# ============================================
+tmp/
+temp/
+*.tmp
+
+# WindsurfChatOpen
+.windsurfchatopen/
+.windsurfrules
+
+# OMC state
+.omc/
+.ace-tool/
+.version-cache.json
