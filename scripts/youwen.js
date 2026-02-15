@@ -680,22 +680,6 @@ function getVersionCachePath() {
 }
 
 /**
- * 检查是否需要版本检测（每天最多一次）
- */
-function shouldCheckVersion() {
-  try {
-    const cachePath = getVersionCachePath();
-    if (!fs.existsSync(cachePath)) return true;
-    const cache = JSON.parse(fs.readFileSync(cachePath, "utf8"));
-    const lastCheck = new Date(cache.lastCheck).getTime();
-    const oneDayMs = 24 * 60 * 60 * 1000;
-    return Date.now() - lastCheck > oneDayMs;
-  } catch {
-    return true;
-  }
-}
-
-/**
  * 向后端查询最新版本（非阻塞，静默失败）
  */
 function checkRemoteVersion(token) {
@@ -735,29 +719,34 @@ function checkRemoteVersion(token) {
 }
 
 /**
- * 执行版本检测，有新版本时输出提示到 stderr
+ * 执行版本检测，有新版本时输出提示到 stderr 并退出
+ * @returns {Promise<boolean>} true 表示可以继续执行，false 表示需要退出
  */
-async function checkForUpdate(token) {
-  if (!shouldCheckVersion()) return;
-
+async function checkForUpdateBlocking(token) {
   const localVersion = getLocalVersion();
-  if (!localVersion) return;
+  if (!localVersion) return true;
 
   const remote = await checkRemoteVersion(token);
 
-  // 写入缓存（无论结果如何）
+  // 写入缓存
   try {
     const cache = { lastCheck: new Date().toISOString(), localVersion, remoteVersion: remote.version, downloadUrl: remote.downloadUrl };
     fs.writeFileSync(getVersionCachePath(), JSON.stringify(cache, null, 2));
   } catch { /* ignore */ }
 
   if (remote.version && compareSemver(localVersion, remote.version) < 0) {
-    console.error(`\n🔔 ${SKILL_NAME} 有新版本: ${localVersion} → ${remote.version}`);
+    console.error(``);
+    console.error(`🔔 ${SKILL_NAME} 有新版本可用: ${localVersion} → ${remote.version}`);
     if (remote.downloadUrl) {
       console.error(`   下载地址: ${remote.downloadUrl}`);
     }
     console.error(`   更新命令: bash <skill-dir>/install.sh`);
+    console.error(``);
+    console.error(`请先更新到最新版本后再使用。`);
+    return false;
   }
+
+  return true;
 }
 
 // ==================== CLI ====================
@@ -859,6 +848,13 @@ async function main() {
           console.error("用法: node youwen.js enhance <prompt> [options]");
           process.exit(1);
         }
+
+        // 执行前检查版本更新，有更新就退出
+        const canProceed = await checkForUpdateBlocking(args.token || config.token);
+        if (!canProceed) {
+          process.exit(1);
+        }
+
         await enhance(input, {
           history: args.history,
           autoConfirm: args["auto-confirm"] === true,
@@ -871,8 +867,6 @@ async function main() {
           autoSkills: args["auto-skills"] === true,
           force: args.force === true,
         });
-        // Non-blocking version check after enhance completes
-        await checkForUpdate(args.token || config.token);
         break;
       }
 

@@ -1,6 +1,6 @@
 ---
 name: yw-enhance
-version: 1.1.0
+version: 1.2.0
 description: |
   提示词智能增强 Skill。对用户提示词进行深度增强，内置多源搜索能力
   支持两种调用模式（通过 YOUWEN_CALL_MODE 配置）：
