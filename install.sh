@@ -6,7 +6,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/xiamuwnagwang/YCE-enhance/main/install.sh | bash
 #
 #   # 本地操作
-#   bash install.sh                    # 安装或更新
+#   bash install.sh                    # 交互式菜单（推荐）
+#   bash install.sh --install          # 直接安装或更新
 #   bash install.sh --target claude    # 仅安装到指定工具
 #   bash install.sh --check            # 检查版本
 #   bash install.sh --uninstall        # 卸载
@@ -788,14 +789,83 @@ cmd_setup() {
   fi
 }
 
+# ==================== 命令: 交互式主菜单 ====================
+
+cmd_menu() {
+  echo ""
+  printf "${BLUE}╔══════════════════════════════════════════════╗${NC}\n"
+  printf "${BLUE}║${NC}  ${BOLD}${CYAN}yw-enhance${NC} 管理工具                       ${BLUE}║${NC}\n"
+  printf "${BLUE}╚══════════════════════════════════════════════╝${NC}\n"
+  echo ""
+
+  # 检测当前状态
+  local installed
+  read -ra installed <<< "$(detect_installed)"
+  local has_install=false
+  [[ ${#installed[@]} -gt 0 && -n "${installed[0]}" ]] && has_install=true
+
+  if [[ "$has_install" == true ]]; then
+    echo -e "  ${GREEN}●${NC} 已安装到:"
+    for tool in "${installed[@]}"; do
+      local label ver dir
+      label=$(tool_label_by_key "$tool")
+      dir=$(tool_dir_by_key "$tool")
+      ver=$(get_local_version "$dir")
+      echo -e "    ${BOLD}${label}${NC} ${DIM}v${ver:-?}${NC}"
+    done
+    echo ""
+  else
+    echo -e "  ${YELLOW}●${NC} 尚未安装"
+    echo ""
+  fi
+
+  # 菜单选项
+  if [[ "$has_install" == true ]]; then
+    echo "  1) 📦 更新到最新版本"
+    echo "  2) ⚙️  修改配置"
+    echo "  3) 🔄 同步到其他工具"
+    echo "  4) 🔍 检查版本"
+    echo "  5) 🗑️  卸载"
+    echo "  0) 退出"
+  else
+    echo "  1) 📦 安装"
+    echo "  2) ⚙️  配置环境变量"
+    echo "  0) 退出"
+  fi
+  echo ""
+
+  local choice
+  read -rp "请选择: " choice
+
+  if [[ "$has_install" == true ]]; then
+    case "$choice" in
+      1) cmd_install "" ;;
+      2) cmd_setup "edit" ;;
+      3) load_env_file; cmd_sync ;;
+      4) cmd_check ;;
+      5) cmd_uninstall ;;
+      0) echo "再见 👋"; exit 0 ;;
+      *) warn "无效选择"; exit 1 ;;
+    esac
+  else
+    case "$choice" in
+      1) cmd_install "" ;;
+      2) cmd_setup "edit" ;;
+      0) echo "再见 👋"; exit 0 ;;
+      *) warn "无效选择"; exit 1 ;;
+    esac
+  fi
+}
+
 # ==================== 主入口 ====================
 
 main() {
-  local cmd="install" target="" setup_sub=""
+  local cmd="" target="" setup_sub=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --check)     cmd="check" ;;
+      --install)   cmd="install" ;;
       --uninstall) cmd="uninstall" ;;
       --setup)     cmd="setup" ;;
       --sync)      cmd="sync" ;;
@@ -809,11 +879,15 @@ main() {
     shift
   done
 
+  # 带 --target 时直接安装，不走菜单
+  [[ -n "$target" && -z "$cmd" ]] && cmd="install"
+
   if [[ "$cmd" == "help" ]]; then
     echo "yw-enhance 安装 / 更新 / 配置脚本"
     echo ""
     echo "用法:"
-    echo "  bash install.sh                    # 安装或更新"
+    echo "  bash install.sh                    # 交互式菜单（推荐）"
+    echo "  bash install.sh --install          # 直接安装或更新"
     echo "  bash install.sh --target claude    # 仅安装到指定工具"
     echo "  bash install.sh --check            # 检查版本"
     echo "  bash install.sh --uninstall        # 卸载"
@@ -837,6 +911,14 @@ main() {
     setup)     cmd_setup "$setup_sub" ;;
     sync)      load_env_file; cmd_sync ;;
     sync-env)  load_env_file; cmd_sync_env ;;
+    "")
+      # 管道模式（curl | bash）无 TTY，直接安装
+      if [[ ! -t 0 ]]; then
+        cmd_install "$target"
+      else
+        cmd_menu
+      fi
+      ;;
   esac
 }
 
