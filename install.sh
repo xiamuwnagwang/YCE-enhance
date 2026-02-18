@@ -41,11 +41,29 @@ NC='\033[0m'
 
 # ==================== 工具目录映射 ====================
 
+# 获取 skills 根目录（动态检测）
+get_skills_root() {
+  # 优先使用环境变量
+  [[ -n "${SKILLS_ROOT:-}" ]] && { echo "$SKILLS_ROOT"; return; }
+  # 尝试从脚本位置推断（scripts/../.. 或 skill 根目录）
+  local script_dir; script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local parent; parent="$(dirname "$script_dir")"
+  # 如果父目录名是 skills，则使用它
+  if [[ "$(basename "$parent")" == "skills" ]]; then
+    echo "$parent"
+  else
+    # 默认使用 ~/.config/opencode/skills
+    echo "$HOME/.config/opencode/skills"
+  fi
+}
+SKILLS_ROOT="$(get_skills_root)"
+
+# 基础工具列表
 TOOL_KEYS=("claude" "opencode" "cursor" "windsurf" "cline" "continue" "codium" "aider")
 TOOL_LABELS=("Claude Code" "OpenCode" "Cursor" "Windsurf" "Cline" "Continue" "Codium" "Aider")
 TOOL_DIRS=(
   "$HOME/.claude/skills/$SKILL_NAME"
-  "$HOME/.config/opencode/skill/$SKILL_NAME"
+  "$SKILLS_ROOT/$SKILL_NAME"
   "$HOME/.cursor/skills/$SKILL_NAME"
   "$HOME/.windsurf/skills/$SKILL_NAME"
   "$HOME/.cline/skills/$SKILL_NAME"
@@ -53,6 +71,17 @@ TOOL_DIRS=(
   "$HOME/.codium/skills/$SKILL_NAME"
   "$HOME/.aider/skills/$SKILL_NAME"
 )
+
+# 动态检测 .agents 目录
+if [[ -d "$HOME/.agents/skills" ]]; then
+  TOOL_KEYS=("claude" "agents" "${TOOL_KEYS[@]:1}")
+  TOOL_LABELS=("Claude Code" ".agents" "${TOOL_LABELS[@]:1}")
+  TOOL_DIRS=(
+    "$HOME/.claude/skills/$SKILL_NAME"
+    "$HOME/.agents/skills/$SKILL_NAME"
+    "${TOOL_DIRS[@]:1}"
+  )
+fi
 
 # 需要安装/同步的文件（排除 .env, .omc, .git 等）
 INSTALL_FILES=("scripts" "references" "SKILL.md" "quickstart.sh" "install.sh" "install.ps1" ".env.example" ".gitignore")
@@ -177,10 +206,16 @@ download_latest() {
 
 detect_installed() {
   local found=""
+  declare -A seen_paths
+  
   for i in "${!TOOL_KEYS[@]}"; do
     local dir="${TOOL_DIRS[$i]}"
     if [[ -d "$dir" ]] && { [[ -f "$dir/SKILL.md" ]] || [[ -f "$dir/scripts/youwen.js" ]]; }; then
-      found="${found} ${TOOL_KEYS[$i]}"
+      local real_dir; real_dir=$(cd "$dir" 2>/dev/null && pwd -P)
+      if [[ -z "${seen_paths[$real_dir]:-}" ]]; then
+        found="${found} ${TOOL_KEYS[$i]}"
+        seen_paths["$real_dir"]=1
+      fi
     fi
   done
   echo "$found"
@@ -189,11 +224,17 @@ detect_installed() {
 detect_other_installs() {
   DETECTED_DIRS=(); DETECTED_NAMES=()
   local self_real; self_real=$(cd "$SCRIPT_DIR" 2>/dev/null && pwd -P)
+  declare -A seen_paths
+  
   for i in "${!TOOL_KEYS[@]}"; do
     local dir="${TOOL_DIRS[$i]}" name="${TOOL_LABELS[$i]}"
     if [[ -d "$dir" ]] && { [[ -f "$dir/SKILL.md" ]] || [[ -f "$dir/scripts/youwen.js" ]]; }; then
       local real_dir; real_dir=$(cd "$dir" 2>/dev/null && pwd -P)
-      [[ "$real_dir" != "$self_real" ]] && { DETECTED_DIRS+=("$dir"); DETECTED_NAMES+=("$name"); }
+      if [[ "$real_dir" != "$self_real" && -z "${seen_paths[$real_dir]:-}" ]]; then
+        DETECTED_DIRS+=("$dir")
+        DETECTED_NAMES+=("$name")
+        seen_paths["$real_dir"]=1
+      fi
     fi
   done
 }
@@ -202,6 +243,16 @@ detect_other_installs() {
 
 install_to_dir() {
   local source_dir="$1" target_dir="$2" tool_name="$3"
+
+  # 检查源和目标是否相同（避免自我覆盖）
+  local source_real target_real
+  source_real=$(cd "$source_dir" 2>/dev/null && pwd -P)
+  target_real=$(cd "$target_dir" 2>/dev/null && pwd -P) || target_real="$target_dir"
+  
+  if [[ "$source_real" == "$target_real" ]]; then
+    ok "${tool_name}: 已是最新（当前目录）"
+    return 0
+  fi
 
   local env_backup=""
   [[ -f "$target_dir/.env" ]] && { env_backup=$(mktemp); cp "$target_dir/.env" "$env_backup"; }
@@ -559,11 +610,33 @@ cmd_install() {
   echo ""
 
   local source_dir="" need_cleanup=false
+  local local_ver=""
 
+  # 检查本地文件是否存在且版本是否最新
   if [[ -f "$SCRIPT_DIR/scripts/youwen.js" && -f "$SCRIPT_DIR/SKILL.md" ]]; then
-    source_dir="$SCRIPT_DIR"
-    info "使用本地文件: $source_dir"
+    local_ver=$(get_local_version "$SCRIPT_DIR")
+    
+    # 如果有远程版本信息，比较版本号
+    if [[ -n "$remote_ver" && -n "$local_ver" ]]; then
+      local cmp; cmp=$(compare_semver "$local_ver" "$remote_ver")
+      if [[ "$cmp" == "-1" ]]; then
+        # 本地版本较旧，需要下载
+        info "本地版本 ${local_ver} 低于远程版本 ${remote_ver}，下载最新版本..."
+        source_dir=$(download_latest)
+        need_cleanup=true
+        ok "下载完成"
+      else
+        # 本地版本已是最新
+        source_dir="$SCRIPT_DIR"
+        info "使用本地文件: $source_dir (版本 ${local_ver})"
+      fi
+    else
+      # 无法获取远程版本或本地版本，使用本地文件
+      source_dir="$SCRIPT_DIR"
+      info "使用本地文件: $source_dir"
+    fi
   else
+    # 本地文件不存在，下载
     source_dir=$(download_latest)
     need_cleanup=true
     ok "下载完成"
@@ -901,6 +974,10 @@ main() {
     echo "  curl -fsSL https://raw.githubusercontent.com/xiamuwnagwang/YCE-enhance/main/install.sh | bash"
     echo ""
     echo "支持的工具: ${TOOL_KEYS[*]}"
+    echo ""
+    echo "说明:"
+    echo "  agents   - 动态检测 ~/.agents/skills 目录（存在时自动添加）"
+    echo "  opencode - 动态路径（默认 ~/.config/opencode/skills，可通过 SKILLS_ROOT 环境变量配置）"
     exit 0
   fi
 

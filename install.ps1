@@ -40,9 +40,10 @@ $RepoArchiveFallback = "https://github.com/xiamuwnagwang/YCE-enhance/archive/ref
 $ApiUrl = "https://b.aigy.de"
 $SkillName = "yw-enhance"
 
+# 基础工具列表
 $ToolMap = @(
   @{ Key="claude";   Label="Claude Code"; Dir=Join-Path $env:USERPROFILE ".claude\skills\$SkillName" }
-  @{ Key="opencode"; Label="OpenCode";    Dir=Join-Path $env:USERPROFILE ".config\opencode\skill\$SkillName" }
+  @{ Key="opencode"; Label="OpenCode";    Dir=Join-Path $env:USERPROFILE ".config\opencode\skills\$SkillName" }
   @{ Key="cursor";   Label="Cursor";      Dir=Join-Path $env:USERPROFILE ".cursor\skills\$SkillName" }
   @{ Key="windsurf"; Label="Windsurf";    Dir=Join-Path $env:USERPROFILE ".windsurf\skills\$SkillName" }
   @{ Key="cline";    Label="Cline";       Dir=Join-Path $env:USERPROFILE ".cline\skills\$SkillName" }
@@ -50,6 +51,13 @@ $ToolMap = @(
   @{ Key="codium";   Label="Codium";      Dir=Join-Path $env:USERPROFILE ".codium\skills\$SkillName" }
   @{ Key="aider";    Label="Aider";       Dir=Join-Path $env:USERPROFILE ".aider\skills\$SkillName" }
 )
+
+# 动态检测 .agents 目录
+$agentsSkillsPath = Join-Path $env:USERPROFILE ".agents\skills"
+if (Test-Path $agentsSkillsPath) {
+  $agentsTool = @{ Key="agents"; Label=".agents"; Dir=Join-Path $agentsSkillsPath $SkillName }
+  $ToolMap = @($ToolMap[0]) + @($agentsTool) + $ToolMap[1..($ToolMap.Length-1)]
+}
 
 $InstallFiles = @("scripts", "references", "SKILL.md", "quickstart.sh", "install.sh", "install.ps1", ".env.example", ".gitignore")
 
@@ -145,9 +153,15 @@ function Get-RemoteInfo {
 
 function Find-Installed {
   $found = @()
+  $seenPaths = @{}
+  
   foreach ($tool in $script:ToolMap) {
     if ((Test-Path $tool.Dir) -and ((Test-Path (Join-Path $tool.Dir "SKILL.md")) -or (Test-Path (Join-Path $tool.Dir "scripts\youwen.js")))) {
-      $found += $tool
+      $realPath = (Resolve-Path $tool.Dir -ErrorAction SilentlyContinue).Path
+      if ($realPath -and -not $seenPaths.ContainsKey($realPath)) {
+        $found += $tool
+        $seenPaths[$realPath] = $true
+      }
     }
   }
   return $found
@@ -156,12 +170,17 @@ function Find-Installed {
 function Find-OtherInstalls {
   $selfReal = (Resolve-Path $script:ScriptDir -ErrorAction SilentlyContinue).Path
   $detected = @()
+  $seenPaths = @{}
+  
   foreach ($tool in $script:ToolMap) {
     if (-not (Test-Path $tool.Dir)) { continue }
     $hasSkill = (Test-Path (Join-Path $tool.Dir "SKILL.md")) -or (Test-Path (Join-Path $tool.Dir "scripts\youwen.js"))
     if (-not $hasSkill) { continue }
     $dirReal = (Resolve-Path $tool.Dir -ErrorAction SilentlyContinue).Path
-    if ($dirReal -ne $selfReal) { $detected += $tool }
+    if ($dirReal -and $dirReal -ne $selfReal -and -not $seenPaths.ContainsKey($dirReal)) {
+      $detected += $tool
+      $seenPaths[$dirReal] = $true
+    }
   }
   return $detected
 }
@@ -170,6 +189,16 @@ function Find-OtherInstalls {
 
 function Install-ToDir {
   param([string]$SourceDir, [string]$TargetDir, [string]$ToolName)
+
+  # 检查源和目标是否相同（避免自我覆盖）
+  $sourceReal = (Resolve-Path $SourceDir -ErrorAction SilentlyContinue).Path
+  $targetReal = (Resolve-Path $TargetDir -ErrorAction SilentlyContinue).Path
+  if (-not $targetReal) { $targetReal = $TargetDir }
+  
+  if ($sourceReal -eq $targetReal) {
+    Write-Host "$([char]0x2714) ${ToolName}: 已是最新（当前目录）" -ForegroundColor Green
+    return
+  }
 
   $envBackup = $null
   $envTarget = Join-Path $TargetDir ".env"
@@ -474,11 +503,32 @@ function Invoke-Install {
   Write-Host ""
 
   $sourceDir = $null; $needCleanup = $false
+  $localVer = $null
 
+  # 检查本地文件是否存在且版本是否最新
   if ((Test-Path (Join-Path $script:ScriptDir "scripts\youwen.js")) -and (Test-Path (Join-Path $script:ScriptDir "SKILL.md"))) {
-    $sourceDir = $script:ScriptDir
-    Write-Host "▸ 使用本地文件: $sourceDir" -ForegroundColor Blue
+    $localVer = Get-LocalVersion $script:ScriptDir
+    
+    # 如果有远程版本信息，比较版本号
+    if ($remoteVer -and $localVer) {
+      if ($localVer -ne $remoteVer) {
+        # 本地版本较旧，需要下载
+        Write-Host "▸ 本地版本 $localVer 低于远程版本 $remoteVer，下载最新版本..." -ForegroundColor Blue
+        $sourceDir = Get-LatestSource
+        $needCleanup = $true
+        Write-Host "$([char]0x2714) 下载完成" -ForegroundColor Green
+      } else {
+        # 本地版本已是最新
+        $sourceDir = $script:ScriptDir
+        Write-Host "▸ 使用本地文件: $sourceDir (版本 $localVer)" -ForegroundColor Blue
+      }
+    } else {
+      # 无法获取远程版本或本地版本，使用本地文件
+      $sourceDir = $script:ScriptDir
+      Write-Host "▸ 使用本地文件: $sourceDir" -ForegroundColor Blue
+    }
   } else {
+    # 本地文件不存在，下载
     $sourceDir = Get-LatestSource
     $needCleanup = $true
     Write-Host "$([char]0x2714) 下载完成" -ForegroundColor Green

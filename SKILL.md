@@ -17,15 +17,25 @@ user-invocable: true
 
 # 提示词智能增强
 
+
 ## 快速调用（AI Agent 复制即用）
 
+
+**📌 路径说明**：命令使用相对路径 `./scripts/`，表示相对于 skill 根目录。
+- 设置环境变量：`export SKILLS_ROOT=~/.agents/skills`
+- 实际调用：`node $SKILLS_ROOT/yw-enhance/scripts/youwen.js ...`
+
+**📌 安装说明**：
+- 安装到 `.agents` 目录：`bash install.sh --target agents`（需要 `~/.agents/skills` 目录存在）
+- 安装到其他工具：`bash install.sh --target claude` / `cursor` / `windsurf` 等
+- `agents` 选项会动态检测 `~/.agents/skills` 目录，不存在时不显示该选项
+
 ```bash
-node <skill-dir>/scripts/youwen.js enhance "用户提示词" \
+node $SKILLS_ROOT/yw-enhance/scripts/youwen.js enhance "用户提示词" \
   --history "User: ...\nAI: ...\nUser: ..." \
   --auto-confirm --auto-skills
 ```
 
-- `<skill-dir>` 替换为实际路径（如 `~/.claude/skills/yw-enhance`）
 - 超时设置 ≥ 90s（4-Agent 流水线需要 30-60s）
 - 一次阻塞等待结果，禁止短 timeout 轮询
 - macOS 下不要用 `timeout` 命令包裹
