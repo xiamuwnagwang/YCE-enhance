@@ -161,7 +161,7 @@ async function enhance(prompt, opts = {}) {
       enable_intent_analysis: true,
       enable_search: enableSearch,
       search_engines: ["grok", "perplexity", "exa", "context7", "deepwiki"],
-      auto_confirm_intent: opts.autoConfirm || false,
+      auto_confirm_intent: true,  // 默认自动确认意图，跳过交互
     },
   };
 
@@ -173,19 +173,33 @@ async function enhance(prompt, opts = {}) {
     body.mgrep_api_key = opts.mgrepKey || config.mgrepApiKey;
   }
 
-  // Skill 上下文注入：扫描 skill 目录，匹配相关 skill，注入到 conversation_history
+  // Skill 上下文注入：扫描 skill 目录，让 AI 智能决策相关性
   let matchedSkills = [];
   if (opts.skillsDir || opts.autoSkills) {
     const extraDirs = opts.skillsDir ? [opts.skillsDir] : [];
     const skills = scanAllSkills(extraDirs);
     if (skills.length) {
-      const matched = routeQuery(prompt, skills);
-      if (matched.length) {
-        matchedSkills = matched;
-        const skillCtx = buildSkillContext(matched);
-        body.conversation_history = skillCtx + (body.conversation_history ? "\n\n" + body.conversation_history : "");
+      // 初步筛选：只保留得分 > 0 的候选 skill
+      const candidates = routeQuery(prompt, skills).filter(s => s.score > 0);
+      if (candidates.length) {
+        // 构建候选 skill 列表，让 AI 决策
+        const candidateList = candidates.slice(0, 10).map(({ skill, score }) => ({
+          name: skill.name,
+          description: skill.description,
+          triggers: skill.triggers,
+          score
+        }));
+        body.skill_candidates = candidateList;
+
         if (!opts.json) {
-          console.error(`🧩 已匹配 ${matched.length} 个 Skill: ${matched.slice(0, 3).map(m => m.skill.name).join(", ")}`);
+          console.error(`🔍 扫描到 ${candidates.length} 个候选 Skill，提交给 AI 智能决策...`);
+          candidates.slice(0, 5).forEach(c => {
+            const desc = (c.skill.description || "").split(/[。\n]/)[0].slice(0, 60);
+            console.error(`   • ${c.skill.name} - ${desc || "无描述"}`);
+          });
+          if (candidates.length > 5) {
+            console.error(`   ... 还有 ${candidates.length - 5} 个`);
+          }
         }
       }
     }
@@ -208,6 +222,7 @@ async function enhance(prompt, opts = {}) {
   let finalAnswer = "";
   let tokenUsage = null;
   let error = null;
+  let selectedSkills = [];
   const agentStatus = {
     agent1: { name: "上下文处理", status: "pending" },
     agent2: { name: "意图分析", status: "pending" },
@@ -261,6 +276,20 @@ async function enhance(prompt, opts = {}) {
       agentStatus.agent4.status = "done";
       agentStatus.agent4.duration = data.duration_ms;
 
+    // Skill selection
+    } else if (event === "skills_selected") {
+      selectedSkills = data.selected_skills || [];
+      if (selectedSkills.length && !opts.json) {
+        console.error("");
+        console.error(`✨ AI 选择了 ${selectedSkills.length} 个 Skill:`);
+        selectedSkills.forEach(s => {
+          console.error(`   • ${s.name}`);
+          if (s.reason) {
+            console.error(`     → ${s.reason}`);
+          }
+        });
+      }
+
     // Pipeline
     } else if (event === "pipeline_complete") {
       tokenUsage = data.token_usage;
@@ -297,18 +326,30 @@ async function enhance(prompt, opts = {}) {
     console.log(finalAnswer);
     console.log("</enhanced>");
 
-    // Append auto-skills section for AI agent consumption
-    const autoSkills = buildAutoSkills(matchedSkills);
-    if (autoSkills.length) {
-      console.log("<auto-skills>");
-      for (const s of autoSkills) {
-        const attrs = [`name="${s.skill}"`, `reason="${s.reason}"`];
-        if (s.command) {
-          attrs.push(`command="${s.command}"`);
+    // Append auto-skills section for AI agent consumption (使用 AI 选择的 skills)
+    if (selectedSkills.length) {
+      const skills = scanAllSkills(opts.skillsDir ? [opts.skillsDir] : []);
+      const autoSkills = selectedSkills.map(selected => {
+        const skill = skills.find(s => s.name === selected.name);
+        if (!skill) return null;
+        return {
+          skill: skill.name,
+          reason: selected.reason || buildSkillReason(skill),
+          command: skill.quickStart || null
+        };
+      }).filter(Boolean);
+
+      if (autoSkills.length) {
+        console.log("<auto-skills>");
+        for (const s of autoSkills) {
+          const attrs = [`name="${s.skill}"`, `reason="${s.reason}"`];
+          if (s.command) {
+            attrs.push(`command="${s.command}"`);
+          }
+          console.log(`<skill ${attrs.join(" ")} />`);
         }
-        console.log(`<skill ${attrs.join(" ")} />`);
+        console.log("</auto-skills>");
       }
-      console.log("</auto-skills>");
     }
   } else {
     console.error("\n⚠ 未获得增强结果");
@@ -322,6 +363,11 @@ async function enhance(prompt, opts = {}) {
 }
 
 // ==================== Skill 扫描与路由 ====================
+
+// Skill 扫描缓存（内存缓存，避免重复扫描文件系统）
+let skillScanCache = null;
+let skillScanCacheTime = 0;
+const SKILL_CACHE_TTL = 60000; // 60秒缓存
 
 /**
  * 解析 SKILL.md 的 YAML frontmatter
@@ -499,9 +545,19 @@ function getDefaultSkillDirs() {
 }
 
 /**
- * 扫描所有默认目录 + 自定义目录
+ * 扫描所有默认目录 + 自定义目录（带缓存）
  */
 function scanAllSkills(extraDirs = []) {
+  const now = Date.now();
+  const cacheKey = JSON.stringify(extraDirs);
+
+  // 检查缓存是否有效
+  if (skillScanCache && skillScanCacheTime > 0 && (now - skillScanCacheTime) < SKILL_CACHE_TTL) {
+    if (skillScanCache.cacheKey === cacheKey) {
+      return skillScanCache.skills;
+    }
+  }
+
   const allDirs = [...getDefaultSkillDirs(), ...extraDirs];
   const seen = new Set();
   const skills = [];
@@ -521,6 +577,10 @@ function scanAllSkills(extraDirs = []) {
       }
     }
   }
+
+  // 更新缓存
+  skillScanCache = { cacheKey, skills };
+  skillScanCacheTime = now;
 
   return skills;
 }
@@ -574,6 +634,61 @@ function routeQuery(query, skills) {
   return scored
     .filter(s => s.score > 0)
     .sort((a, b) => b.score - a.score);
+}
+
+/**
+ * 生成 skill 适用于当前任务的理由
+ */
+function generateRelevanceReason(prompt, skill, matches) {
+  const promptLower = prompt.toLowerCase();
+
+  // 根据任务类型和 skill 功能生成适用理由
+  if (promptLower.includes("搜索") || promptLower.includes("查找") || promptLower.includes("定位")) {
+    if (skill.name.includes("ace") || skill.name.includes("grep")) {
+      return "当前任务需要在代码库中定位特定功能实现";
+    }
+    if (skill.name.includes("pplx") || skill.name.includes("exa") || skill.name.includes("tavily")) {
+      return "当前任务需要联网搜索最新信息或技术资料";
+    }
+  }
+
+  if (promptLower.includes("文档") || promptLower.includes("doc") || promptLower.includes("怎么用") || promptLower.includes("如何")) {
+    if (skill.name.includes("context7")) {
+      return "当前任务需要获取库/框架的官方文档和最佳实践";
+    }
+    if (skill.name.includes("deep-wiki")) {
+      return "当前任务需要理解 GitHub 项目的架构和实现细节";
+    }
+  }
+
+  if (promptLower.includes("设计") || promptLower.includes("UI") || promptLower.includes("界面") || promptLower.includes("页面")) {
+    if (skill.name.includes("ui-ux")) {
+      return "当前任务需要从零设计 UI 或获取设计系统规范";
+    }
+    if (skill.name.includes("canvas") || skill.name.includes("frontend")) {
+      return "当前任务需要创建视觉设计或前端界面";
+    }
+  }
+
+  if (promptLower.includes("分析") || promptLower.includes("理解") || promptLower.includes("项目") || promptLower.includes("github")) {
+    if (skill.name.includes("github")) {
+      return "当前任务需要深度分析 GitHub 开源项目的质量和架构";
+    }
+  }
+
+  if (promptLower.includes("图片") || promptLower.includes("生成") || promptLower.includes("画")) {
+    if (skill.name.includes("grok") || skill.name.includes("gemini")) {
+      return "当前任务需要 AI 生成图片或进行图像处理";
+    }
+  }
+
+  // 默认：提取 skill 描述的核心功能
+  const coreFunction = (skill.description || "").split(/[。\n]/)[0].trim();
+  if (coreFunction && coreFunction.length > 10) {
+    return coreFunction.slice(0, 50) + "可能有助于完成当前任务";
+  }
+
+  return "该工具的功能与当前任务场景相关";
 }
 
 /**
@@ -719,34 +834,31 @@ function checkRemoteVersion(token) {
 }
 
 /**
- * 执行版本检测，有新版本时输出提示到 stderr 并退出
- * @returns {Promise<boolean>} true 表示可以继续执行，false 表示需要退出
+ * 执行版本检测（非阻塞，后台异步）
+ * 不阻塞主流程，仅在有新版本时输出提示到 stderr
  */
-async function checkForUpdateBlocking(token) {
+async function checkForUpdateNonBlocking(token) {
   const localVersion = getLocalVersion();
-  if (!localVersion) return true;
+  if (!localVersion) return;
 
-  const remote = await checkRemoteVersion(token);
+  // 异步执行，不阻塞主流程
+  checkRemoteVersion(token).then(remote => {
+    // 写入缓存
+    try {
+      const cache = { lastCheck: new Date().toISOString(), localVersion, remoteVersion: remote.version, downloadUrl: remote.downloadUrl };
+      fs.writeFileSync(getVersionCachePath(), JSON.stringify(cache, null, 2));
+    } catch { /* ignore */ }
 
-  // 写入缓存
-  try {
-    const cache = { lastCheck: new Date().toISOString(), localVersion, remoteVersion: remote.version, downloadUrl: remote.downloadUrl };
-    fs.writeFileSync(getVersionCachePath(), JSON.stringify(cache, null, 2));
-  } catch { /* ignore */ }
-
-  if (remote.version && compareSemver(localVersion, remote.version) < 0) {
-    console.error(``);
-    console.error(`🔔 ${SKILL_NAME} 有新版本可用: ${localVersion} → ${remote.version}`);
-    if (remote.downloadUrl) {
-      console.error(`   下载地址: ${remote.downloadUrl}`);
+    if (remote.version && compareSemver(localVersion, remote.version) < 0) {
+      console.error(``);
+      console.error(`🔔 ${SKILL_NAME} 有新版本可用: ${localVersion} → ${remote.version}`);
+      if (remote.downloadUrl) {
+        console.error(`   下载地址: ${remote.downloadUrl}`);
+      }
+      console.error(`   更新命令: bash <skill-dir>/install.sh`);
+      console.error(``);
     }
-    console.error(`   更新命令: bash <skill-dir>/install.sh`);
-    console.error(``);
-    console.error(`请先更新到最新版本后再使用。`);
-    return false;
-  }
-
-  return true;
+  }).catch(() => { /* 静默失败 */ });
 }
 
 // ==================== CLI ====================
@@ -849,11 +961,8 @@ async function main() {
           process.exit(1);
         }
 
-        // 执行前检查版本更新，有更新就退出
-        const canProceed = await checkForUpdateBlocking(args.token || config.token);
-        if (!canProceed) {
-          process.exit(1);
-        }
+        // 后台异步检查版本更新，不阻塞主流程
+        checkForUpdateNonBlocking(args.token || config.token);
 
         await enhance(input, {
           history: args.history,

@@ -206,15 +206,17 @@ download_latest() {
 
 detect_installed() {
   local found=""
-  declare -A seen_paths
-  
+  local seen_paths_keys="" seen_paths_vals=""
+
   for i in "${!TOOL_KEYS[@]}"; do
     local dir="${TOOL_DIRS[$i]}"
     if [[ -d "$dir" ]] && { [[ -f "$dir/SKILL.md" ]] || [[ -f "$dir/scripts/youwen.js" ]]; }; then
       local real_dir; real_dir=$(cd "$dir" 2>/dev/null && pwd -P)
-      if [[ -z "${seen_paths[$real_dir]:-}" ]]; then
+      # 使用双数组模拟关联数组（兼容 Bash 3.x）
+      if ! echo "|${seen_paths_keys}|" | grep -q "|${real_dir}|"; then
         found="${found} ${TOOL_KEYS[$i]}"
-        seen_paths["$real_dir"]=1
+        seen_paths_keys="${seen_paths_keys}|${real_dir}"
+        seen_paths_vals="${seen_paths_vals}|1"
       fi
     fi
   done
@@ -224,16 +226,17 @@ detect_installed() {
 detect_other_installs() {
   DETECTED_DIRS=(); DETECTED_NAMES=()
   local self_real; self_real=$(cd "$SCRIPT_DIR" 2>/dev/null && pwd -P)
-  declare -A seen_paths
-  
+  local seen_paths_keys="" seen_paths_vals=""
+
   for i in "${!TOOL_KEYS[@]}"; do
     local dir="${TOOL_DIRS[$i]}" name="${TOOL_LABELS[$i]}"
     if [[ -d "$dir" ]] && { [[ -f "$dir/SKILL.md" ]] || [[ -f "$dir/scripts/youwen.js" ]]; }; then
       local real_dir; real_dir=$(cd "$dir" 2>/dev/null && pwd -P)
-      if [[ "$real_dir" != "$self_real" && -z "${seen_paths[$real_dir]:-}" ]]; then
+      if [[ "$real_dir" != "$self_real" ]] && ! echo "|${seen_paths_keys}|" | grep -q "|${real_dir}|"; then
         DETECTED_DIRS+=("$dir")
         DETECTED_NAMES+=("$name")
-        seen_paths["$real_dir"]=1
+        seen_paths_keys="${seen_paths_keys}|${real_dir}"
+        seen_paths_vals="${seen_paths_vals}|1"
       fi
     fi
   done
@@ -292,9 +295,33 @@ parse_var() {
   VAR_OPTIONS=$(echo "$def" | cut -d'|' -f6)
 }
 
-declare -A ENV_VALS
+# 使用双数组模拟关联数组（兼容 Bash 3.x）
+ENV_VALS_KEYS=()
+ENV_VALS_VALS=()
+
+get_env_val() {
+  local key="$1"
+  for i in "${!ENV_VALS_KEYS[@]}"; do
+    [[ "${ENV_VALS_KEYS[$i]}" == "$key" ]] && { echo "${ENV_VALS_VALS[$i]}"; return 0; }
+  done
+  return 1
+}
+
+set_env_val() {
+  local key="$1" val="$2"
+  for i in "${!ENV_VALS_KEYS[@]}"; do
+    if [[ "${ENV_VALS_KEYS[$i]}" == "$key" ]]; then
+      ENV_VALS_VALS[$i]="$val"
+      return 0
+    fi
+  done
+  ENV_VALS_KEYS+=("$key")
+  ENV_VALS_VALS+=("$val")
+}
+
 load_env_file() {
-  ENV_VALS=()
+  ENV_VALS_KEYS=()
+  ENV_VALS_VALS=()
   [[ ! -f "$ENV_FILE" ]] && return
   while IFS= read -r line; do
     line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -302,7 +329,7 @@ load_env_file() {
     if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)\ *=\ *(.*) ]]; then
       local k="${BASH_REMATCH[1]}" v="${BASH_REMATCH[2]}"
       v=$(echo "$v" | sed 's/^["'\'']\|["'\'']\s*$//g')
-      ENV_VALS["$k"]="$v"
+      set_env_val "$k" "$v"
     fi
   done < "$ENV_FILE"
 }
@@ -321,7 +348,7 @@ write_env_file() {
     echo ""
     for def in "${ENV_VARS[@]}"; do
       parse_var "$def"
-      local val="${ENV_VALS[$VAR_KEY]:-${VAR_DEFAULT}}"
+      local val; val=$(get_env_val "$VAR_KEY" 2>/dev/null) || val="${VAR_DEFAULT}"
       local req_tag=""; [[ "$VAR_REQUIRED" == "1" ]] && req_tag=" (必填)"
       local opt_tag=""; [[ -n "$VAR_OPTIONS" ]] && opt_tag=" [$VAR_OPTIONS]"
       echo "# ${VAR_LABEL}${req_tag}${opt_tag}"
@@ -341,7 +368,8 @@ check_env() {
 
   for def in "${ENV_VARS[@]}"; do
     parse_var "$def"
-    local env_val="${!VAR_KEY:-}" file_val="${ENV_VALS[$VAR_KEY]:-}"
+    local env_val="${!VAR_KEY:-}"
+    local file_val; file_val=$(get_env_val "$VAR_KEY" 2>/dev/null) || file_val=""
     local effective="${env_val:-${file_val:-${VAR_DEFAULT}}}"
     local source="默认值"
     [[ -n "$env_val" ]] && source="环境变量"
@@ -798,7 +826,7 @@ cmd_setup() {
 
     for def in "${ENV_VARS[@]}"; do
       parse_var "$def"
-      local current="${ENV_VALS[$VAR_KEY]:-${VAR_DEFAULT}}"
+      local current; current=$(get_env_val "$VAR_KEY" 2>/dev/null) || current="${VAR_DEFAULT}"
       local display_current="$current"
       [[ "$VAR_SECRET" == "1" && -n "$current" ]] && display_current=$(mask_value "$current")
       [[ -z "$display_current" ]] && display_current="(空)"
@@ -822,9 +850,9 @@ cmd_setup() {
           read -rp "  重新输入: " new_val
           [[ -z "$new_val" ]] && new_val="$current"
         fi
-        ENV_VALS["$VAR_KEY"]="$new_val"
+        set_env_val "$VAR_KEY" "$new_val"
       elif [[ -n "$current" ]]; then
-        ENV_VALS["$VAR_KEY"]="$current"
+        set_env_val "$VAR_KEY" "$current"
       fi
       echo ""
     done
@@ -836,8 +864,8 @@ cmd_setup() {
     load_env_file
     check_env || true
 
-    local api_url="${ENV_VALS[YOUWEN_API_URL]:-https://b.aigy.de}"
-    local token="${ENV_VALS[YOUWEN_TOKEN]:-}"
+    local api_url; api_url=$(get_env_val "YOUWEN_API_URL" 2>/dev/null) || api_url="https://b.aigy.de"
+    local token; token=$(get_env_val "YOUWEN_TOKEN" 2>/dev/null) || token=""
     [[ -n "$token" ]] && test_connection "$api_url" "$token"
 
     # 配置完成后同步
