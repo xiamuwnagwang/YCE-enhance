@@ -173,34 +173,20 @@ async function enhance(prompt, opts = {}) {
     body.mgrep_api_key = opts.mgrepKey || config.mgrepApiKey;
   }
 
-  // Skill 上下文注入：扫描 skill 目录，让 AI 智能决策相关性
-  let matchedSkills = [];
+  // Skill 上下文注入：把全量已安装 skill 传给后端，让 AI 全权决策推荐
   if (opts.skillsDir || opts.autoSkills) {
     const extraDirs = opts.skillsDir ? [opts.skillsDir] : [];
     const skills = scanAllSkills(extraDirs);
     if (skills.length) {
-      // 初步筛选：只保留得分 > 0 的候选 skill
-      const candidates = routeQuery(prompt, skills).filter(s => s.score > 0);
-      if (candidates.length) {
-        // 构建候选 skill 列表，让 AI 决策
-        const candidateList = candidates.slice(0, 10).map(({ skill, score }) => ({
-          name: skill.name,
-          description: skill.description,
-          triggers: skill.triggers,
-          score
-        }));
-        body.skill_candidates = candidateList;
+      body.installed_skills = skills.map(s => ({
+        name: s.name,
+        description: (s.description || "").slice(0, 300),
+        triggers: s.triggers,
+        quickStart: s.quickStart || null,
+      }));
 
-        if (!opts.json) {
-          console.error(`🔍 扫描到 ${candidates.length} 个候选 Skill，提交给 AI 智能决策...`);
-          candidates.slice(0, 5).forEach(c => {
-            const desc = (c.skill.description || "").split(/[。\n]/)[0].slice(0, 60);
-            console.error(`   • ${c.skill.name} - ${desc || "无描述"}`);
-          });
-          if (candidates.length > 5) {
-            console.error(`   ... 还有 ${candidates.length - 5} 个`);
-          }
-        }
+      if (!opts.json) {
+        console.error(`🔍 已安装 ${skills.length} 个 Skill，交由 AI 决策推荐`);
       }
     }
   }
@@ -222,7 +208,6 @@ async function enhance(prompt, opts = {}) {
   let finalAnswer = "";
   let tokenUsage = null;
   let error = null;
-  let selectedSkills = [];
   const agentStatus = {
     agent1: { name: "上下文处理", status: "pending" },
     agent2: { name: "意图分析", status: "pending" },
@@ -276,20 +261,6 @@ async function enhance(prompt, opts = {}) {
       agentStatus.agent4.status = "done";
       agentStatus.agent4.duration = data.duration_ms;
 
-    // Skill selection
-    } else if (event === "skills_selected") {
-      selectedSkills = data.selected_skills || [];
-      if (selectedSkills.length && !opts.json) {
-        console.error("");
-        console.error(`✨ AI 选择了 ${selectedSkills.length} 个 Skill:`);
-        selectedSkills.forEach(s => {
-          console.error(`   • ${s.name}`);
-          if (s.reason) {
-            console.error(`     → ${s.reason}`);
-          }
-        });
-      }
-
     // Pipeline
     } else if (event === "pipeline_complete") {
       tokenUsage = data.token_usage;
@@ -325,32 +296,6 @@ async function enhance(prompt, opts = {}) {
     console.log("<enhanced>");
     console.log(finalAnswer);
     console.log("</enhanced>");
-
-    // Append auto-skills section for AI agent consumption (使用 AI 选择的 skills)
-    if (selectedSkills.length) {
-      const skills = scanAllSkills(opts.skillsDir ? [opts.skillsDir] : []);
-      const autoSkills = selectedSkills.map(selected => {
-        const skill = skills.find(s => s.name === selected.name);
-        if (!skill) return null;
-        return {
-          skill: skill.name,
-          reason: selected.reason || buildSkillReason(skill),
-          command: skill.quickStart || null
-        };
-      }).filter(Boolean);
-
-      if (autoSkills.length) {
-        console.log("<auto-skills>");
-        for (const s of autoSkills) {
-          const attrs = [`name="${s.skill}"`, `reason="${s.reason}"`];
-          if (s.command) {
-            attrs.push(`command="${s.command}"`);
-          }
-          console.log(`<skill ${attrs.join(" ")} />`);
-        }
-        console.log("</auto-skills>");
-      }
-    }
   } else {
     console.error("\n⚠ 未获得增强结果");
     process.exit(1);
@@ -450,6 +395,23 @@ function extractTriggers(description) {
     while ((match = pattern.exec(description)) !== null) {
       const raw = match[1];
       triggers.push(...raw.split(/[,，]/).map(t => t.trim().replace(/^["']|["']$/g, "")).filter(Boolean));
+    }
+  }
+
+  // 关键词/Keywords 标签
+  const kwPatterns = [
+    /关键词[：:]\s*([^\n【]+)/g,
+    /Keywords?[：:]\s*([^\n.]+)/gi,
+    /触发关键词[：:]\s*([^\n【]+)/g,
+    /激活词[：:]\s*([^\n【]+)/g,
+    /Activation\s+(?:words?|keywords?)[：:]\s*([^\n.]+)/gi,
+  ];
+
+  for (const pattern of kwPatterns) {
+    let match;
+    while ((match = pattern.exec(description)) !== null) {
+      const raw = match[1];
+      triggers.push(...raw.split(/[、,，\/]/).map(t => t.trim().replace(/^["']|["']$/g, "")).filter(Boolean));
     }
   }
 
@@ -583,177 +545,6 @@ function scanAllSkills(extraDirs = []) {
   skillScanCacheTime = now;
 
   return skills;
-}
-
-/**
- * 根据查询匹配 skill，返回按相关度排序的结果
- */
-function routeQuery(query, skills) {
-  const queryLower = query.toLowerCase();
-  const queryTokens = queryLower.split(/[\s,，、。！？!?;；:：]+/).filter(t => t.length > 1);
-
-  const scored = skills.map(skill => {
-    let score = 0;
-    const matches = [];
-
-    // 触发词精确匹配（权重最高）
-    for (const trigger of skill.triggers) {
-      const triggerLower = trigger.toLowerCase();
-      if (queryLower.includes(triggerLower)) {
-        score += 10;
-        matches.push(`触发词: ${trigger}`);
-      }
-    }
-
-    // 名称匹配
-    if (queryLower.includes(skill.name.toLowerCase())) {
-      score += 8;
-      matches.push(`名称: ${skill.name}`);
-    }
-
-    // 描述关键词匹配
-    const descLower = (skill.description || "").toLowerCase();
-    for (const token of queryTokens) {
-      if (descLower.includes(token)) {
-        score += 2;
-        matches.push(`关键词: ${token}`);
-      }
-    }
-
-    // 摘要关键词匹配（权重较低）
-    const summaryLower = (skill.summary || "").toLowerCase();
-    for (const token of queryTokens) {
-      if (summaryLower.includes(token) && !descLower.includes(token)) {
-        score += 1;
-      }
-    }
-
-    return { skill, score, matches: [...new Set(matches)] };
-  });
-
-  return scored
-    .filter(s => s.score > 0)
-    .sort((a, b) => b.score - a.score);
-}
-
-/**
- * 生成 skill 适用于当前任务的理由
- */
-function generateRelevanceReason(prompt, skill, matches) {
-  const promptLower = prompt.toLowerCase();
-
-  // 根据任务类型和 skill 功能生成适用理由
-  if (promptLower.includes("搜索") || promptLower.includes("查找") || promptLower.includes("定位")) {
-    if (skill.name.includes("ace") || skill.name.includes("grep")) {
-      return "当前任务需要在代码库中定位特定功能实现";
-    }
-    if (skill.name.includes("pplx") || skill.name.includes("exa") || skill.name.includes("tavily")) {
-      return "当前任务需要联网搜索最新信息或技术资料";
-    }
-  }
-
-  if (promptLower.includes("文档") || promptLower.includes("doc") || promptLower.includes("怎么用") || promptLower.includes("如何")) {
-    if (skill.name.includes("context7")) {
-      return "当前任务需要获取库/框架的官方文档和最佳实践";
-    }
-    if (skill.name.includes("deep-wiki")) {
-      return "当前任务需要理解 GitHub 项目的架构和实现细节";
-    }
-  }
-
-  if (promptLower.includes("设计") || promptLower.includes("UI") || promptLower.includes("界面") || promptLower.includes("页面")) {
-    if (skill.name.includes("ui-ux")) {
-      return "当前任务需要从零设计 UI 或获取设计系统规范";
-    }
-    if (skill.name.includes("canvas") || skill.name.includes("frontend")) {
-      return "当前任务需要创建视觉设计或前端界面";
-    }
-  }
-
-  if (promptLower.includes("分析") || promptLower.includes("理解") || promptLower.includes("项目") || promptLower.includes("github")) {
-    if (skill.name.includes("github")) {
-      return "当前任务需要深度分析 GitHub 开源项目的质量和架构";
-    }
-  }
-
-  if (promptLower.includes("图片") || promptLower.includes("生成") || promptLower.includes("画")) {
-    if (skill.name.includes("grok") || skill.name.includes("gemini")) {
-      return "当前任务需要 AI 生成图片或进行图像处理";
-    }
-  }
-
-  // 默认：提取 skill 描述的核心功能
-  const coreFunction = (skill.description || "").split(/[。\n]/)[0].trim();
-  if (coreFunction && coreFunction.length > 10) {
-    return coreFunction.slice(0, 50) + "可能有助于完成当前任务";
-  }
-
-  return "该工具的功能与当前任务场景相关";
-}
-
-/**
- * 将匹配的 skill 信息格式化为增强上下文
- */
-function buildSkillContext(matchedSkills) {
-  if (!matchedSkills.length) return "";
-
-  const lines = ["[可用工具/Skill 上下文]", "以下是与用户问题相关的已安装 Skill，可用于辅助回答：", ""];
-
-  for (const { skill, score, matches } of matchedSkills.slice(0, 5)) {
-    lines.push(`### ${skill.name}${skill.version ? ` v${skill.version}` : ""}`);
-    lines.push(`匹配度: ${score} (${matches.join(", ")})`);
-
-    // 提取描述的核心部分（去掉触发词和强制规则）
-    const desc = (skill.description || "")
-      .replace(/触发词[：:][^\n]*/g, "")
-      .replace(/【强制规则】[^\n]*/g, "")
-      .trim();
-    if (desc) lines.push(`功能: ${desc.slice(0, 200)}`);
-
-    if (skill.quickStart) {
-      lines.push(`调用: ${skill.quickStart}`);
-    }
-    lines.push("");
-  }
-
-  lines.push("请根据以上 Skill 信息，在增强提示词时考虑推荐合适的工具/Skill 来辅助用户完成任务。");
-  return lines.join("\n");
-}
-
-/**
- * 从 skill 描述中提取语义化的推荐理由
- */
-function buildSkillReason(skill) {
-  const desc = (skill.description || "")
-    .replace(/触发词[：:][^\n]*/g, "")
-    .replace(/【强制规则】[^\n]*/g, "")
-    .replace(/支持两种调用模式[^。]*。?/g, "")
-    .trim();
-
-  // 取描述第一句话作为 reason（到第一个句号或换行）
-  const firstSentence = desc.split(/[。\n]/)[0]?.trim();
-  if (firstSentence && firstSentence.length > 5) {
-    return firstSentence.length > 100 ? firstSentence.slice(0, 100) + "…" : firstSentence;
-  }
-
-  // fallback: 用 skill name + 简短描述
-  return `推荐使用 ${skill.name} 辅助完成任务`;
-}
-
-/**
- * 构建 autoSkills 数组，用于输出推荐 Skill 区块
- */
-function buildAutoSkills(matchedSkills) {
-  return matchedSkills.slice(0, 5).map(({ skill }) => {
-    const entry = {
-      skill: skill.name,
-      reason: buildSkillReason(skill),
-    };
-    if (skill.quickStart) {
-      entry.command = skill.quickStart;
-    }
-    return entry;
-  });
 }
 
 // ==================== 版本检测 ====================
