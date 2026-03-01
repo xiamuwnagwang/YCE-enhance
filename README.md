@@ -62,7 +62,7 @@ bash scripts/setup.sh
 
 ```env
 # 后端 API 地址
-YOUWEN_API_URL=https://b.aigy.de
+YOUWEN_API_URL=https://a.aigy.de
 
 # 兑换码（必填）
 YOUWEN_TOKEN=你的兑换码

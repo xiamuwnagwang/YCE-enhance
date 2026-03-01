@@ -104,7 +104,7 @@ AI Agent 处理步骤：
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `YOUWEN_CALL_MODE` | `smart`（智能判断）/ `always`（每次调用） | `smart` |
-| `YOUWEN_API_URL` | 后端地址 | `https://b.aigy.de` |
+| `YOUWEN_API_URL` | 后端地址 | `https://a.aigy.de` |
 | `YOUWEN_TOKEN` | 兑换码 | 空 |
 | `YOUWEN_ENHANCE_MODE` | `agent` / `disabled` | `agent` |
 | `YOUWEN_ENABLE_SEARCH` | `true` / `false` | `true` |

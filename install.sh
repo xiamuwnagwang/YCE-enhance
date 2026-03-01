@@ -23,7 +23,7 @@ set -eo pipefail
 
 REPO_URL="https://github.com/xiamuwnagwang/YCE-enhance"
 REPO_ARCHIVE_FALLBACK="https://github.com/xiamuwnagwang/YCE-enhance/archive/refs/heads/main.tar.gz"
-API_URL="https://b.aigy.de"
+API_URL="https://a.aigy.de"
 SKILL_NAME="yw-enhance"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -88,7 +88,7 @@ INSTALL_FILES=("scripts" "references" "SKILL.md" "quickstart.sh" "install.sh" "i
 
 # .env 变量定义: key|label|default|required|secret|options
 ENV_VARS=(
-  "YOUWEN_API_URL|后端 API 地址|https://b.aigy.de|0|0|"
+  "YOUWEN_API_URL|后端 API 地址|https://a.aigy.de|0|0|"
   "YOUWEN_TOKEN|兑换码 / Token||1|1|"
   "YOUWEN_ENHANCE_MODE|增强模式|agent|0|0|agent,disabled"
   "YOUWEN_ENABLE_SEARCH|启用联合搜索|true|0|0|true,false"
@@ -402,7 +402,7 @@ check_env() {
 }
 
 test_connection() {
-  local api_url="${1:-https://b.aigy.de}" token="${2:-}"
+  local api_url="${1:-https://a.aigy.de}" token="${2:-}"
   echo -n "🔗 测试后端连通性..."
 
   local curl_args=(-s -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 15 -H "Accept: application/json")
@@ -864,7 +864,7 @@ cmd_setup() {
     load_env_file
     check_env || true
 
-    local api_url; api_url=$(get_env_val "YOUWEN_API_URL" 2>/dev/null) || api_url="https://b.aigy.de"
+    local api_url; api_url=$(get_env_val "YOUWEN_API_URL" 2>/dev/null) || api_url="https://a.aigy.de"
     local token; token=$(get_env_val "YOUWEN_TOKEN" 2>/dev/null) || token=""
     [[ -n "$token" ]] && test_connection "$api_url" "$token"
 

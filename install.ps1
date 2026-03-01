@@ -37,7 +37,7 @@ $EnvFile = Join-Path $ScriptDir ".env"
 
 $RepoUrl = "https://github.com/xiamuwnagwang/YCE-enhance"
 $RepoArchiveFallback = "https://github.com/xiamuwnagwang/YCE-enhance/archive/refs/heads/main.tar.gz"
-$ApiUrl = "https://b.aigy.de"
+$ApiUrl = "https://a.aigy.de"
 $SkillName = "yw-enhance"
 
 # 基础工具列表
@@ -62,7 +62,7 @@ if (Test-Path $agentsSkillsPath) {
 $InstallFiles = @("scripts", "references", "SKILL.md", "quickstart.sh", "install.sh", "install.ps1", ".env.example", ".gitignore")
 
 $EnvVarDefs = @(
-  @{ Key="YOUWEN_API_URL";      Label="后端 API 地址";              Default="https://b.aigy.de"; Required=$false; Secret=$false; Options=@() }
+  @{ Key="YOUWEN_API_URL";      Label="后端 API 地址";              Default="https://a.aigy.de"; Required=$false; Secret=$false; Options=@() }
   @{ Key="YOUWEN_TOKEN";        Label="兑换码 / Token";             Default="";                  Required=$true;  Secret=$true;  Options=@() }
   @{ Key="YOUWEN_ENHANCE_MODE"; Label="增强模式";                   Default="agent";             Required=$false; Secret=$false; Options=@("agent","disabled") }
   @{ Key="YOUWEN_ENABLE_SEARCH";Label="启用联合搜索";               Default="true";              Required=$false; Secret=$false; Options=@("true","false") }
@@ -751,7 +751,7 @@ function Invoke-Setup {
     $reloaded = Read-EnvFile -Path $script:EnvFile
     $null = Test-AllEnvVars -FileVars $reloaded
 
-    $apiUrl = if ($reloaded.ContainsKey("YOUWEN_API_URL")) { $reloaded["YOUWEN_API_URL"] } else { "https://b.aigy.de" }
+    $apiUrl = if ($reloaded.ContainsKey("YOUWEN_API_URL")) { $reloaded["YOUWEN_API_URL"] } else { "https://a.aigy.de" }
     $token = if ($reloaded.ContainsKey("YOUWEN_TOKEN")) { $reloaded["YOUWEN_TOKEN"] } else { "" }
     if ($token) { Test-BackendConnection -ApiUrl $apiUrl -Token $token }
 

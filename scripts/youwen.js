@@ -17,7 +17,7 @@ const path = require("path");
 
 // ==================== 配置 ====================
 
-const DEFAULT_API_URL = "https://b.aigy.de";
+const DEFAULT_API_URL = "https://a.aigy.de";
 
 function loadConfig() {
   let apiUrl = process.env.YOUWEN_API_URL || DEFAULT_API_URL;
