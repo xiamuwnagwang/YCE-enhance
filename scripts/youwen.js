@@ -173,20 +173,25 @@ async function enhance(prompt, opts = {}) {
     body.mgrep_api_key = opts.mgrepKey || config.mgrepApiKey;
   }
 
-  // Skill 上下文注入：把全量已安装 skill 传给后端，让 AI 全权决策推荐
+  // Skill 上下文注入：把全量已安装 skill 传给后端，由后端 AI 智能推荐
   if (opts.skillsDir || opts.autoSkills) {
     const extraDirs = opts.skillsDir ? [opts.skillsDir] : [];
     const skills = scanAllSkills(extraDirs);
     if (skills.length) {
       body.installed_skills = skills.map(s => ({
         name: s.name,
-        description: (s.description || "").slice(0, 300),
+        description: (s.description || "").slice(0, 500),  // 扩展至 500 字符
         triggers: s.triggers,
         quickStart: s.quickStart || null,
       }));
 
+      const skillNameList = skills.map(s => s.name).join(", ");
+
+      // 在 prompt 中附加 skill 推荐指令（让 AI 在开头直接输出推荐）
+      body.prompt = prompt + `\n\n---\n\n【重要】基于提供的 ${skills.length} 个已安装工具（installed_skills 上下文），先给出工具推荐，再给出增强后的提示词。\n\n请严格按以下顺序输出：\n1) 开头先输出“推荐技能”小节\n2) 然后输出“增强提示词正文”\n\n开头格式要求（不要用 XML）：\n推荐技能：\n- 工具名：推荐理由（一句话）\n- 工具名：推荐理由（一句话）\n\n约束：\n1. 推荐 3-8 个工具\n2. 工具名只能从“候选工具名”里选择，禁止创造新名字\n3. 推荐理由必须结合当前任务，不要写通用空话\n4. 不要输出 <auto-skills> 或任何 XML 标签\n\n候选工具名：${skillNameList}`;
+
       if (!opts.json) {
-        console.error(`🔍 已安装 ${skills.length} 个 Skill，交由 AI 决策推荐`);
+        console.error(`🔍 已安装 ${skills.length} 个 Skill，由后端 AI 智能推荐`);
       }
     }
   }
@@ -493,8 +498,22 @@ function getDefaultSkillDirs() {
   const home = process.env.HOME || process.env.USERPROFILE || "";
 
   const candidates = [
+    // Claude Desktop
     path.join(home, ".claude", "skills"),
-    path.join(home, ".config", "opencode", "skill"),
+    // OpenCode
+    path.join(home, ".config", "opencode", "skills"),
+    // 通用 agents 目录（跨工具共享）
+    path.join(home, ".agents", "skills"),
+    // Cursor
+    path.join(home, ".cursor", "skills"),
+    // Windsurf (Codeium)
+    path.join(home, ".codeium", "windsurf", "skills"),
+    // Cline
+    path.join(home, ".cline", "skills"),
+    // Gemini CLI / Gemini Code Assist
+    path.join(home, ".gemini", "skills"),
+    // GitHub Copilot
+    path.join(home, ".copilot", "skills"),
   ];
 
   for (const dir of candidates) {

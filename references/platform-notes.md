@@ -31,5 +31,5 @@ node ./scripts/youwen.js enhance "..." --auto-confirm
 ## 通用
 
 - 命令执行后检查 exit code，非 0 为失败
-- 输出为结构化 JSON，AI Agent 可直接解析
+- stdout 为 `<enhanced>...</enhanced>` 结构化文本，AI Agent 可直接解析
 - 始终使用 `--auto-confirm`，AI Agent 无法进行交互式输入

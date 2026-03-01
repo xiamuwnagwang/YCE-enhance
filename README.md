@@ -105,13 +105,16 @@ node scripts/youwen.js enhance "解释 useEffect" --auto-confirm --no-search
 
 ```xml
 <enhanced>
-增强后的提示词...
+推荐技能：
+- <用户本地-skill-名称-1>：<结合当前任务的推荐理由>
+- <用户本地-skill-名称-2>：<结合当前任务的推荐理由>
+
+增强提示词正文：
+...
 </enhanced>
-<auto-skills>
-<skill name="ace" reason="推荐使用 ace 辅助完成任务" command="bash ..." />
-<skill name="pplx" reason="联网搜索实时信息" />
-</auto-skills>
 ```
+
+说明：推荐技能名称来自用户本机实际扫描到的 `installed_skills`，不会写死固定 skill 名称。
 
 ## 更新
 

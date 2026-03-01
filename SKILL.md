@@ -58,22 +58,27 @@ node $SKILLS_ROOT/yw-enhance/scripts/youwen.js enhance "用户提示词" \
 
 ## 输出处理
 
-stdout 输出 XML 标签格式：
+stdout 输出 XML 标签格式（仅一个 `<enhanced>` 标签）：
 
 ```xml
 <enhanced>
-增强后的提示词内容...
+推荐技能：
+- <用户本地-skill-名称-1>：推荐理由
+- <用户本地-skill-名称-2>：推荐理由
+
+增强提示词正文：
+...
 </enhanced>
-<auto-skills>
-<skill name="ace" reason="推荐使用 ace 辅助完成任务" command="bash ..." />
-<skill name="pplx" reason="联网搜索实时信息" />
-</auto-skills>
 ```
 
+说明：
+- “推荐技能”小节中的工具名来自**用户本机实际扫描到的 installed_skills**。
+- 不再输出 `<auto-skills>` 标签。
+
 AI Agent 处理步骤：
-1. 读取 `<enhanced>` 内容作为增强提示词
-2. 解析 `<auto-skills>` 中的推荐工具，按需调用
-3. 基于增强提示词继续回答用户（而非原始提示词）
+1. 读取 `<enhanced>` 内容作为增强结果
+2. 从开头“推荐技能”小节提取推荐工具（按需调用）
+3. 使用“增强提示词正文”继续回答用户（而非原始提示词）
 4. stderr 进度信息和 `--- Token 统计 ---` 不展示给用户
 5. exit code 非 0 → 失败，直接用原始提示词回答
 
@@ -109,6 +114,40 @@ AI Agent 处理步骤：
 | `YOUWEN_ENHANCE_MODE` | `agent` / `disabled` | `agent` |
 | `YOUWEN_ENABLE_SEARCH` | `true` / `false` | `true` |
 | `YOUWEN_MGREP_API_KEY` | 语义检索增强 Key | 空 |
+
+## Skill 智能推荐机制
+
+yw-enhance 会自动扫描已安装的所有 skill，并由**后端 AI 智能推荐**与当前任务最相关的 skill。
+
+### 推荐原理
+
+1. **前端扫描**：自动扫描主流 AI 编程工具的 skill 目录：
+   - `~/.claude/skills` (Claude Desktop)
+   - `~/.config/opencode/skills` (OpenCode)
+   - `~/.agents/skills` (通用跨工具共享目录)
+   - `~/.cursor/skills` (Cursor)
+   - `~/.codeium/windsurf/skills` (Windsurf)
+   - `~/.cline/skills` (Cline)
+   - `~/.gemini/skills` (Gemini CLI / Gemini Code Assist)
+   - `~/.copilot/skills` (GitHub Copilot)
+2. **上下文注入**：将所有 skill 的元信息（name, description, triggers, quickStart）传给后端
+3. **AI 决策**：后端 AI 根据用户提示词和会话上下文，智能推荐 3-8 个最相关的 skill
+4. **开头直出**：推荐结果直接出现在 `<enhanced>` 开头“推荐技能”小节中（每行“工具名：推荐理由”）
+5. **名称约束**：展示名称仅允许来自用户本机扫描到的 `installed_skills.name`（不使用内置固定示例名）
+
+### 推荐输出格式
+
+```text
+推荐技能：
+- <用户本地-skill-名称-1>：<结合当前任务的推荐理由>
+- <用户本地-skill-名称-2>：<结合当前任务的推荐理由>
+```
+
+### 优势
+
+- **动态适配**：推荐随用户任务变化，不会推荐无关 skill
+- **零配置**：无需手动维护配置文件，AI 自动决策
+- **高调用率**：明确的触发条件和调用方式，让 AI 立即匹配并执行
 
 ## References
 
