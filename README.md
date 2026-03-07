@@ -1,8 +1,8 @@
 # yw-enhance
 
-> Prompt enhancement for AI coding assistants — English-first, with concise Chinese guidance.
->
-> **中文**：这是一个给 AI 编程助手用的提示词增强 Skill，主展示英文，关键位置补充中文说明。
+English | [中文](./README.zh-CN.md)
+
+> Prompt enhancement for AI coding assistants.
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -15,20 +15,15 @@
 3. Web search
 4. Final prompt enhancement
 
-The goal is simple: give the assistant better context, better intent understanding, and better next-step suggestions.
-
-**中文**：`yw-enhance` 会先理解你的问题，再按需联网补充信息，最后输出一份更适合 AI 助手继续执行的增强提示词。
+The goal is simple: provide better context, better intent understanding, and better next-step suggestions for the assistant.
 
 ## Highlights
 
-- English-first README with Chinese helper notes.
-- 4-agent enhancement pipeline for better prompt quality.
-- `smart` and `always` call modes.
-- Skill auto-discovery and AI-based skill recommendation.
-- Structured `<enhanced>...</enhanced>` output for downstream agents.
-- Works across multiple AI coding tools.
-
-**中文**：重点能力是“增强提示词 + 推荐下一步该用哪些 skill”，适合复杂开发任务和上下文不足的提问。
+- 4-agent enhancement pipeline for better prompt quality
+- `smart` and `always` call modes
+- Skill auto-discovery and AI-based skill recommendation
+- Structured `<enhanced>...</enhanced>` output for downstream agents
+- Works across multiple AI coding tools
 
 ## Supported Tools
 
@@ -43,8 +38,6 @@ The goal is simple: give the assistant better context, better intent understandi
 | Continue | ✅ Supported |
 | Codium | ✅ Supported |
 | Aider | ✅ Supported |
-
-**中文**：`agents` 目标是动态出现的，只有本机存在 `~/.agents/skills` 目录时才会显示。
 
 ## Quick Install
 
@@ -80,8 +73,6 @@ bash install.sh --target windsurf
 .\install.ps1 -Setup
 ```
 
-**中文**：如果你只想装到某一个 AI 工具，用 `--target` 或 `-Target` 最直接。
-
 ## Configuration
 
 Run the interactive setup after installation:
@@ -116,8 +107,6 @@ YOUWEN_CALL_MODE=smart
 | `YOUWEN_MGREP_API_KEY` | No | empty | Optional Mixedbread semantic search key |
 | `YOUWEN_CALL_MODE` | No | `smart` | Call mode: `smart` or `always` |
 
-**中文**：最关键的是 `YOUWEN_TOKEN`，没有它就无法正常调用后端增强能力。
-
 ## Usage
 
 ### Automatic invocation inside an AI assistant
@@ -132,8 +121,6 @@ node $SKILLS_ROOT/yw-enhance/scripts/youwen.js enhance "Your prompt here" \
   --history "User: ...\nAI: ...\nUser: ..." \
   --auto-confirm --auto-skills
 ```
-
-**中文**：如果接到 AI Agent 里，记得传 `--history`，这样增强结果会更准。
 
 ### Manual CLI examples
 
@@ -152,12 +139,10 @@ node scripts/youwen.js enhance "Explain useEffect" --auto-confirm --no-search
 
 ### Recommended runtime behavior
 
-- Pass `--history` for the latest 3-5 turns or a concise summary.
-- Use `--auto-confirm` in agent environments.
-- Use `--auto-skills` when you want the backend to recommend locally installed skills.
-- Keep timeout settings generous: the 4-agent pipeline usually needs 30-60 seconds.
-
-**中文**：不要用很短的超时轮询；这个 skill 本身就是偏“深处理”的链路。
+- Pass `--history` for the latest 3-5 turns or a concise summary
+- Use `--auto-confirm` in agent environments
+- Use `--auto-skills` when you want the backend to recommend locally installed skills
+- Keep timeout settings generous because the 4-agent pipeline usually needs 30-60 seconds
 
 ## Output Format
 
@@ -176,11 +161,9 @@ node scripts/youwen.js enhance "Explain useEffect" --auto-confirm --no-search
 
 Notes:
 
-- Skill names are taken from locally scanned `installed_skills`.
-- The tool does not hardcode a fixed recommendation list.
-- Progress logs and token stats on `stderr` should not be shown to end users.
-
-**中文**：真正要给后续 agent 用的是 `<enhanced>` 里的正文，不是原始用户提问。
+- Skill names are taken from locally scanned `installed_skills`
+- The tool does not hardcode a fixed recommendation list
+- Progress logs and token stats on `stderr` should not be shown to end users
 
 ## Update and Sync
 
@@ -205,8 +188,6 @@ bash install.sh --sync-env
 .\install.ps1 -SyncEnv
 ```
 
-**中文**：更新时会尽量保留已有 `.env` 配置，不用每次重填。
-
 ## Uninstall
 
 ```bash
@@ -222,6 +203,7 @@ bash install.sh --uninstall
 ```text
 yw-enhance/
 ├── README.md
+├── README.zh-CN.md
 ├── SKILL.md
 ├── install.sh
 ├── install.ps1
@@ -233,15 +215,11 @@ yw-enhance/
     └── platform-notes.md
 ```
 
-**中文**：当前仓库里真正存在的就是这些主文件；旧 README 里提到的部分脚本和引用文件已经不在当前目录中。
-
 ## Requirements
 
 - Node.js 16 or newer
 - Network access to `https://a.aigy.de`
 - A valid redeem code / token
-
-**中文**：如果网络到不了后端，或者没有兑换码，增强流程就会失败。
 
 ## License
 
