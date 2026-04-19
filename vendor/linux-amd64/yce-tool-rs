@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Linux x86_64 shim — delegates to the Node.js implementation
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec node "$SCRIPT_DIR/../../scripts/yce-tool-node.js" "$@"
