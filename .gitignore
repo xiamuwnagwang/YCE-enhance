@@ -1,0 +1,16 @@
+.ace-tool/
+.env
+vendor/ace-tool.json
+.DS_Store
+dist/
+
+# sync-noise hardening
+._*
+__pycache__/
+*.pyc
+*.pyo
+*.swp
+*.swo
+*~
+.Spotlight-V100/
+.Trashes/

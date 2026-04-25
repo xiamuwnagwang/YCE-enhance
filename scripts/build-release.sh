@@ -66,6 +66,8 @@ main() {
     "SKILL.md"
     "install.sh"
     "install.ps1"
+    ".env.example"
+    ".gitignore"
   )
 
   for item in "${items[@]}"; do
