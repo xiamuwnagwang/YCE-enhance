@@ -11,6 +11,7 @@ const UPLOAD_SCRIPT = path.join(__dirname, "upload-release.sh");
 const API_BASE = "https://api.github.com";
 const DEFAULT_REPO = "xiamuwnagwang/YCE-enhance";
 const DEFAULT_TARGET_COMMITISH = "main";
+const EXCLUDED_TRACKED_FILES = new Set([".env.example", ".gitignore"]);
 
 function readVersion() {
   const skillPath = path.join(ROOT, "SKILL.md");
@@ -95,7 +96,10 @@ function sanitizeText(text) {
 
 function trackedFiles() {
   const raw = runGit(["ls-files", "-z"]);
-  return raw.split("\0").filter(Boolean);
+  return raw
+    .split("\0")
+    .filter(Boolean)
+    .filter((file) => !EXCLUDED_TRACKED_FILES.has(file));
 }
 
 function requestJson(method, url, tokenHeader, body) {
@@ -150,26 +154,6 @@ async function githubRequest(method, url, tokenHeader, body) {
   return res.body;
 }
 
-async function createBlob(tokenHeader, filePath) {
-  const fullPath = path.join(ROOT, filePath);
-  const raw = fs.readFileSync(fullPath);
-  const executable = isExecutable(fullPath);
-  const binary = isBinaryBuffer(raw);
-
-  if (binary) {
-    return githubRequest("POST", `${API_BASE}/repos/${REPO_SLUG}/git/blobs`, tokenHeader, {
-      content: raw.toString("base64"),
-      encoding: "base64",
-    });
-  }
-
-  const text = sanitizeText(raw.toString("utf8"));
-  return githubRequest("POST", `${API_BASE}/repos/${REPO_SLUG}/git/blobs`, tokenHeader, {
-    content: text,
-    encoding: "utf-8",
-  });
-}
-
 async function upsertGitRef(tokenHeader, ref, sha) {
   const refPath = `refs/${ref}`;
   const getUrl = `${API_BASE}/repos/${REPO_SLUG}/git/${refPath}`;
@@ -192,11 +176,6 @@ async function upsertGitRef(tokenHeader, ref, sha) {
     force: true,
   });
   return "updated";
-}
-
-async function createOrUpdateReleaseTag(tokenHeader, sha, tag) {
-  const status = await createReleaseTagRef(tokenHeader, sha, tag);
-  return status;
 }
 
 async function ensureRelease(tokenHeader, repo, tag, releaseName, body, targetCommitish, isDraft, isPrerelease) {
@@ -315,7 +294,6 @@ async function main() {
 
   console.log(`▸ tracked files: ${files.length}`);
 
-  const blobMap = new Map();
   const treeEntries = [];
   for (const file of files) {
     const full = path.join(ROOT, file);
@@ -338,7 +316,6 @@ async function main() {
         encoding: "utf-8",
       });
     }
-    blobMap.set(file, blob.sha);
     treeEntries.push({
       path: file,
       mode: executable ? "100755" : "100644",
@@ -351,10 +328,18 @@ async function main() {
     tree: treeEntries,
   });
 
+  let parentSha = null;
+  try {
+    const branchRef = await requestJson("GET", `${API_BASE}/repos/${repo}/git/ref/heads/${encodeURIComponent(targetCommitish)}`, authHeader);
+    if (branchRef.statusCode >= 200 && branchRef.statusCode < 300 && branchRef.body && branchRef.body.object && branchRef.body.object.sha) {
+      parentSha = branchRef.body.object.sha;
+    }
+  } catch {}
+
   const commit = await githubRequest("POST", `${API_BASE}/repos/${repo}/git/commits`, authHeader, {
     message: `release ${tag} sanitized snapshot`,
     tree: tree.sha,
-    parents: [],
+    parents: parentSha ? [parentSha] : [],
   });
 
   const tagStatus = await upsertGitRef(authHeader, `tags/${tag}`, commit.sha);
