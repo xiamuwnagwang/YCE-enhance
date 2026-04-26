@@ -154,13 +154,32 @@ async function githubRequest(method, url, tokenHeader, body) {
   return res.body;
 }
 
-async function upsertGitRef(tokenHeader, ref, sha) {
+async function createBlob(tokenHeader, repo, filePath) {
+  const fullPath = path.join(ROOT, filePath);
+  const raw = fs.readFileSync(fullPath);
+  const binary = isBinaryBuffer(raw);
+
+  if (binary) {
+    return githubRequest("POST", `${API_BASE}/repos/${repo}/git/blobs`, tokenHeader, {
+      content: raw.toString("base64"),
+      encoding: "base64",
+    });
+  }
+
+  const text = sanitizeText(raw.toString("utf8"));
+  return githubRequest("POST", `${API_BASE}/repos/${repo}/git/blobs`, tokenHeader, {
+    content: text,
+    encoding: "utf-8",
+  });
+}
+
+async function upsertGitRef(tokenHeader, repo, ref, sha) {
   const refPath = `refs/${ref}`;
-  const getUrl = `${API_BASE}/repos/${REPO_SLUG}/git/${refPath}`;
+  const getUrl = `${API_BASE}/repos/${repo}/git/${refPath}`;
   const existing = await requestJson("GET", getUrl, tokenHeader);
 
   if (existing.statusCode === 404) {
-    await githubRequest("POST", `${API_BASE}/repos/${REPO_SLUG}/git/refs`, tokenHeader, {
+    await githubRequest("POST", `${API_BASE}/repos/${repo}/git/refs`, tokenHeader, {
       ref: `refs/${ref}`,
       sha,
     });
@@ -171,7 +190,7 @@ async function upsertGitRef(tokenHeader, ref, sha) {
     return "unchanged";
   }
 
-  await githubRequest("PATCH", `${API_BASE}/repos/${REPO_SLUG}/git/refs/${ref}`, tokenHeader, {
+  await githubRequest("PATCH", `${API_BASE}/repos/${repo}/git/refs/${ref}`, tokenHeader, {
     sha,
     force: true,
   });
@@ -300,22 +319,8 @@ async function main() {
     if (!fs.existsSync(full) || fs.statSync(full).isDirectory()) {
       continue;
     }
-    const raw = fs.readFileSync(full);
     const executable = isExecutable(full);
-    const binary = isBinaryBuffer(raw);
-    let blob;
-    if (binary) {
-      blob = await githubRequest("POST", `${API_BASE}/repos/${repo}/git/blobs`, authHeader, {
-        content: raw.toString("base64"),
-        encoding: "base64",
-      });
-    } else {
-      const text = sanitizeText(raw.toString("utf8"));
-      blob = await githubRequest("POST", `${API_BASE}/repos/${repo}/git/blobs`, authHeader, {
-        content: text,
-        encoding: "utf-8",
-      });
-    }
+    const blob = await createBlob(authHeader, repo, file);
     treeEntries.push({
       path: file,
       mode: executable ? "100755" : "100644",
@@ -342,8 +347,8 @@ async function main() {
     parents: parentSha ? [parentSha] : [],
   });
 
-  const tagStatus = await upsertGitRef(authHeader, `tags/${tag}`, commit.sha);
-  const branchStatus = await upsertGitRef(authHeader, `heads/${targetCommitish}`, commit.sha);
+  const tagStatus = await upsertGitRef(authHeader, repo, `tags/${tag}`, commit.sha);
+  const branchStatus = await upsertGitRef(authHeader, repo, `heads/${targetCommitish}`, commit.sha);
   console.log(`▸ tag status: ${tagStatus}`);
   console.log(`▸ branch status: ${branchStatus}`);
   console.log(`▸ commit sha: ${commit.sha}`);
