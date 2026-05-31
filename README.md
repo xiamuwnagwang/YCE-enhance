@@ -1,6 +1,8 @@
 # YCE Enhance
 
-**YCE**（Youwen Code Enhancement）是一套面向 AI Agent 的 Cursor Skill：在动手改代码之前，先把模糊需求说清楚，再在目标代码库里精准定位相关实现。
+**YCE**（Youwen Code Enhancement）是一套面向 AI Agent 的 Agent Skill，可安装到 Claude Code、Cursor、Codex、OpenCode、Cline 等常见编码 Agent 环境：在动手改代码之前，先把模糊需求说清楚，再在目标代码库里精准定位相关实现。
+
+搭配 [yce.aigy.de](https://yce.aigy.de) 使用；兑换码请前往 [a.aigy.de](https://a.aigy.de) 获取。
 
 当前版本：**1.6.5**
 
@@ -37,6 +39,8 @@ bash ./install.sh --setup
 .\install.ps1 -Setup
 ```
 
+安装完成后运行 `--setup`，按提示填入从 [a.aigy.de](https://a.aigy.de) 获取的兑换码（写入 `YCE_YOUWEN_TOKEN`）。
+
 ### 调用示例
 
 ```bash
@@ -72,11 +76,21 @@ node ./scripts/yce.js "优化这个任务描述" \
 
 | 变量 | 说明 |
 |------|------|
+| `YCE_YOUWEN_TOKEN` | 兑换码 / Token，前往 [a.aigy.de](https://a.aigy.de) 获取 |
+| `YCE_YOUWEN_API_URL` | 优问增强后端，默认 `https://a.aigy.de` |
 | `YCE_YOUWEN_SCRIPT` | 增强脚本路径，默认 `./scripts/youwen.js` |
 | `YCE_ENGINE_SCRIPT` | 检索引擎路径，默认 `./vendor/yce-engine/yce-engine.mjs` |
 | `YCE_MODE` | 默认模式，通常 `auto` |
 | `YCE_RELAY_URL` | Windows relay 服务地址（可选） |
 | `YCE_RELAY_TOKEN` | Windows relay 认证 token（可选） |
+
+也可直接写入兑换码：
+
+```bash
+bash ./install.sh --setup --youwen-token <your-code>
+# 或
+.\install.ps1 -Setup -YouwenToken <your-code>
+```
 
 检查与同步：
 
@@ -128,5 +142,7 @@ bash ./scripts/upload-release.sh --build
 
 ## 相关链接
 
+- YCE 使用：<https://yce.aigy.de>
+- 兑换码：<https://a.aigy.de>
 - 仓库：<https://github.com/xiamuwnagwang/YCE-enhance>
 - 详细 Skill 文档：见 [`SKILL.md`](./SKILL.md)
