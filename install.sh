@@ -85,6 +85,7 @@ DEFAULT_YOUWEN_MGREP_API_KEY=""
 DEFAULT_YCE_ENGINE_SCRIPT="./vendor/yce-engine/yce-engine.mjs"
 DEFAULT_YCE_ENGINE_MAX_RESULTS="10"
 DEFAULT_YCE_ENGINE_MAX_TURNS="3"
+DEFAULT_YCE_RELAY_URL="https://yce.aigy.de"
 DEFAULT_MODE="auto"
 DEFAULT_TIMEOUT_ENHANCE_MS="300000"
 DEFAULT_TIMEOUT_SEARCH_MS="180000"
@@ -426,6 +427,9 @@ write_runtime_config() {
   fi
   [[ ! -f "$yce_engine_abs" ]] && warn "yce-engine entry not found at $yce_engine_script"
 
+  [[ -z "$yce_relay_url" ]] && yce_relay_url="$DEFAULT_YCE_RELAY_URL"
+  [[ -z "$yce_relay_token" && -n "$youwen_token" ]] && yce_relay_token="$youwen_token"
+
   echo "Generating .env..."
   cat > "$ENV_FILE" <<ENVEOF
 # YCE runtime configuration
@@ -439,8 +443,8 @@ YCE_YOUWEN_ENHANCE_MODE=$youwen_enhance_mode
 YCE_YOUWEN_ENABLE_SEARCH=$youwen_enable_search
 YCE_YOUWEN_MGREP_API_KEY=$youwen_mgrep_api_key
 
-# yce-engine adapter (YCE 本地语义搜索)
-# Windows 下推荐配置 YCE_RELAY_URL/YCE_RELAY_TOKEN；不走 relay 时设置 YCE_API_KEY
+# yce-engine adapter (远端优先：默认连接 yce.aigy.de relay)
+# 兑换码（YCE_YOUWEN_TOKEN）会同步用作 YCE_RELAY_TOKEN；本地 key 需显式 YCE_ALLOW_LOCAL_KEY=true
 YCE_ENGINE_SCRIPT=$yce_engine_script
 YCE_ENGINE_MAX_RESULTS=$yce_engine_max_results
 YCE_ENGINE_MAX_TURNS=$yce_engine_max_turns
@@ -661,8 +665,9 @@ cmd_setup() {
   if [[ "$has_direct_args" == false ]]; then
     echo "─── 交互式配置 ───"
     echo ""
-    printf "${CYAN}${BOLD}提示：${NC} 检索引擎为内置 yce-engine（YCE 本地语义搜索）。\n"
-    printf "      Windows 下推荐配置 ${BOLD}YCE_RELAY_URL/YCE_RELAY_TOKEN${NC}；不走 relay 时可在 .env 设置 ${BOLD}YCE_API_KEY${NC}。\n"
+    printf "${CYAN}${BOLD}提示：${NC} 检索默认连接远端 ${BOLD}${DEFAULT_YCE_RELAY_URL}${NC}。\n"
+    printf "      兑换码请前往 ${BOLD}https://a.aigy.de${NC} 获取，会同时用于增强与检索 relay。\n"
+    printf "      本地 key 自动发现默认关闭；仅在需要时设置 ${BOLD}YCE_ALLOW_LOCAL_KEY=true${NC}。\n"
     echo ""
 
     printf "${CYAN}${BOLD}提示：${NC} 兑换码请前往 ${BOLD}https://a.aigy.de${NC} 获取\n"
@@ -923,7 +928,8 @@ print_help() {
   echo "支持的工具: ${TOOL_KEYS[*]}"
   echo ""
   echo "说明:"
-  echo "  - 检索引擎为内置 yce-engine（YCE 本地语义搜索），Windows 下推荐配置 YCE_RELAY_URL/YCE_RELAY_TOKEN；不走 relay 时在 .env 设置 YCE_API_KEY"
+  echo "  - 检索默认连接远端 relay（${DEFAULT_YCE_RELAY_URL}）；兑换码从 a.aigy.de 获取并写入 YCE_YOUWEN_TOKEN / YCE_RELAY_TOKEN"
+  echo "  - 本地 key 自动发现默认关闭；需要时可设置 YCE_ALLOW_LOCAL_KEY=true"
   echo "  - --setup 会优先复用当前 .env，并优先对齐仓内 scripts/youwen.js 对应的 YCE 根目录配置"
   echo "  - YCE_YOUWEN_SCRIPT 默认使用仓内脚本: $DEFAULT_YOUWEN_SCRIPT；如需特殊覆盖，仍可通过 --youwen-script 或 .env 指定"
   echo "  - 本仓已内置 yce-engine 检索引擎（vendor/yce-engine）与 yce enhance 脚本"

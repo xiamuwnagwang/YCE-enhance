@@ -8,6 +8,10 @@ const {
   summarizeText,
 } = require("../utils");
 
+function isLocalFallbackEnabled(env) {
+  return String(env?.YCE_LOCAL_FALLBACK || "").trim().toLowerCase() === "true";
+}
+
 function mapYceEngineFailure(text) {
   const t = text || "";
   if (/key discovery failed|yceAuthStatus|windsurfAuthStatus|apiKey field is empty|database not found|API Key not found|HTTP 401|HTTP 403/i.test(t)) {
@@ -101,32 +105,34 @@ async function runYceEngineSearch({ query, cwd, scriptPath, timeoutMs, maxResult
     const stdout = (commandResult.stdout || "").trim();
     const semanticFailure = detectYceEngineSemanticFailure(commandResult.stdout, commandResult.stderr);
     if (semanticFailure) {
-      const fallback = runLocalSearch({ query, cwd, maxResults });
-      if (fallback.search.result_present) {
-        fallback.search.raw_stdout = [
-          fallback.search.raw_stdout,
-          "",
-          "Remote yce-engine failed; local fallback was used.",
-          `Remote error: ${semanticFailure.message}`,
-        ].join("\n");
-        return {
-          search: fallback.search,
-          error: buildError("yce-engine", semanticFailure.code, semanticFailure.message),
-          durationMs,
-        };
-      }
-      if (fallback.search.empty_result) {
-        fallback.search.raw_stdout = [
-          fallback.search.raw_stdout,
-          "",
-          "Remote yce-engine failed; local fallback also returned no results.",
-          `Remote error: ${semanticFailure.message}`,
-        ].join("\n");
-        return {
-          search: fallback.search,
-          error: buildError("yce-engine", semanticFailure.code, semanticFailure.message),
-          durationMs,
-        };
+      if (isLocalFallbackEnabled(env)) {
+        const fallback = runLocalSearch({ query, cwd, maxResults });
+        if (fallback.search.result_present) {
+          fallback.search.raw_stdout = [
+            fallback.search.raw_stdout,
+            "",
+            "Remote yce-engine failed; local fallback was used.",
+            `Remote error: ${semanticFailure.message}`,
+          ].join("\n");
+          return {
+            search: fallback.search,
+            error: buildError("yce-engine", semanticFailure.code, semanticFailure.message),
+            durationMs,
+          };
+        }
+        if (fallback.search.empty_result) {
+          fallback.search.raw_stdout = [
+            fallback.search.raw_stdout,
+            "",
+            "Remote yce-engine failed; local fallback also returned no results.",
+            `Remote error: ${semanticFailure.message}`,
+          ].join("\n");
+          return {
+            search: fallback.search,
+            error: buildError("yce-engine", semanticFailure.code, semanticFailure.message),
+            durationMs,
+          };
+        }
       }
       return {
         search: result,
@@ -136,18 +142,20 @@ async function runYceEngineSearch({ query, cwd, scriptPath, timeoutMs, maxResult
     }
 
     if (/Found 0 relevant files|No relevant files found/i.test(stdout) || !stdout) {
-      const fallback = runLocalSearch({ query, cwd, maxResults });
-      if (fallback.search.result_present) {
-        fallback.search.raw_stdout = [
-          fallback.search.raw_stdout,
-          "",
-          "Remote yce-engine returned no results; local fallback was used.",
-        ].join("\n");
-        return {
-          search: fallback.search,
-          error: null,
-          durationMs,
-        };
+      if (isLocalFallbackEnabled(env)) {
+        const fallback = runLocalSearch({ query, cwd, maxResults });
+        if (fallback.search.result_present) {
+          fallback.search.raw_stdout = [
+            fallback.search.raw_stdout,
+            "",
+            "Remote yce-engine returned no results; local fallback was used.",
+          ].join("\n");
+          return {
+            search: fallback.search,
+            error: null,
+            durationMs,
+          };
+        }
       }
       result.success = true;
       result.empty_result = true;
@@ -163,32 +171,34 @@ async function runYceEngineSearch({ query, cwd, scriptPath, timeoutMs, maxResult
   }
 
   const mapped = mapYceEngineFailure(commandResult.stderr || commandResult.stdout);
-  const fallback = runLocalSearch({ query, cwd, maxResults });
-  if (fallback.search.result_present) {
-    fallback.search.raw_stdout = [
-      fallback.search.raw_stdout,
-      "",
-      "Remote yce-engine failed; local fallback was used.",
-      `Remote error: ${mapped.message}`,
-    ].join("\n");
-    return {
-      search: fallback.search,
-      error: buildError("yce-engine", mapped.code, mapped.message),
-      durationMs,
-    };
-  }
-  if (fallback.search.empty_result) {
-    fallback.search.raw_stdout = [
-      fallback.search.raw_stdout,
-      "",
-      "Remote yce-engine failed; local fallback also returned no results.",
-      `Remote error: ${mapped.message}`,
-    ].join("\n");
-    return {
-      search: fallback.search,
-      error: buildError("yce-engine", mapped.code, mapped.message),
-      durationMs,
-    };
+  if (isLocalFallbackEnabled(env)) {
+    const fallback = runLocalSearch({ query, cwd, maxResults });
+    if (fallback.search.result_present) {
+      fallback.search.raw_stdout = [
+        fallback.search.raw_stdout,
+        "",
+        "Remote yce-engine failed; local fallback was used.",
+        `Remote error: ${mapped.message}`,
+      ].join("\n");
+      return {
+        search: fallback.search,
+        error: buildError("yce-engine", mapped.code, mapped.message),
+        durationMs,
+      };
+    }
+    if (fallback.search.empty_result) {
+      fallback.search.raw_stdout = [
+        fallback.search.raw_stdout,
+        "",
+        "Remote yce-engine failed; local fallback also returned no results.",
+        `Remote error: ${mapped.message}`,
+      ].join("\n");
+      return {
+        search: fallback.search,
+        error: buildError("yce-engine", mapped.code, mapped.message),
+        durationMs,
+      };
+    }
   }
   return {
     search: result,

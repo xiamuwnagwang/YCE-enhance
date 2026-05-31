@@ -653,17 +653,18 @@ async function autoDiscoverApiKey() {
 }
 
 let _leasedRelay = null;
-
-function _normalizeRelayUrl(raw) {
-  return String(raw || "").trim().replace(/\/+$/, "");
-}
+let _lastRelayError = "";
 
 async function leaseApiKeyFromRelay() {
   if (_leasedRelay?.apiKey) return _leasedRelay.apiKey;
 
-  const relayUrl = _normalizeRelayUrl(process.env.YCE_RELAY_URL);
-  const relayToken = String(process.env.YCE_RELAY_TOKEN || "").trim();
-  if (!relayUrl || !relayToken) return null;
+  _lastRelayError = "";
+  const relayUrl = _normalizeRelayUrl(process.env.YCE_RELAY_URL) || "https://yce.aigy.de";
+  const relayToken = String(process.env.YCE_RELAY_TOKEN || process.env.YCE_YOUWEN_TOKEN || "").trim();
+  if (!relayToken) {
+    _lastRelayError = "missing relay token (set YCE_RELAY_TOKEN or YCE_YOUWEN_TOKEN)";
+    return null;
+  }
 
   try {
     const response = await fetch(`${relayUrl}/yce/lease-key`, {
@@ -676,6 +677,7 @@ async function leaseApiKeyFromRelay() {
     });
 
     if (!response.ok) {
+      _lastRelayError = `relay lease failed: HTTP ${response.status} from ${relayUrl}/yce/lease-key`;
       return null;
     }
 
@@ -691,9 +693,14 @@ async function leaseApiKeyFromRelay() {
       relayToken,
     };
     return _leasedRelay.apiKey;
-  } catch {
+  } catch (error) {
+    _lastRelayError = `relay lease error: ${error?.message || String(error)}`;
     return null;
   }
+}
+
+function _normalizeRelayUrl(raw) {
+  return String(raw || "").trim().replace(/\/+$/, "");
 }
 
 function _relayUsageContextForApiKey(apiKey) {
@@ -752,20 +759,29 @@ async function _reportYceUsage(usageContext, { statusCode = null, errorMessage =
 }
 
 /**
- * Get API key from relay lease, env var, or auto-discovery.
+ * Get API key from relay lease, env var, or optional local auto-discovery.
  * @returns {Promise<string>}
  */
+function allowLocalKeyDiscovery() {
+  return String(process.env.YCE_ALLOW_LOCAL_KEY || "").trim().toLowerCase() === "true";
+}
+
 async function getApiKey() {
   const leased = await leaseApiKeyFromRelay();
   if (leased) return leased;
 
   const key = process.env.YCE_API_KEY;
   if (key) return key;
-  const discovered = await autoDiscoverApiKey();
-  if (discovered) return discovered;
+
+  if (allowLocalKeyDiscovery()) {
+    const discovered = await autoDiscoverApiKey();
+    if (discovered) return discovered;
+  }
+
   throw new Error(
-    "YCE API key not found. Configure YCE_RELAY_URL/YCE_RELAY_TOKEN or set YCE_API_KEY. " +
-    "Run yce-engine.mjs --check-key to see key discovery details."
+    "YCE API key not found. Configure YCE_RELAY_URL/YCE_RELAY_TOKEN (default relay: https://yce.aigy.de; 兑换码可从 https://a.aigy.de 获取) " +
+    "or set YCE_API_KEY. Local key discovery is disabled unless YCE_ALLOW_LOCAL_KEY=true. " +
+    "Run yce-engine.mjs --check-key to verify relay connectivity."
   );
 }
 
@@ -2030,5 +2046,22 @@ export async function extractKeyInfo(dbPath) {
   if (leased) {
     return { api_key: leased, db_path: "relay:/yce/lease-key" };
   }
-  return extractKey(dbPath);
+
+  const envKey = String(process.env.YCE_API_KEY || "").trim();
+  if (envKey) {
+    return { api_key: envKey, db_path: "env:YCE_API_KEY" };
+  }
+
+  if (allowLocalKeyDiscovery()) {
+    return extractKey(dbPath);
+  }
+
+  return {
+    error: "YCE relay key lease failed.",
+    hint:
+      "Configure YCE_RELAY_URL/YCE_RELAY_TOKEN (default relay: https://yce.aigy.de; 兑换码可从 https://a.aigy.de 获取). " +
+      "Local discovery requires YCE_ALLOW_LOCAL_KEY=true.",
+    detail: _lastRelayError || undefined,
+    db_path: _normalizeRelayUrl(process.env.YCE_RELAY_URL) || "https://yce.aigy.de",
+  };
 }

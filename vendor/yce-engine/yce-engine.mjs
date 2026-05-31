@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const SKILL_DIR = resolve(SCRIPT_DIR, "..");
+const ROOT_DIR = resolve(SCRIPT_DIR, "..", "..");
 const CORE_PATH = join(SCRIPT_DIR, "lib", "core.mjs");
 
 function usage() {
@@ -212,7 +212,32 @@ async function loadCore() {
   return import(pathToFileURL(CORE_PATH).href);
 }
 
+function loadRuntimeDotEnv() {
+  const envPath = join(ROOT_DIR, ".env");
+  if (!existsSync(envPath)) return;
+
+  for (const line of readFileSync(envPath, "utf8").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    const value = trimmed.slice(eq + 1).trim();
+    if (!process.env[key] || !String(process.env[key]).trim()) {
+      process.env[key] = value;
+    }
+  }
+
+  if (!process.env.YCE_RELAY_URL) {
+    process.env.YCE_RELAY_URL = "https://yce.aigy.de";
+  }
+  if (!process.env.YCE_RELAY_TOKEN && process.env.YCE_YOUWEN_TOKEN) {
+    process.env.YCE_RELAY_TOKEN = process.env.YCE_YOUWEN_TOKEN;
+  }
+}
+
 async function main() {
+  loadRuntimeDotEnv();
   let opts;
   try {
     opts = parseArgs(process.argv.slice(2));
@@ -235,7 +260,8 @@ async function main() {
       if (result.error) {
         console.error(`YCE key discovery failed: ${result.error}`);
         if (result.hint) console.error(result.hint);
-        if (result.db_path) console.error(`DB path: ${result.db_path}`);
+        if (result.detail) console.error(result.detail);
+        if (result.db_path) console.error(`Relay: ${result.db_path}`);
         process.exit(1);
       }
 
@@ -260,7 +286,7 @@ async function main() {
         process.exit(1);
       }
 
-      console.log("YCE key discovered (search-ready).");
+      console.log("YCE key ready (search-ready).");
       console.log(`Key: ${maskKey(result.api_key)}`);
       console.log(`Source: ${result.db_path}`);
       return;

@@ -16,11 +16,11 @@
 
 核心能力：
 
-- **提示词增强**：通过内置 `youwen.js` 链路把口语化需求整理成可执行的检索 query
-- **语义检索**：内置 `yce-engine` 本地搜索引擎，不依赖外部 mgrep
+- **提示词增强**：通过 [a.aigy.de](https://a.aigy.de) 兑换码连接优问增强后端
+- **语义检索**：默认经 [yce.aigy.de](https://yce.aigy.de) relay 连接远端推理；本地只做命令执行，不上传代码
 - **统一 XML 输出**：`scripts/yce.js` 对外固定输出 XML 契约，便于 Agent 解析
 - **多工具安装**：一键安装到 Claude Code、Cursor、Codex、OpenCode 等常见 Agent 环境
-- **Windows Relay**：Windows 下可通过 `YCE_RELAY_URL` / `YCE_RELAY_TOKEN` 租借 key
+- **远端优先**：默认不走本地 Windsurf key；仅在显式设置 `YCE_ALLOW_LOCAL_KEY=true` 时才启用本地 key 发现
 
 ## 快速开始
 
@@ -78,11 +78,13 @@ node ./scripts/yce.js "优化这个任务描述" \
 |------|------|
 | `YCE_YOUWEN_TOKEN` | 兑换码 / Token，前往 [a.aigy.de](https://a.aigy.de) 获取 |
 | `YCE_YOUWEN_API_URL` | 优问增强后端，默认 `https://a.aigy.de` |
+| `YCE_RELAY_URL` | 检索 relay 地址，默认 `https://yce.aigy.de` |
+| `YCE_RELAY_TOKEN` | 检索 relay 鉴权；默认同 `YCE_YOUWEN_TOKEN` |
 | `YCE_YOUWEN_SCRIPT` | 增强脚本路径，默认 `./scripts/youwen.js` |
 | `YCE_ENGINE_SCRIPT` | 检索引擎路径，默认 `./vendor/yce-engine/yce-engine.mjs` |
 | `YCE_MODE` | 默认模式，通常 `auto` |
-| `YCE_RELAY_URL` | Windows relay 服务地址（可选） |
-| `YCE_RELAY_TOKEN` | Windows relay 认证 token（可选） |
+| `YCE_ALLOW_LOCAL_KEY` | 设为 `true` 时才允许本地 key 自动发现（默认关闭） |
+| `YCE_LOCAL_FALLBACK` | 设为 `true` 时远端失败才启用本地 fast fallback（默认关闭） |
 
 也可直接写入兑换码：
 

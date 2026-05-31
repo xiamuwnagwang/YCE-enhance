@@ -62,6 +62,7 @@ $DefaultYouwenMgrepApiKey = ""
 $DefaultYceEngineScript = ".\vendor\yce-engine\yce-engine.mjs"
 $DefaultYceEngineMaxResults = "10"
 $DefaultYceEngineMaxTurns = "3"
+$DefaultYceRelayUrl = "https://yce.aigy.de"
 $DefaultMode = "auto"
 $DefaultTimeoutEnhance = "300000"
 $DefaultTimeoutSearch = "180000"
@@ -437,6 +438,9 @@ function Write-RuntimeConfig {
   }
   if (-not (Test-Path $resolvedEngine)) { Write-Warn "yce-engine 入口不存在: $RuntimeYceEngineScript" }
 
+  if (-not $RuntimeYceRelayUrl) { $RuntimeYceRelayUrl = $DefaultYceRelayUrl }
+  if (-not $RuntimeYceRelayToken -and $RuntimeYouwenToken) { $RuntimeYceRelayToken = $RuntimeYouwenToken }
+
   if ($DryRun) {
     Write-DryRun "将生成 .env"
     Write-DryRun "  .env => $EnvFile"
@@ -470,8 +474,8 @@ function Write-RuntimeConfig {
     "YCE_YOUWEN_ENABLE_SEARCH=$RuntimeYouwenEnableSearch"
     "YCE_YOUWEN_MGREP_API_KEY=$RuntimeYouwenMgrepApiKey"
     ""
-    "# yce-engine adapter (YCE 本地语义搜索)"
-    "# Windows 下推荐配置 YCE_RELAY_URL/YCE_RELAY_TOKEN；不走 relay 时设置 YCE_API_KEY"
+    "# yce-engine adapter (远端优先：默认连接 yce.aigy.de relay)"
+    "# 兑换码（YCE_YOUWEN_TOKEN）会同步用作 YCE_RELAY_TOKEN；本地 key 需显式 YCE_ALLOW_LOCAL_KEY=true"
     "YCE_ENGINE_SCRIPT=$RuntimeYceEngineScript"
     "YCE_ENGINE_MAX_RESULTS=$RuntimeYceEngineMaxResults"
     "YCE_ENGINE_MAX_TURNS=$RuntimeYceEngineMaxTurns"
@@ -761,8 +765,9 @@ function Invoke-Setup {
   if (-not $hasDirectArgs -or $Edit -or $Reset) {
     Write-Host '--- 交互式配置 ---'
     Write-Host ''
-    Write-Host '提示：检索引擎为内置 yce-engine（YCE 本地语义搜索）。' -ForegroundColor Cyan
-    Write-Host '      Windows 下推荐配置 YCE_RELAY_URL/YCE_RELAY_TOKEN；不走 relay 时可在 .env 设置 YCE_API_KEY。' -ForegroundColor Cyan
+    Write-Host '提示：检索默认连接远端 https://yce.aigy.de。' -ForegroundColor Cyan
+    Write-Host '      兑换码请前往 https://a.aigy.de 获取，会同时用于增强与检索 relay。' -ForegroundColor Cyan
+    Write-Host '      本地 key 自动发现默认关闭；仅在需要时设置 YCE_ALLOW_LOCAL_KEY=true。' -ForegroundColor Cyan
     Write-Host ''
 
     Write-Host "yw-enhance 脚本当前: $(if ($runtimeYouwen) { $runtimeYouwen } else { '未检测到仓内脚本' })"
@@ -904,7 +909,8 @@ if ($Help) {
   Write-Host "支持的工具: $($ToolMap.Key -join ', ')"
   Write-Host ''
   Write-Host '说明:'
-  Write-Host '  - 检索引擎为内置 yce-engine（YCE 本地语义搜索），Windows 下推荐配置 YCE_RELAY_URL/YCE_RELAY_TOKEN；不走 relay 时在 .env 设置 YCE_API_KEY'
+  Write-Host '  - 检索默认连接远端 relay（https://yce.aigy.de）；兑换码从 a.aigy.de 获取并写入 YCE_YOUWEN_TOKEN / YCE_RELAY_TOKEN'
+  Write-Host '  - 本地 key 自动发现默认关闭；需要时可设置 YCE_ALLOW_LOCAL_KEY=true'
   Write-Host '  - -Setup 会优先复用当前 .env，并优先对齐仓内 scripts\youwen.js 对应的 YCE 根目录配置'
   Write-Host "  - YCE_YOUWEN_SCRIPT 默认使用仓内脚本: $DefaultYouwenScript；如需特殊覆盖，仍可通过 -YouwenScript 或 .env 指定"
   Write-Host '  - 本仓已内置 yce-engine 检索引擎（vendor\yce-engine）与 yce enhance 脚本'
