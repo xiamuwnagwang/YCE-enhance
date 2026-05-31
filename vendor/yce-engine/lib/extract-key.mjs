@@ -1,5 +1,5 @@
 /**
- * Windsurf API Key extraction from local installation.
+ * YCE-compatible API key extraction from local installation.
  *
  * Cross-platform: macOS / Windows / Linux.
  * Uses sql.js (pure JS/WASM) to read state.vscdb — no native compilation needed.
@@ -11,7 +11,7 @@ import { homedir, platform } from "node:os";
 import initSqlJs from "sql.js";
 
 /**
- * Get the platform-specific path to Windsurf's state.vscdb.
+ * Get the platform-specific path to the local key database.
  * @returns {string}
  */
 export function getDbPath() {
@@ -32,7 +32,7 @@ export function getDbPath() {
 }
 
 /**
- * Extract API Key from Windsurf state.vscdb.
+ * Extract API key from the local key database.
  * @param {string} [dbPath]
  * @returns {Promise<{ api_key?: string, db_path: string, error?: string, hint?: string }>}
  */
@@ -43,8 +43,8 @@ export async function extractKey(dbPath) {
 
   if (!existsSync(dbPath)) {
     return {
-      error: `Windsurf database not found: ${dbPath}`,
-      hint: "Ensure Windsurf is installed and logged in.",
+      error: `YCE local key database not found: ${dbPath}`,
+      hint: "Configure YCE_RELAY_URL/YCE_RELAY_TOKEN or set YCE_API_KEY.",
       db_path: dbPath,
     };
   }
@@ -64,7 +64,7 @@ export async function extractKey(dbPath) {
       stmt.free();
       return {
         error: "windsurfAuthStatus record not found",
-        hint: "Ensure Windsurf is logged in.",
+        hint: "Configure YCE_RELAY_URL/YCE_RELAY_TOKEN or set YCE_API_KEY.",
         db_path: dbPath,
       };
     }
@@ -93,8 +93,8 @@ export async function extractKey(dbPath) {
 }
 
 /**
- * Whether a key read from state.vscdb can be used for Devstral search auto-discovery.
- * Windsurf may store legacy `sk-ws-...` keys or newer `devin-session-token$...` session tokens.
+ * Whether a key read from local storage can be used for YCE search auto-discovery.
+ * YCE-compatible backends may store legacy `sk-ws-...` keys or newer `devin-session-token$...` session tokens.
  * @param {string} apiKey
  * @returns {boolean}
  */

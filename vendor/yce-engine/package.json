@@ -1,7 +1,7 @@
 {
   "name": "yce-engine",
   "version": "0.1.0",
-  "description": "Vendored semantic code search engine for the YCE skill. Runs Windsurf Devstral search locally without an MCP server. Adapted from fast-context-mcp.",
+  "description": "Vendored semantic code search engine for the YCE skill. Runs YCE semantic search locally without an MCP server.",
   "license": "MIT",
   "type": "module",
   "private": true,

@@ -52,13 +52,12 @@ get_codex_skills_root() {
 OPENCODE_SKILLS_ROOT="$(get_opencode_skills_root)"
 CODEX_SKILLS_ROOT="$(get_codex_skills_root)"
 
-TOOL_KEYS=("claude" "opencode" "cursor" "windsurf" "cline" "continue" "codium" "aider" "codex")
-TOOL_LABELS=("Claude Code" "OpenCode" "Cursor" "Windsurf" "Cline" "Continue" "Codium" "Aider" "Codex")
+TOOL_KEYS=("claude" "opencode" "cursor" "cline" "continue" "codium" "aider" "codex")
+TOOL_LABELS=("Claude Code" "OpenCode" "Cursor" "Cline" "Continue" "Codium" "Aider" "Codex")
 TOOL_DIRS=(
   "$HOME/.claude/skills/$SKILL_NAME"
   "$OPENCODE_SKILLS_ROOT/$SKILL_NAME"
   "$HOME/.cursor/skills/$SKILL_NAME"
-  "$HOME/.windsurf/skills/$SKILL_NAME"
   "$HOME/.cline/skills/$SKILL_NAME"
   "$HOME/.continue/skills/$SKILL_NAME"
   "$HOME/.codium/skills/$SKILL_NAME"
@@ -410,9 +409,11 @@ write_runtime_config() {
   local yce_engine_script="${7:-$DEFAULT_YCE_ENGINE_SCRIPT}"
   local yce_engine_max_results="${8:-$DEFAULT_YCE_ENGINE_MAX_RESULTS}"
   local yce_engine_max_turns="${9:-$DEFAULT_YCE_ENGINE_MAX_TURNS}"
-  local mode="${10:-$DEFAULT_MODE}"
-  local timeout_enhance_ms="${11:-$DEFAULT_TIMEOUT_ENHANCE_MS}"
-  local timeout_search_ms="${12:-$DEFAULT_TIMEOUT_SEARCH_MS}"
+  local yce_relay_url="${10:-}"
+  local yce_relay_token="${11:-}"
+  local mode="${12:-$DEFAULT_MODE}"
+  local timeout_enhance_ms="${13:-$DEFAULT_TIMEOUT_ENHANCE_MS}"
+  local timeout_search_ms="${14:-$DEFAULT_TIMEOUT_SEARCH_MS}"
 
   local youwen_abs yce_engine_abs
   youwen_abs="$(resolve_path_from_script_dir "$youwen_script")"
@@ -438,11 +439,13 @@ YCE_YOUWEN_ENHANCE_MODE=$youwen_enhance_mode
 YCE_YOUWEN_ENABLE_SEARCH=$youwen_enable_search
 YCE_YOUWEN_MGREP_API_KEY=$youwen_mgrep_api_key
 
-# yce-engine adapter (Windsurf Devstral 本地语义搜索)
-# key 运行时自动从本机 Windsurf 发现；不依赖本地 Windsurf 时设置 YCE_API_KEY
+# yce-engine adapter (YCE 本地语义搜索)
+# Windows 下推荐配置 YCE_RELAY_URL/YCE_RELAY_TOKEN；不走 relay 时设置 YCE_API_KEY
 YCE_ENGINE_SCRIPT=$yce_engine_script
 YCE_ENGINE_MAX_RESULTS=$yce_engine_max_results
 YCE_ENGINE_MAX_TURNS=$yce_engine_max_turns
+YCE_RELAY_URL=$yce_relay_url
+YCE_RELAY_TOKEN=$yce_relay_token
 # YCE_API_KEY=
 
 # yce orchestrator (milliseconds)
@@ -572,6 +575,8 @@ cmd_setup() {
   local yce_engine_script=""
   local yce_engine_max_results=""
   local yce_engine_max_turns=""
+  local yce_relay_url=""
+  local yce_relay_token=""
   local mode=""
   local timeout_enhance_ms=""
   local timeout_search_ms=""
@@ -587,6 +592,8 @@ cmd_setup() {
       --yce-engine-script) has_direct_args=true; yce_engine_script="$2"; shift 2 ;;
       --yce-engine-max-results) has_direct_args=true; yce_engine_max_results="$2"; shift 2 ;;
       --yce-engine-max-turns) has_direct_args=true; yce_engine_max_turns="$2"; shift 2 ;;
+      --yce-relay-url) has_direct_args=true; yce_relay_url="$2"; shift 2 ;;
+      --yce-relay-token) has_direct_args=true; yce_relay_token="$2"; shift 2 ;;
       --mode) has_direct_args=true; mode="$2"; shift 2 ;;
       --timeout-enhance) has_direct_args=true; timeout_enhance_ms="$2"; shift 2 ;;
       --timeout-search) has_direct_args=true; timeout_search_ms="$2"; shift 2 ;;
@@ -639,6 +646,9 @@ cmd_setup() {
   yce_engine_max_turns="${yce_engine_max_turns:-$(read_env_file_value "YCE_ENGINE_MAX_TURNS")}"
   [[ -z "$yce_engine_max_turns" ]] && yce_engine_max_turns="$DEFAULT_YCE_ENGINE_MAX_TURNS"
 
+  yce_relay_url="${yce_relay_url:-$(read_env_file_value "YCE_RELAY_URL")}"
+  yce_relay_token="${yce_relay_token:-$(read_env_file_value "YCE_RELAY_TOKEN")}"
+
   mode="${mode:-$(read_env_file_value "YCE_DEFAULT_MODE")}"
   [[ -z "$mode" ]] && mode="$DEFAULT_MODE"
 
@@ -651,8 +661,8 @@ cmd_setup() {
   if [[ "$has_direct_args" == false ]]; then
     echo "─── 交互式配置 ───"
     echo ""
-    printf "${CYAN}${BOLD}提示：${NC} 检索引擎为内置 yce-engine（Windsurf Devstral 本地搜索）。\n"
-    printf "      key 运行时自动从本机 Windsurf 发现；不依赖本地 Windsurf 时可在 .env 设置 ${BOLD}YCE_API_KEY${NC}。\n"
+    printf "${CYAN}${BOLD}提示：${NC} 检索引擎为内置 yce-engine（YCE 本地语义搜索）。\n"
+    printf "      Windows 下推荐配置 ${BOLD}YCE_RELAY_URL/YCE_RELAY_TOKEN${NC}；不走 relay 时可在 .env 设置 ${BOLD}YCE_API_KEY${NC}。\n"
     echo ""
 
     printf "${CYAN}${BOLD}提示：${NC} 兑换码请前往 ${BOLD}https://a.aigy.de${NC} 获取\n"
@@ -684,6 +694,17 @@ cmd_setup() {
     read -rp "检索超时 ms（回车保留）: " new_val
     [[ -n "$new_val" ]] && timeout_search_ms="$new_val"
     echo ""
+
+    echo "YCE Relay URL 当前: ${yce_relay_url:-（空）}"
+    read -rp "YCE Relay URL（回车保留）: " new_val
+    [[ -n "$new_val" ]] && yce_relay_url="$new_val"
+    echo ""
+
+    echo "YCE Relay Token 当前: ${yce_relay_token:+$(mask_secret "$yce_relay_token")}"
+    [[ -z "$yce_relay_token" ]] && echo "YCE Relay Token 当前: (空)"
+    read -rp "YCE Relay Token（回车保留）: " new_val
+    [[ -n "$new_val" ]] && yce_relay_token="$new_val"
+    echo ""
   fi
 
   info "生成 .env"
@@ -697,6 +718,8 @@ cmd_setup() {
     "$yce_engine_script" \
     "$yce_engine_max_results" \
     "$yce_engine_max_turns" \
+    "$yce_relay_url" \
+    "$yce_relay_token" \
     "$mode" \
     "$timeout_enhance_ms" \
     "$timeout_search_ms"
@@ -891,6 +914,7 @@ print_help() {
   echo "  bash install.sh --target agents            # 仅安装到指定工具"
   echo "  bash install.sh --setup                    # 交互式配置 兑换码 / API（默认使用仓内 scripts/youwen.js）"
   echo "  bash install.sh --setup --youwen-script <path> --youwen-token <code>  # 直接写入 yw-enhance 路径 + 兑换码 / Token"
+  echo "  bash install.sh --setup --yce-relay-url <url> --yce-relay-token <token> # 配置 Windows 推荐的 YCE relay 租 key"
   echo "  bash install.sh --sync                     # 同步脚本 + 配置到其他已安装目录"
   echo "  bash install.sh --sync-env                 # 仅同步 .env"
   echo "  bash install.sh --check                    # 检查安装状态"
@@ -899,13 +923,13 @@ print_help() {
   echo "支持的工具: ${TOOL_KEYS[*]}"
   echo ""
   echo "说明:"
-  echo "  - 检索引擎为内置 yce-engine（Windsurf Devstral 本地搜索），key 运行时自动从本机 Windsurf 发现；不依赖本地 Windsurf 时在 .env 设置 YCE_API_KEY"
+  echo "  - 检索引擎为内置 yce-engine（YCE 本地语义搜索），Windows 下推荐配置 YCE_RELAY_URL/YCE_RELAY_TOKEN；不走 relay 时在 .env 设置 YCE_API_KEY"
   echo "  - --setup 会优先复用当前 .env，并优先对齐仓内 scripts/youwen.js 对应的 YCE 根目录配置"
   echo "  - YCE_YOUWEN_SCRIPT 默认使用仓内脚本: $DEFAULT_YOUWEN_SCRIPT；如需特殊覆盖，仍可通过 --youwen-script 或 .env 指定"
   echo "  - 本仓已内置 yce-engine 检索引擎（vendor/yce-engine）与 yce enhance 脚本"
   echo "  - scripts/lib/* 是内部模块，不应直接配置成 YCE_YOUWEN_SCRIPT"
   echo "  - yw-enhance 扩展参数: --youwen-api-url --youwen-token --youwen-enhance-mode --youwen-enable-search --youwen-mgrep-api-key"
-  echo "  - yce-engine 扩展参数: --yce-engine-script --yce-engine-max-results --yce-engine-max-turns --timeout-enhance --timeout-search"
+  echo "  - yce-engine 扩展参数: --yce-engine-script --yce-engine-max-results --yce-engine-max-turns --yce-relay-url --yce-relay-token --timeout-enhance --timeout-search"
   echo "  - 远程仓地址: $REPO_URL"
 }
 
@@ -948,7 +972,7 @@ main() {
         cmd="help"
         shift
         ;;
-      --youwen-script|--youwen-api-url|--youwen-token|--youwen-enhance-mode|--youwen-enable-search|--youwen-mgrep-api-key|--yce-engine-script|--yce-engine-max-results|--yce-engine-max-turns|--mode|--timeout-enhance|--timeout-search)
+      --youwen-script|--youwen-api-url|--youwen-token|--youwen-enhance-mode|--youwen-enable-search|--youwen-mgrep-api-key|--yce-engine-script|--yce-engine-max-results|--yce-engine-max-turns|--yce-relay-url|--yce-relay-token|--mode|--timeout-enhance|--timeout-search)
         setup_args+=("$1")
         shift
         [[ $# -gt 0 ]] && {

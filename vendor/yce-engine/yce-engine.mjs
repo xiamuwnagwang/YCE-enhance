@@ -34,10 +34,10 @@ Options:
       --no-bootstrap              Disable bootstrap phase
       --bootstrap-max-turns <n>   Bootstrap phase turns
       --bootstrap-max-commands <n> Bootstrap commands per turn
-      --check-key                 Verify Windsurf key discovery without printing the full key
-      --print-key                 Print the full discovered Windsurf key to stdout
+      --check-key                 Verify YCE key discovery without printing the full key
+      --print-key                 Print the full discovered YCE key to stdout
       --key-env                   Print an export command for YCE_API_KEY
-      --db-path <path>            Custom Windsurf state.vscdb path for key commands
+      --db-path <path>            Custom local key database path for key commands
       --help                      Show this help`;
 }
 
@@ -233,7 +233,7 @@ async function main() {
     if (opts.checkKey || opts.printKey || opts.keyEnv) {
       const result = await extractKeyInfo(opts.dbPath);
       if (result.error) {
-        console.error(`Windsurf key discovery failed: ${result.error}`);
+        console.error(`YCE key discovery failed: ${result.error}`);
         if (result.hint) console.error(result.hint);
         if (result.db_path) console.error(`DB path: ${result.db_path}`);
         process.exit(1);
@@ -253,14 +253,14 @@ async function main() {
         pathToFileURL(join(SCRIPT_DIR, "lib", "extract-key.mjs")).href
       );
       if (!isUsableDiscoveredApiKey(result.api_key)) {
-        console.error("Windsurf key found in state.vscdb but format is not usable for search.");
-        console.error("Set YCE_API_KEY or WINDSURF_API_KEY, or re-login Windsurf desktop.");
+        console.error("YCE key was found locally but its format is not usable for search.");
+        console.error("Configure YCE_RELAY_URL/YCE_RELAY_TOKEN or set a fresh YCE_API_KEY.");
         console.error(`Key prefix: ${maskKey(result.api_key)}`);
         console.error(`Source: ${result.db_path}`);
         process.exit(1);
       }
 
-      console.log("Windsurf key discovered (search-ready).");
+      console.log("YCE key discovered (search-ready).");
       console.log(`Key: ${maskKey(result.api_key)}`);
       console.log(`Source: ${result.db_path}`);
       return;

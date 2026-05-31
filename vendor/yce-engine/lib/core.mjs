@@ -1,12 +1,11 @@
 /**
  * YCE Engine — core protocol implementation (Node.js).
  *
- * Reverse-engineered Windsurf SWE-grep Connect-RPC/Protobuf protocol
- * for standalone AI-driven semantic code search.
+ * YCE semantic code search engine.
  *
  * Flow:
- *   query + tree → Windsurf Devstral API
- *   → Devstral returns tool_calls (rg/readfile/tree/ls/glob, up to 8 parallel)
+ *   query + tree → YCE semantic search API
+ *   → YCE returns tool_calls (rg/readfile/tree/ls/glob, up to 8 parallel)
  *   → execute locally → send results back → repeat for N rounds
  *   → ANSWER: file paths + line ranges + suggested rg patterns
  */
@@ -83,7 +82,7 @@ const WS_LS_VER = process.env.WS_LS_VER || "1.9544.35";
 const WS_MODEL = process.env.WS_MODEL || "MODEL_SWE_1_6_FAST";
 const DEBUG_MODE = process.env.YCE_ENGINE_DEBUG === "1" || process.env.YCE_ENGINE_DEBUG === "true" || process.env.FAST_CONTEXT_DEBUG === "1" || process.env.FAST_CONTEXT_DEBUG === "true";
 
-// Default excludes aligned with Windsurf fast-search guidance.
+// Default excludes aligned with YCE fast-search guidance.
 // Minimal defaults — only dirs that are almost never source code.
 // Users can add more via the exclude_paths parameter.
 const DEFAULT_EXCLUDE_PATHS = [
@@ -477,6 +476,7 @@ async function _runBootstrapPhase({
 }) {
   const log = (msg) => onProgress?.(`[bootstrap] ${msg}`);
   const hints = { rgPatterns: [], hotDirs: [] };
+  const usageContext = _relayUsageContextForApiKey(apiKey);
 
   try {
     const { tree: miniMap, depth } = getRepoMap(projectRoot, bootstrapTreeDepth, excludePaths);
@@ -496,7 +496,7 @@ async function _runBootstrapPhase({
       const proto = _buildRequest(apiKey, jwt, messages, toolDefs);
       let respData;
       try {
-        respData = await _streamingRequest(proto, timeoutMs);
+        respData = await _streamingRequest(proto, timeoutMs, 2, usageContext);
       } catch (e) {
         log(`request failed: ${e.code || "UNKNOWN"}`);
         break;
@@ -637,7 +637,7 @@ function getToolDefinitions(maxCommands = 8) {
 // ─── Credentials ───────────────────────────────────────────
 
 /**
- * Auto-discover Windsurf API key from local installation.
+ * Auto-discover a local YCE-compatible API key.
  * @returns {Promise<string|null>}
  */
 async function autoDiscoverApiKey() {
@@ -652,21 +652,21 @@ async function autoDiscoverApiKey() {
   return null;
 }
 
-let _leasedRelayApiKey = null;
+let _leasedRelay = null;
 
 function _normalizeRelayUrl(raw) {
   return String(raw || "").trim().replace(/\/+$/, "");
 }
 
 async function leaseApiKeyFromRelay() {
-  if (_leasedRelayApiKey) return _leasedRelayApiKey;
+  if (_leasedRelay?.apiKey) return _leasedRelay.apiKey;
 
   const relayUrl = _normalizeRelayUrl(process.env.YCE_RELAY_URL);
   const relayToken = String(process.env.YCE_RELAY_TOKEN || "").trim();
   if (!relayUrl || !relayToken) return null;
 
   try {
-    const response = await fetch(`${relayUrl}/windsurf/lease-key`, {
+    const response = await fetch(`${relayUrl}/yce/lease-key`, {
       method: "POST",
       headers: {
         "Accept": "application/json",
@@ -683,10 +683,71 @@ async function leaseApiKeyFromRelay() {
     const apiKey = String(payload?.api_key || "").trim();
     if (!isUsableDiscoveredApiKey(apiKey)) return null;
 
-    _leasedRelayApiKey = apiKey;
-    return _leasedRelayApiKey;
+    _leasedRelay = {
+      apiKey,
+      keyId: String(payload?.key_id || "").trim(),
+      leaseId: String(payload?.lease_id || "").trim(),
+      relayUrl,
+      relayToken,
+    };
+    return _leasedRelay.apiKey;
   } catch {
     return null;
+  }
+}
+
+function _relayUsageContextForApiKey(apiKey) {
+  if (!_leasedRelay?.apiKey || !_leasedRelay.keyId) return null;
+  if (String(apiKey || "").trim() !== _leasedRelay.apiKey) return null;
+  return {
+    keyId: _leasedRelay.keyId,
+    leaseId: _leasedRelay.leaseId,
+    relayUrl: _leasedRelay.relayUrl,
+    relayToken: _leasedRelay.relayToken,
+  };
+}
+
+function _extractStreamErrorMessage(data) {
+  try {
+    const frames = connectFrameDecode(data);
+    for (const frameData of frames) {
+      const textCandidate = frameData.toString("utf-8").trim();
+      if (!textCandidate.startsWith("{")) continue;
+      const errObj = JSON.parse(textCandidate);
+      if (errObj?.error) {
+        const code = errObj.error.code || "unknown";
+        const msg = errObj.error.message || "";
+        return `[Error] ${code}: ${msg}`.trim();
+      }
+    }
+  } catch {
+    // Ignore malformed frames; normal parser will handle the response later.
+  }
+  return "";
+}
+
+async function _reportYceUsage(usageContext, { statusCode = null, errorMessage = "", durationMs = null } = {}) {
+  if (!usageContext?.relayUrl || !usageContext?.relayToken || !usageContext?.keyId) return;
+  try {
+    await fetch(`${usageContext.relayUrl}/yce/usage`, {
+      method: "POST",
+      headers: {
+        "Accept": "application/json",
+        "Authorization": `Bearer ${usageContext.relayToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        key_id: usageContext.keyId,
+        lease_id: usageContext.leaseId || "",
+        event: "code_search",
+        status_code: typeof statusCode === "number" ? statusCode : null,
+        error_message: String(errorMessage || "").slice(0, 1000),
+        duration_ms: typeof durationMs === "number" ? durationMs : null,
+      }),
+      signal: AbortSignal.timeout(3000),
+    });
+  } catch {
+    // Usage reporting must never break local code search.
   }
 }
 
@@ -698,13 +759,13 @@ async function getApiKey() {
   const leased = await leaseApiKeyFromRelay();
   if (leased) return leased;
 
-  const key = process.env.YCE_API_KEY || process.env.WINDSURF_API_KEY;
+  const key = process.env.YCE_API_KEY;
   if (key) return key;
   const discovered = await autoDiscoverApiKey();
   if (discovered) return discovered;
   throw new Error(
-    "Windsurf API Key not found. Set YCE_API_KEY env var or ensure Windsurf is logged in. " +
-    "Run yce-engine.mjs to see extraction methods."
+    "YCE API key not found. Configure YCE_RELAY_URL/YCE_RELAY_TOKEN or set YCE_API_KEY. " +
+    "Run yce-engine.mjs --check-key to see key discovery details."
   );
 }
 
@@ -823,7 +884,7 @@ async function _unaryRequest(url, protoBytes, compress = true) {
  * @param {number} [maxRetries=2]
  * @returns {Promise<Buffer>}
  */
-async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2) {
+async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2, usageContext = null) {
   const frame = connectFrameEncode(protoBytes);
   const url = `${API_BASE}/GetDevstralStream`;
   const traceId = randomUUID().replace(/-/g, "");
@@ -855,6 +916,7 @@ async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2) 
 
   let lastErr;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const startedAt = Date.now();
     try {
       let resp;
       try {
@@ -867,10 +929,17 @@ async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2) 
           throw e;
         }
       }
+      const durationMs = Date.now() - startedAt;
 
       if (!resp.ok) {
         const err = new Error(`HTTP ${resp.status}`);
         err.status = resp.status;
+        await _reportYceUsage(usageContext, {
+          statusCode: resp.status,
+          errorMessage: err.message,
+          durationMs,
+        });
+        err.__yceUsageReported = true;
         // Don't retry on 4xx client errors (except 429)
         if (resp.status >= 400 && resp.status < 500 && resp.status !== 429) {
           throw err;
@@ -884,8 +953,21 @@ async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2) 
       }
 
       const arrayBuf = await resp.arrayBuffer();
-      return Buffer.from(arrayBuf);
+      const data = Buffer.from(arrayBuf);
+      await _reportYceUsage(usageContext, {
+        statusCode: resp.status,
+        errorMessage: _extractStreamErrorMessage(data),
+        durationMs,
+      });
+      return data;
     } catch (e) {
+      if (!e?.__yceUsageReported) {
+        await _reportYceUsage(usageContext, {
+          statusCode: typeof e?.status === "number" ? e.status : null,
+          errorMessage: e?.message || e?.code || "request failed",
+          durationMs: Date.now() - startedAt,
+        });
+      }
       lastErr = e;
       // Don't retry on 4xx client errors (except 429)
       if (e.status && e.status >= 400 && e.status < 500 && e.status !== 429) {
@@ -1501,7 +1583,7 @@ function _parseAnswer(xmlText, projectRoot) {
  * @param {Object} opts
  * @param {string} opts.query - Natural language search query
  * @param {string} opts.projectRoot - Project root directory
- * @param {string} [opts.apiKey] - Windsurf API key (auto-discovered if not set)
+ * @param {string} [opts.apiKey] - YCE-compatible API key (auto-discovered if not set)
  * @param {string} [opts.jwt] - JWT token (auto-fetched if not set)
  * @param {number} [opts.maxTurns=3] - Search rounds
  * @param {number} [opts.maxCommands=8] - Max commands per round
@@ -1545,6 +1627,7 @@ export async function search({
     log("Fetching JWT...");
     jwt = await getCachedJwt(apiKey);
   }
+  const usageContext = _relayUsageContextForApiKey(apiKey);
 
   // Check rate limit
   log("Checking rate limit...");
@@ -1637,7 +1720,7 @@ export async function search({
 
     let respData;
     try {
-      respData = await _streamingRequest(proto, timeoutMs);
+      respData = await _streamingRequest(proto, timeoutMs, 2, usageContext);
     } catch (e) {
       const errCode = e.code || "UNKNOWN";
       const baseMeta = {
@@ -1656,7 +1739,7 @@ export async function search({
         _trimMessages(messages, trimState);
         const retryProto = _buildRequest(apiKey, jwt, messages, toolDefs);
         try {
-          respData = await _streamingRequest(retryProto, timeoutMs);
+          respData = await _streamingRequest(retryProto, timeoutMs, 2, usageContext);
         } catch (retryErr) {
           const retryCode = retryErr.code || errCode;
           return {
@@ -1882,7 +1965,7 @@ export async function searchWithContent({
       if (meta.errorCode === "PAYLOAD_TOO_LARGE" || meta.errorCode === "TIMEOUT") {
         errMsg += `\n[hint] Payload/timeout error. Try: reduce tree_depth, reduce max_turns, add exclude_paths, or narrow project_path to a subdirectory.`;
       } else if (meta.errorCode === "AUTH_ERROR") {
-        errMsg += `\n[hint] Authentication error. The API key may be expired or revoked. Run yce-engine.mjs --check-key, ensure Windsurf is logged in, or set a fresh YCE_API_KEY.`;
+        errMsg += `\n[hint] Authentication error. On Windows this usually means the local desktop key is missing/expired or the relay token was not configured. Configure YCE_RELAY_URL/YCE_RELAY_TOKEN, or set a fresh YCE_API_KEY, then run yce-engine.mjs --check-key.`;
       } else if (meta.errorCode === "RATE_LIMITED") {
         errMsg += `\n[hint] Rate limited. Wait a moment and retry.`;
       } else {
@@ -1939,13 +2022,13 @@ export async function searchWithContent({
 }
 
 /**
- * Extract Windsurf API Key info (for MCP tool use).
+ * Extract YCE API key info (for CLI/tool use).
  * @returns {Promise<Object>}
  */
 export async function extractKeyInfo(dbPath) {
   const leased = await leaseApiKeyFromRelay();
   if (leased) {
-    return { api_key: leased, db_path: "relay:/windsurf/lease-key" };
+    return { api_key: leased, db_path: "relay:/yce/lease-key" };
   }
   return extractKey(dbPath);
 }

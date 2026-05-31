@@ -147,7 +147,8 @@ function buildYceEngineEnv(merged) {
   const childEnv = {};
   const passthroughKeys = [
     "YCE_API_KEY",
-    "WINDSURF_API_KEY",
+    "YCE_RELAY_URL",
+    "YCE_RELAY_TOKEN",
   ];
 
   for (const key of passthroughKeys) {

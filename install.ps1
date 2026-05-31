@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   YCE 一键安装 / 更新 / 配置脚本 (Windows PowerShell 5.1+)
 
@@ -38,6 +38,8 @@ param(
   [string]$YceEngineScript,
   [string]$YceEngineMaxResults,
   [string]$YceEngineMaxTurns,
+  [string]$YceRelayUrl,
+  [string]$YceRelayToken,
   [string]$Mode,
   [string]$TimeoutEnhance,
   [string]$TimeoutSearch,
@@ -262,7 +264,6 @@ function Get-ToolMap {
     @{ Key="claude";   Label="Claude Code"; Dir=Join-Path $env:USERPROFILE ".claude\skills\$SkillName" }
     @{ Key="opencode"; Label="OpenCode";    Dir=Join-Path $env:USERPROFILE ".config\opencode\skills\$SkillName" }
     @{ Key="cursor";   Label="Cursor";      Dir=Join-Path $env:USERPROFILE ".cursor\skills\$SkillName" }
-    @{ Key="windsurf"; Label="Windsurf";    Dir=Join-Path $env:USERPROFILE ".windsurf\skills\$SkillName" }
     @{ Key="cline";    Label="Cline";       Dir=Join-Path $env:USERPROFILE ".cline\skills\$SkillName" }
     @{ Key="continue"; Label="Continue";    Dir=Join-Path $env:USERPROFILE ".continue\skills\$SkillName" }
     @{ Key="codium";   Label="Codium";      Dir=Join-Path $env:USERPROFILE ".codium\skills\$SkillName" }
@@ -419,6 +420,8 @@ function Write-RuntimeConfig {
     [string]$RuntimeYceEngineScript,
     [string]$RuntimeYceEngineMaxResults,
     [string]$RuntimeYceEngineMaxTurns,
+    [string]$RuntimeYceRelayUrl,
+    [string]$RuntimeYceRelayToken,
     [string]$RuntimeMode,
     [string]$RuntimeTimeoutEnhance,
     [string]$RuntimeTimeoutSearch
@@ -446,6 +449,8 @@ function Write-RuntimeConfig {
     Write-DryRun "  YCE_ENGINE_SCRIPT = $RuntimeYceEngineScript"
     Write-DryRun "  YCE_ENGINE_MAX_RESULTS = $RuntimeYceEngineMaxResults"
     Write-DryRun "  YCE_ENGINE_MAX_TURNS = $RuntimeYceEngineMaxTurns"
+    Write-DryRun "  YCE_RELAY_URL = $RuntimeYceRelayUrl"
+    Write-DryRun "  YCE_RELAY_TOKEN = $(if ($RuntimeYceRelayToken) { Get-MaskedValue $RuntimeYceRelayToken } else { '(empty)' })"
     Write-DryRun "  YCE_DEFAULT_MODE = $RuntimeMode"
     Write-DryRun "  YCE_TIMEOUT_ENHANCE_MS = $RuntimeTimeoutEnhance"
     Write-DryRun "  YCE_TIMEOUT_SEARCH_MS = $RuntimeTimeoutSearch"
@@ -465,11 +470,13 @@ function Write-RuntimeConfig {
     "YCE_YOUWEN_ENABLE_SEARCH=$RuntimeYouwenEnableSearch"
     "YCE_YOUWEN_MGREP_API_KEY=$RuntimeYouwenMgrepApiKey"
     ""
-    "# yce-engine adapter (Windsurf Devstral 本地语义搜索)"
-    "# key 运行时自动从本机 Windsurf 发现；不依赖本地 Windsurf 时设置 YCE_API_KEY"
+    "# yce-engine adapter (YCE 本地语义搜索)"
+    "# Windows 下推荐配置 YCE_RELAY_URL/YCE_RELAY_TOKEN；不走 relay 时设置 YCE_API_KEY"
     "YCE_ENGINE_SCRIPT=$RuntimeYceEngineScript"
     "YCE_ENGINE_MAX_RESULTS=$RuntimeYceEngineMaxResults"
     "YCE_ENGINE_MAX_TURNS=$RuntimeYceEngineMaxTurns"
+    "YCE_RELAY_URL=$RuntimeYceRelayUrl"
+    "YCE_RELAY_TOKEN=$RuntimeYceRelayToken"
     "# YCE_API_KEY="
     ""
     "# yce orchestrator (milliseconds)"
@@ -743,17 +750,19 @@ function Invoke-Setup {
   $runtimeYceEngineScript = if ($YceEngineScript) { $YceEngineScript } elseif ($currentVars.ContainsKey('YCE_ENGINE_SCRIPT')) { $currentVars['YCE_ENGINE_SCRIPT'] } else { $DefaultYceEngineScript }
   $runtimeYceEngineMaxResults = if ($YceEngineMaxResults) { $YceEngineMaxResults } elseif ($currentVars.ContainsKey('YCE_ENGINE_MAX_RESULTS')) { $currentVars['YCE_ENGINE_MAX_RESULTS'] } else { $DefaultYceEngineMaxResults }
   $runtimeYceEngineMaxTurns = if ($YceEngineMaxTurns) { $YceEngineMaxTurns } elseif ($currentVars.ContainsKey('YCE_ENGINE_MAX_TURNS')) { $currentVars['YCE_ENGINE_MAX_TURNS'] } else { $DefaultYceEngineMaxTurns }
+  $runtimeYceRelayUrl = if ($YceRelayUrl) { $YceRelayUrl } elseif ($currentVars.ContainsKey('YCE_RELAY_URL')) { $currentVars['YCE_RELAY_URL'] } else { $null }
+  $runtimeYceRelayToken = if ($YceRelayToken) { $YceRelayToken } elseif ($currentVars.ContainsKey('YCE_RELAY_TOKEN')) { $currentVars['YCE_RELAY_TOKEN'] } else { $null }
   $runtimeMode = if ($Mode) { $Mode } elseif ($currentVars.ContainsKey('YCE_DEFAULT_MODE')) { $currentVars['YCE_DEFAULT_MODE'] } else { $DefaultMode }
   $runtimeTimeoutEnhance = if ($TimeoutEnhance) { $TimeoutEnhance } elseif ($currentVars.ContainsKey('YCE_TIMEOUT_ENHANCE_MS')) { $currentVars['YCE_TIMEOUT_ENHANCE_MS'] } else { $DefaultTimeoutEnhance }
   $runtimeTimeoutSearch = if ($TimeoutSearch) { $TimeoutSearch } elseif ($currentVars.ContainsKey('YCE_TIMEOUT_SEARCH_MS')) { $currentVars['YCE_TIMEOUT_SEARCH_MS'] } else { $DefaultTimeoutSearch }
 
-  $hasDirectArgs = $YouwenScript -or $YouwenApiUrl -or $YouwenToken -or $YouwenEnhanceMode -or $YouwenEnableSearch -or $YouwenMgrepApiKey -or $YceEngineScript -or $YceEngineMaxResults -or $YceEngineMaxTurns -or $Mode -or $TimeoutEnhance -or $TimeoutSearch
+  $hasDirectArgs = $YouwenScript -or $YouwenApiUrl -or $YouwenToken -or $YouwenEnhanceMode -or $YouwenEnableSearch -or $YouwenMgrepApiKey -or $YceEngineScript -or $YceEngineMaxResults -or $YceEngineMaxTurns -or $YceRelayUrl -or $YceRelayToken -or $Mode -or $TimeoutEnhance -or $TimeoutSearch
 
   if (-not $hasDirectArgs -or $Edit -or $Reset) {
     Write-Host '--- 交互式配置 ---'
     Write-Host ''
-    Write-Host '提示：检索引擎为内置 yce-engine（Windsurf Devstral 本地搜索）。' -ForegroundColor Cyan
-    Write-Host '      key 运行时自动从本机 Windsurf 发现；不依赖本地 Windsurf 时可在 .env 设置 YCE_API_KEY。' -ForegroundColor Cyan
+    Write-Host '提示：检索引擎为内置 yce-engine（YCE 本地语义搜索）。' -ForegroundColor Cyan
+    Write-Host '      Windows 下推荐配置 YCE_RELAY_URL/YCE_RELAY_TOKEN；不走 relay 时可在 .env 设置 YCE_API_KEY。' -ForegroundColor Cyan
     Write-Host ''
 
     Write-Host "yw-enhance 脚本当前: $(if ($runtimeYouwen) { $runtimeYouwen } else { '未检测到仓内脚本' })"
@@ -791,6 +800,14 @@ function Invoke-Setup {
     $newEngineMaxTurns = Read-Host 'yce-engine max turns（回车保留）'
     if ($newEngineMaxTurns) { $runtimeYceEngineMaxTurns = $newEngineMaxTurns }
 
+    Write-Host "YCE Relay URL 当前: $(if ($runtimeYceRelayUrl) { $runtimeYceRelayUrl } else { '(空)' })"
+    $newRelayUrl = Read-Host 'YCE Relay URL（回车保留）'
+    if ($newRelayUrl) { $runtimeYceRelayUrl = $newRelayUrl }
+
+    Write-Host "YCE Relay Token 当前: $(if ($runtimeYceRelayToken) { Get-MaskedValue $runtimeYceRelayToken } else { '(空)' })"
+    $newRelayToken = Read-Host 'YCE Relay Token（回车保留）'
+    if ($newRelayToken) { $runtimeYceRelayToken = $newRelayToken }
+
     Write-Host "默认模式当前: $runtimeMode"
     $newMode = Read-Host '默认模式（回车保留）'
     if ($newMode) { $runtimeMode = $newMode }
@@ -804,7 +821,7 @@ function Invoke-Setup {
     if ($newSearchTimeout) { $runtimeTimeoutSearch = $newSearchTimeout }
   }
 
-  Write-RuntimeConfig -RuntimeYouwenScript $runtimeYouwen -RuntimeYouwenApiUrl $runtimeYouwenApiUrl -RuntimeYouwenToken $runtimeYouwenToken -RuntimeYouwenEnhanceMode $runtimeYouwenEnhanceMode -RuntimeYouwenEnableSearch $runtimeYouwenEnableSearch -RuntimeYouwenMgrepApiKey $runtimeYouwenMgrepApiKey -RuntimeYceEngineScript $runtimeYceEngineScript -RuntimeYceEngineMaxResults $runtimeYceEngineMaxResults -RuntimeYceEngineMaxTurns $runtimeYceEngineMaxTurns -RuntimeMode $runtimeMode -RuntimeTimeoutEnhance $runtimeTimeoutEnhance -RuntimeTimeoutSearch $runtimeTimeoutSearch
+  Write-RuntimeConfig -RuntimeYouwenScript $runtimeYouwen -RuntimeYouwenApiUrl $runtimeYouwenApiUrl -RuntimeYouwenToken $runtimeYouwenToken -RuntimeYouwenEnhanceMode $runtimeYouwenEnhanceMode -RuntimeYouwenEnableSearch $runtimeYouwenEnableSearch -RuntimeYouwenMgrepApiKey $runtimeYouwenMgrepApiKey -RuntimeYceEngineScript $runtimeYceEngineScript -RuntimeYceEngineMaxResults $runtimeYceEngineMaxResults -RuntimeYceEngineMaxTurns $runtimeYceEngineMaxTurns -RuntimeYceRelayUrl $runtimeYceRelayUrl -RuntimeYceRelayToken $runtimeYceRelayToken -RuntimeMode $runtimeMode -RuntimeTimeoutEnhance $runtimeTimeoutEnhance -RuntimeTimeoutSearch $runtimeTimeoutSearch
 
   $detected = Find-OtherInstalls
   if ($detected.Count -gt 0) {
@@ -887,7 +904,7 @@ if ($Help) {
   Write-Host "支持的工具: $($ToolMap.Key -join ', ')"
   Write-Host ''
   Write-Host '说明:'
-  Write-Host '  - 检索引擎为内置 yce-engine（Windsurf Devstral 本地搜索），key 运行时自动从本机 Windsurf 发现；不依赖本地 Windsurf 时在 .env 设置 YCE_API_KEY'
+  Write-Host '  - 检索引擎为内置 yce-engine（YCE 本地语义搜索），Windows 下推荐配置 YCE_RELAY_URL/YCE_RELAY_TOKEN；不走 relay 时在 .env 设置 YCE_API_KEY'
   Write-Host '  - -Setup 会优先复用当前 .env，并优先对齐仓内 scripts\youwen.js 对应的 YCE 根目录配置'
   Write-Host "  - YCE_YOUWEN_SCRIPT 默认使用仓内脚本: $DefaultYouwenScript；如需特殊覆盖，仍可通过 -YouwenScript 或 .env 指定"
   Write-Host '  - 本仓已内置 yce-engine 检索引擎（vendor\yce-engine）与 yce enhance 脚本'

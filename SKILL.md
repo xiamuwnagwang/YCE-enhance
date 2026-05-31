@@ -44,7 +44,7 @@ node ./scripts/youwen.js enhance "优化这个任务描述" \
 # 5) 手工直调 yce-engine 引擎（仅用于调试 search，本身不会返回 YCE XML）
 node ./vendor/yce-engine/yce-engine.mjs --project "/absolute/path/to/project" --query "定位 provider 列表获取逻辑"
 
-# 5b) 校验本机 Windsurf key 是否可被自动发现
+# 5b) 校验 YCE key 是否可被发现 / 租借
 node ./vendor/yce-engine/yce-engine.mjs --check-key
 
 # 6) 查看帮助（返回 XML 帮助载荷；强制 pretty；exit code 0）
@@ -205,9 +205,12 @@ YCE 的 stdout 固定是 XML，不再输出 JSON。最重要的标签如下：
 | 环境变量 | 默认值 | 作用 |
 |---------|--------|------|
 | `YCE_YOUWEN_SCRIPT` | `./scripts/youwen.js` | 仓内优问增强入口 |
-| `YCE_ENGINE_SCRIPT` | `./vendor/yce-engine/yce-engine.mjs` | yce-engine 检索入口（Windsurf Devstral，本地搜索） |
+| `YCE_ENGINE_SCRIPT` | `./vendor/yce-engine/yce-engine.mjs` | yce-engine 检索入口（YCE 本地语义搜索） |
 | `YCE_ENGINE_MAX_RESULTS` | `10` | 检索返回的最大文件数 |
 | `YCE_ENGINE_MAX_TURNS` | `3` | 检索 agent 的最大轮数 |
+| `YCE_RELAY_URL` | 空 | YCE relay 地址；Windows 推荐配置 |
+| `YCE_RELAY_TOKEN` | 空 | YCE relay 鉴权 token；Windows 推荐配置 |
+| `YCE_API_KEY` | 空 | 不走 relay 时的直连 key |
 | `YCE_DEFAULT_MODE` | `auto` | 默认模式 |
 | `YCE_TIMEOUT_ENHANCE_MS` | `300000` | 默认增强超时 |
 | `YCE_TIMEOUT_SEARCH_MS` | `180000` | 默认检索超时 |
@@ -244,18 +247,18 @@ YCE 调 `yw-enhance` 不是裸调用，而是固定这样拼：
 ```text
 config.yceEngineScript（默认 ./vendor/yce-engine/yce-engine.mjs）
   → node 子进程执行 yce-engine.mjs --project <cwd> --query <q>
-  → Windsurf Devstral agent 在本地循环执行 rg/readfile/tree 收集上下文
+  → YCE semantic agent 在本地循环执行 rg/readfile/tree 收集上下文
   → 返回文件路径 + 行号范围 + 建议 grep 关键词
   → 若 yce-engine 返回 resource_exhausted / 上游错误 / 空结果，则自动启用 local fast fallback
 ```
 
 **关键细节：**
-- 引擎是 Windsurf Devstral 的「本地 agent 搜索」：服务端只做推理，**不上传代码、不建服务端索引**。
-- API key 在每次运行时由脚本自动从本机 Windsurf `state.vscdb` 发现，**无需任何配置**；Windsurf 不需要保持运行。
-- local fast fallback 参考 fast-context / wf 的本地检索能力：目录热点评分、probe grep、path spine、内容锚点、行号聚合；远端 `resource_exhausted` 时仍可返回 `Found N relevant files by local fast fallback`。
+- 引擎是 YCE 的「本地 agent 搜索」：服务端只做推理，**不上传代码、不建服务端索引**。
+- Windows 下推荐配置 `YCE_RELAY_URL/YCE_RELAY_TOKEN` 从 relay 租借 key；不走 relay 时可设置 `YCE_API_KEY`。
+- local fast fallback 参考 YCE 本地检索能力：目录热点评分、probe grep、path spine、内容锚点、行号聚合；远端 `resource_exhausted` 时仍可返回 `Found N relevant files by local fast fallback`。
 - fallback 会跳过 `.git`、`node_modules`、`dist`、`build`、`coverage`、`vendor`、真实 `.env` 等噪声/敏感路径。
 - 退出码 0 且输出含 `Found 0 relevant files` 时映射为 `EMPTY_RESULT`（命令成功但无结果）。
-- 若 key 发现失败，返回 `AUTH_ERROR`（确认本机已安装并登录过 Windsurf）。
+- 若 key 发现 / relay 租借失败，返回 `AUTH_ERROR`（优先检查 `YCE_RELAY_URL/YCE_RELAY_TOKEN` 或 `YCE_API_KEY`）。
 - 排障时先看 `<meta><dependency-paths>` 里的 `yce-engine-script` 路径是否正确。
 
 ### 当前仓库已实际内置的检索资源
@@ -266,9 +269,9 @@ config.yceEngineScript（默认 ./vendor/yce-engine/yce-engine.mjs）
 - `vendor/yce-engine/node_modules/`（自带 `sql.js` / `@vscode/ripgrep` / `tree-node-cli`，无需系统装 rg）
 
 **这意味着：**
-- 任何装了 Windsurf 桌面端并登录过的机器都能直接使用 wf / fast-context 检索链路，跨平台一致（key 与 rg 均自带/自动发现）。
+- 配好 YCE relay 或 `YCE_API_KEY` 的机器即可使用 YCE 检索链路，跨平台一致（rg 随引擎自带）。
 - 不再依赖旧二进制 / 远程上传。
-- 即使 Windsurf 远端临时限流或 `resource_exhausted`，仍会用本地 fast fallback 保持基础定位能力。
+- 即使 YCE 远端临时限流或 `resource_exhausted`，仍会用本地 fast fallback 保持基础定位能力。
 
 ## 常见失败规避点
 
@@ -307,14 +310,14 @@ config.yceEngineScript（默认 ./vendor/yce-engine/yce-engine.mjs）
 - **原因**：`vendor/yce-engine/yce-engine.mjs` 或其 `node_modules` 不存在（仓库被裁剪、未完整同步）
 - **处理**：核对 `meta.dependency_paths.yce-engine-script` 指向的文件存在，且 `vendor/yce-engine/node_modules` 完整
 
-### 7. Windsurf key 发现失败
+### 7. YCE key 发现 / relay 租借失败
 - **症状**：`errors[].code === "AUTH_ERROR"`
-- **原因**：本机未安装 Windsurf 桌面端，或从未登录过，`state.vscdb` 里没有 `apiKey`
-- **处理**：安装并登录一次 Windsurf 桌面端；用 `node ./vendor/yce-engine/yce-engine.mjs --check-key` 验证；CI/远程机可手动导出 `WINDSURF_API_KEY`
+- **原因**：Windows 未配置 `YCE_RELAY_URL/YCE_RELAY_TOKEN`，或本地 `YCE_API_KEY` 缺失 / 过期
+- **处理**：先运行 `install.ps1 -Setup -YceRelayUrl <url> -YceRelayToken <token>` 写入 relay 配置；不走 relay 时手动设置 `YCE_API_KEY`；再用 `node ./vendor/yce-engine/yce-engine.mjs --check-key` 验证
 
-### 7.5 Windsurf 远端 `resource_exhausted`
+### 7.5 YCE 远端 `resource_exhausted`
 - **症状**：`errors[].code === "UPSTREAM_ERROR"`，message 包含 `resource_exhausted` / `internal error occurred` / `trace ID`
-- **原因**：本机 key 可发现但 wf / fast-context 远端搜索服务返回资源耗尽或服务端内部错误
+- **原因**：key 可用但 YCE 远端搜索服务返回资源耗尽或服务端内部错误
 - **处理**：YCE 会自动启用 local fast fallback；若必须使用远端语义检索，先用 `node ./vendor/yce-engine/yce-engine.mjs --check-key` 确认 key，再直调 yce-engine 或 fast-context 复现上游错误
 
 ### 7.6 yce 有新版本可用
@@ -352,7 +355,7 @@ bash ./install.sh --uninstall
 .\install.ps1 -Uninstall
 ```
 
-> 检索引擎已切换为内置的 yce-engine（Windsurf Devstral / wf fast-context 链路）；key 由脚本运行时自动从本机 Windsurf 发现。
+> 检索引擎已切换为内置的 yce-engine（YCE 本地语义搜索链路）；Windows 下推荐通过 `YCE_RELAY_URL/YCE_RELAY_TOKEN` 租借 key。
 
 ## 打包 / 发布
 
@@ -376,7 +379,7 @@ bash ./scripts/build-release.sh
   - `./scripts/lib/utils.js`
   - `./scripts/lib/adapters/yceEngineSearch.js`
   - `./scripts/lib/adapters/ywEnhance.js`
-  - `./vendor/yce-engine/`（vendored Windsurf Devstral 检索引擎）
+  - `./vendor/yce-engine/`（vendored YCE 语义检索引擎）
 
 规则：
 - `YCE_YOUWEN_SCRIPT` 默认应指向 `./scripts/youwen.js`
