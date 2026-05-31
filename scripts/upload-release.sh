@@ -126,7 +126,10 @@ resolve_auth_header() {
 }
 
 collect_assets() {
-  mapfile -t ASSET_FILES < <(find "$DIST_DIR" -maxdepth 1 -type f | sort)
+  ASSET_FILES=()
+  while IFS= read -r asset_file; do
+    ASSET_FILES+=("$asset_file")
+  done < <(find "$DIST_DIR" -maxdepth 1 -type f | sort)
   [[ ${#ASSET_FILES[@]} -gt 0 ]] || die "No release assets found in: $DIST_DIR"
 }
 
