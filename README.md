@@ -20,7 +20,7 @@
 - **语义检索**：默认经 [yce.aigy.de](https://yce.aigy.de) relay 连接远端推理；本地只做命令执行，不上传代码
 - **统一 XML 输出**：`scripts/yce.js` 对外固定输出 XML 契约，便于 Agent 解析
 - **多工具安装**：一键安装到 Claude Code、Cursor、Codex、OpenCode 等常见 Agent 环境
-- **远端优先**：默认不走本地 Windsurf key；仅在显式设置 `YCE_ALLOW_LOCAL_KEY=true` 时才启用本地 key 发现
+- **远端优先**：检索经 `yce.aigy.de` relay 租 key；也可手动设置 `YCE_API_KEY`
 
 ## 快速开始
 
@@ -39,7 +39,7 @@ bash ./install.sh --setup
 .\install.ps1 -Setup
 ```
 
-安装完成后运行 `--setup`，按提示填入从 [a.aigy.de](https://a.aigy.de) 获取的兑换码（写入 `YCE_YOUWEN_TOKEN`）。
+安装完成后运行 `--setup`，按提示填入从 [a.aigy.de](https://a.aigy.de) 获取的兑换码，并选择是否启用**本地检索 fallback**（远端失败时用本机 rg/heuristic 继续定位）。
 
 ### 调用示例
 
@@ -83,15 +83,14 @@ node ./scripts/yce.js "优化这个任务描述" \
 | `YCE_YOUWEN_SCRIPT` | 增强脚本路径，默认 `./scripts/youwen.js` |
 | `YCE_ENGINE_SCRIPT` | 检索引擎路径，默认 `./vendor/yce-engine/yce-engine.mjs` |
 | `YCE_MODE` | 默认模式，通常 `auto` |
-| `YCE_ALLOW_LOCAL_KEY` | 设为 `true` 时才允许本地 key 自动发现（默认关闭） |
 | `YCE_LOCAL_FALLBACK` | 设为 `true` 时远端失败才启用本地 fast fallback（默认关闭） |
 
-也可直接写入兑换码：
+也可直接写入兑换码与本地检索选项：
 
 ```bash
-bash ./install.sh --setup --youwen-token <your-code>
+bash ./install.sh --setup --youwen-token <your-code> --local-fallback true
 # 或
-.\install.ps1 -Setup -YouwenToken <your-code>
+.\install.ps1 -Setup -YouwenToken <your-code> -LocalFallback true
 ```
 
 检查与同步：

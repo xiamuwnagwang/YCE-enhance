@@ -44,7 +44,7 @@ node ./scripts/youwen.js enhance "优化这个任务描述" \
 # 5) 手工直调 yce-engine 引擎（仅用于调试 search，本身不会返回 YCE XML）
 node ./vendor/yce-engine/yce-engine.mjs --project "/absolute/path/to/project" --query "定位 provider 列表获取逻辑"
 
-# 5b) 校验 YCE key 是否可被发现 / 租借
+# 5b) 校验 relay / YCE_API_KEY 是否可用
 node ./vendor/yce-engine/yce-engine.mjs --check-key
 
 # 6) 查看帮助（返回 XML 帮助载荷；强制 pretty；exit code 0）
@@ -205,12 +205,13 @@ YCE 的 stdout 固定是 XML，不再输出 JSON。最重要的标签如下：
 | 环境变量 | 默认值 | 作用 |
 |---------|--------|------|
 | `YCE_YOUWEN_SCRIPT` | `./scripts/youwen.js` | 仓内优问增强入口 |
-| `YCE_ENGINE_SCRIPT` | `./vendor/yce-engine/yce-engine.mjs` | yce-engine 检索入口（YCE 本地语义搜索） |
+| `YCE_ENGINE_SCRIPT` | `./vendor/yce-engine/yce-engine.mjs` | yce-engine 检索入口 |
 | `YCE_ENGINE_MAX_RESULTS` | `10` | 检索返回的最大文件数 |
 | `YCE_ENGINE_MAX_TURNS` | `3` | 检索 agent 的最大轮数 |
-| `YCE_RELAY_URL` | 空 | YCE relay 地址；Windows 推荐配置 |
-| `YCE_RELAY_TOKEN` | 空 | YCE relay 鉴权 token；Windows 推荐配置 |
+| `YCE_RELAY_URL` | `https://yce.aigy.de` | 检索 relay 地址 |
+| `YCE_RELAY_TOKEN` | 默认同 `YCE_YOUWEN_TOKEN` | relay 鉴权（兑换码来自 a.aigy.de） |
 | `YCE_API_KEY` | 空 | 不走 relay 时的直连 key |
+| `YCE_LOCAL_FALLBACK` | 空 | 设为 `true` 时远端失败才启用本地 fast fallback |
 | `YCE_DEFAULT_MODE` | `auto` | 默认模式 |
 | `YCE_TIMEOUT_ENHANCE_MS` | `300000` | 默认增强超时 |
 | `YCE_TIMEOUT_SEARCH_MS` | `180000` | 默认检索超时 |
@@ -249,29 +250,30 @@ config.yceEngineScript（默认 ./vendor/yce-engine/yce-engine.mjs）
   → node 子进程执行 yce-engine.mjs --project <cwd> --query <q>
   → YCE semantic agent 在本地循环执行 rg/readfile/tree 收集上下文
   → 返回文件路径 + 行号范围 + 建议 grep 关键词
-  → 若 yce-engine 返回 resource_exhausted / 上游错误 / 空结果，则自动启用 local fast fallback
+  → 若 yce-engine 返回 resource_exhausted / 上游错误 / 空结果，且 `YCE_LOCAL_FALLBACK=true`，才启用 local fast fallback
 ```
 
 **关键细节：**
-- 引擎是 YCE 的「本地 agent 搜索」：服务端只做推理，**不上传代码、不建服务端索引**。
-- Windows 下推荐配置 `YCE_RELAY_URL/YCE_RELAY_TOKEN` 从 relay 租借 key；不走 relay 时可设置 `YCE_API_KEY`。
-- local fast fallback 参考 YCE 本地检索能力：目录热点评分、probe grep、path spine、内容锚点、行号聚合；远端 `resource_exhausted` 时仍可返回 `Found N relevant files by local fast fallback`。
+- 检索 key 只来自 relay 租约或 `YCE_API_KEY`。
+- local fast fallback 仅在 `YCE_LOCAL_FALLBACK=true` 时启用，纯本机 rg/heuristic，不依赖任何桌面 IDE key。
 - fallback 会跳过 `.git`、`node_modules`、`dist`、`build`、`coverage`、`vendor`、真实 `.env` 等噪声/敏感路径。
 - 退出码 0 且输出含 `Found 0 relevant files` 时映射为 `EMPTY_RESULT`（命令成功但无结果）。
-- 若 key 发现 / relay 租借失败，返回 `AUTH_ERROR`（优先检查 `YCE_RELAY_URL/YCE_RELAY_TOKEN` 或 `YCE_API_KEY`）。
+- 若 relay 租 key 失败，返回 `AUTH_ERROR`（优先检查 `YCE_RELAY_URL/YCE_RELAY_TOKEN` 或 `YCE_API_KEY`）。
+- 引擎在本地循环执行 rg/readfile/tree 收集上下文；远端只做推理，**不上传代码、不建服务端索引**。
+- 默认配置 `YCE_RELAY_URL=https://yce.aigy.de`，兑换码从 `a.aigy.de` 获取并写入 `YCE_YOUWEN_TOKEN` / `YCE_RELAY_TOKEN`。
 - 排障时先看 `<meta><dependency-paths>` 里的 `yce-engine-script` 路径是否正确。
 
 ### 当前仓库已实际内置的检索资源
 
 `vendor/yce-engine/` 里实际存在的是：
 - `vendor/yce-engine/yce-engine.mjs`（CLI 入口）
-- `vendor/yce-engine/lib/*.mjs`（核心逻辑：协议、key 提取、本地命令执行）
-- `vendor/yce-engine/node_modules/`（自带 `sql.js` / `@vscode/ripgrep` / `tree-node-cli`，无需系统装 rg）
+- `vendor/yce-engine/lib/*.mjs`（核心逻辑：协议、relay 鉴权、本地命令执行）
+- `vendor/yce-engine/node_modules/`（自带 `@vscode/ripgrep` / `tree-node-cli`，无需系统装 rg）
 
 **这意味着：**
-- 配好 YCE relay 或 `YCE_API_KEY` 的机器即可使用 YCE 检索链路，跨平台一致（rg 随引擎自带）。
-- 不再依赖旧二进制 / 远程上传。
-- 即使 YCE 远端临时限流或 `resource_exhausted`，仍会用本地 fast fallback 保持基础定位能力。
+- 配好 relay 或 `YCE_API_KEY` 即可使用 YCE 检索链路，跨平台一致（rg 随引擎自带）。
+- 不再依赖旧二进制或远程上传索引。
+- 若设置 `YCE_LOCAL_FALLBACK=true`，远端失败时仍可用本机 heuristic 保持基础定位能力。
 
 ## 常见失败规避点
 
@@ -310,10 +312,10 @@ config.yceEngineScript（默认 ./vendor/yce-engine/yce-engine.mjs）
 - **原因**：`vendor/yce-engine/yce-engine.mjs` 或其 `node_modules` 不存在（仓库被裁剪、未完整同步）
 - **处理**：核对 `meta.dependency_paths.yce-engine-script` 指向的文件存在，且 `vendor/yce-engine/node_modules` 完整
 
-### 7. YCE key 发现 / relay 租借失败
-- **症状**：`errors[].code === "AUTH_ERROR"`
-- **原因**：Windows 未配置 `YCE_RELAY_URL/YCE_RELAY_TOKEN`，或本地 `YCE_API_KEY` 缺失 / 过期
-- **处理**：先运行 `install.ps1 -Setup -YceRelayUrl <url> -YceRelayToken <token>` 写入 relay 配置；不走 relay 时手动设置 `YCE_API_KEY`；再用 `node ./vendor/yce-engine/yce-engine.mjs --check-key` 验证
+### 7. relay 租 key 失败
+- **症状**：`errors[].code === "AUTH_ERROR"`，`--check-key` 报 relay lease failed
+- **原因**：未配置 `YCE_RELAY_URL/YCE_RELAY_TOKEN`，或 relay 端点不可用
+- **处理**：运行 `install.sh --setup` 写入 a.aigy.de 兑换码；必要时手动设置 `YCE_API_KEY`；再用 `node ./vendor/yce-engine/yce-engine.mjs --check-key` 验证
 
 ### 7.5 YCE 远端 `resource_exhausted`
 - **症状**：`errors[].code === "UPSTREAM_ERROR"`，message 包含 `resource_exhausted` / `internal error occurred` / `trace ID`

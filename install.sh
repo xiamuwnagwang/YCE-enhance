@@ -89,6 +89,16 @@ DEFAULT_YCE_RELAY_URL="https://yce.aigy.de"
 DEFAULT_MODE="auto"
 DEFAULT_TIMEOUT_ENHANCE_MS="300000"
 DEFAULT_TIMEOUT_SEARCH_MS="180000"
+DEFAULT_LOCAL_FALLBACK="false"
+
+normalize_local_fallback() {
+  local value="${1:-false}"
+  value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+  case "$value" in
+    true|yes|y|1|on) echo "true" ;;
+    *) echo "false" ;;
+  esac
+}
 
 resolve_platform_dir() {
   local os arch
@@ -415,6 +425,8 @@ write_runtime_config() {
   local mode="${12:-$DEFAULT_MODE}"
   local timeout_enhance_ms="${13:-$DEFAULT_TIMEOUT_ENHANCE_MS}"
   local timeout_search_ms="${14:-$DEFAULT_TIMEOUT_SEARCH_MS}"
+  local local_fallback
+  local_fallback="$(normalize_local_fallback "${15:-$DEFAULT_LOCAL_FALLBACK}")"
 
   local youwen_abs yce_engine_abs
   youwen_abs="$(resolve_path_from_script_dir "$youwen_script")"
@@ -444,13 +456,15 @@ YCE_YOUWEN_ENABLE_SEARCH=$youwen_enable_search
 YCE_YOUWEN_MGREP_API_KEY=$youwen_mgrep_api_key
 
 # yce-engine adapter (远端优先：默认连接 yce.aigy.de relay)
-# 兑换码（YCE_YOUWEN_TOKEN）会同步用作 YCE_RELAY_TOKEN；本地 key 需显式 YCE_ALLOW_LOCAL_KEY=true
+# 兑换码（YCE_YOUWEN_TOKEN）会同步用作 YCE_RELAY_TOKEN
 YCE_ENGINE_SCRIPT=$yce_engine_script
 YCE_ENGINE_MAX_RESULTS=$yce_engine_max_results
 YCE_ENGINE_MAX_TURNS=$yce_engine_max_turns
 YCE_RELAY_URL=$yce_relay_url
 YCE_RELAY_TOKEN=$yce_relay_token
 # YCE_API_KEY=
+# 远端检索失败时是否启用本地 fast fallback（rg/heuristic）
+YCE_LOCAL_FALLBACK=$local_fallback
 
 # yce orchestrator (milliseconds)
 YCE_DEFAULT_MODE=$mode
@@ -462,6 +476,7 @@ ENVEOF
   echo "  .env: $ENV_FILE"
   echo "  yce-engine: $yce_engine_script"
   [[ -n "$youwen_token" ]] && echo "  兑换码 / Token: $(mask_secret "$youwen_token")"
+  echo "  本地检索 fallback: $local_fallback"
 }
 
 cmd_install() {
@@ -584,6 +599,7 @@ cmd_setup() {
   local mode=""
   local timeout_enhance_ms=""
   local timeout_search_ms=""
+  local local_fallback=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -601,6 +617,8 @@ cmd_setup() {
       --mode) has_direct_args=true; mode="$2"; shift 2 ;;
       --timeout-enhance) has_direct_args=true; timeout_enhance_ms="$2"; shift 2 ;;
       --timeout-search) has_direct_args=true; timeout_search_ms="$2"; shift 2 ;;
+      --local-fallback) has_direct_args=true; local_fallback="$(normalize_local_fallback "$2")"; shift 2 ;;
+      --no-local-fallback) has_direct_args=true; local_fallback="false"; shift ;;
       *)
         fail "未知参数: $1"
         exit 1
@@ -662,12 +680,17 @@ cmd_setup() {
   timeout_search_ms="${timeout_search_ms:-$(read_env_file_value "YCE_TIMEOUT_SEARCH_MS")}"
   [[ -z "$timeout_search_ms" ]] && timeout_search_ms="$DEFAULT_TIMEOUT_SEARCH_MS"
 
+  if [[ -z "$local_fallback" ]]; then
+    local_fallback="$(read_env_file_value "YCE_LOCAL_FALLBACK")"
+  fi
+  [[ -z "$local_fallback" ]] && local_fallback="$DEFAULT_LOCAL_FALLBACK"
+  local_fallback="$(normalize_local_fallback "$local_fallback")"
+
   if [[ "$has_direct_args" == false ]]; then
     echo "─── 交互式配置 ───"
     echo ""
     printf "${CYAN}${BOLD}提示：${NC} 检索默认连接远端 ${BOLD}${DEFAULT_YCE_RELAY_URL}${NC}。\n"
     printf "      兑换码请前往 ${BOLD}https://a.aigy.de${NC} 获取，会同时用于增强与检索 relay。\n"
-    printf "      本地 key 自动发现默认关闭；仅在需要时设置 ${BOLD}YCE_ALLOW_LOCAL_KEY=true${NC}。\n"
     echo ""
 
     printf "${CYAN}${BOLD}提示：${NC} 兑换码请前往 ${BOLD}https://a.aigy.de${NC} 获取\n"
@@ -710,6 +733,18 @@ cmd_setup() {
     read -rp "YCE Relay Token（回车保留）: " new_val
     [[ -n "$new_val" ]] && yce_relay_token="$new_val"
     echo ""
+
+    printf "${CYAN}${BOLD}提示：${NC} 本地检索 fallback 会在远端 relay 失败时，用本机 rg/heuristic 继续定位代码。\n"
+    echo "本地检索 fallback 当前: $local_fallback"
+    read -rp "启用本地检索 fallback？(y/N，回车保留): " new_val
+    if [[ -n "$new_val" ]]; then
+      new_val="$(printf '%s' "$new_val" | tr '[:upper:]' '[:lower:]')"
+      case "$new_val" in
+        y|yes|true|1) local_fallback="true" ;;
+        n|no|false|0) local_fallback="false" ;;
+      esac
+    fi
+    echo ""
   fi
 
   info "生成 .env"
@@ -727,7 +762,8 @@ cmd_setup() {
     "$yce_relay_token" \
     "$mode" \
     "$timeout_enhance_ms" \
-    "$timeout_search_ms"
+    "$timeout_search_ms" \
+    "$local_fallback"
 }
 
 cmd_sync() {
@@ -919,7 +955,8 @@ print_help() {
   echo "  bash install.sh --target agents            # 仅安装到指定工具"
   echo "  bash install.sh --setup                    # 交互式配置 兑换码 / API（默认使用仓内 scripts/youwen.js）"
   echo "  bash install.sh --setup --youwen-script <path> --youwen-token <code>  # 直接写入 yw-enhance 路径 + 兑换码 / Token"
-  echo "  bash install.sh --setup --yce-relay-url <url> --yce-relay-token <token> # 配置 Windows 推荐的 YCE relay 租 key"
+  echo "  bash install.sh --setup --local-fallback true       # 远端失败时启用本地 fast fallback"
+  echo "  bash install.sh --setup --no-local-fallback         # 禁用本地 fast fallback"
   echo "  bash install.sh --sync                     # 同步脚本 + 配置到其他已安装目录"
   echo "  bash install.sh --sync-env                 # 仅同步 .env"
   echo "  bash install.sh --check                    # 检查安装状态"
@@ -929,13 +966,13 @@ print_help() {
   echo ""
   echo "说明:"
   echo "  - 检索默认连接远端 relay（${DEFAULT_YCE_RELAY_URL}）；兑换码从 a.aigy.de 获取并写入 YCE_YOUWEN_TOKEN / YCE_RELAY_TOKEN"
-  echo "  - 本地 key 自动发现默认关闭；需要时可设置 YCE_ALLOW_LOCAL_KEY=true"
+  echo "  - --setup 可交互选择是否启用 YCE_LOCAL_FALLBACK（远端失败时的本机 rg/heuristic 检索）"
   echo "  - --setup 会优先复用当前 .env，并优先对齐仓内 scripts/youwen.js 对应的 YCE 根目录配置"
   echo "  - YCE_YOUWEN_SCRIPT 默认使用仓内脚本: $DEFAULT_YOUWEN_SCRIPT；如需特殊覆盖，仍可通过 --youwen-script 或 .env 指定"
   echo "  - 本仓已内置 yce-engine 检索引擎（vendor/yce-engine）与 yce enhance 脚本"
   echo "  - scripts/lib/* 是内部模块，不应直接配置成 YCE_YOUWEN_SCRIPT"
   echo "  - yw-enhance 扩展参数: --youwen-api-url --youwen-token --youwen-enhance-mode --youwen-enable-search --youwen-mgrep-api-key"
-  echo "  - yce-engine 扩展参数: --yce-engine-script --yce-engine-max-results --yce-engine-max-turns --yce-relay-url --yce-relay-token --timeout-enhance --timeout-search"
+  echo "  - yce-engine 扩展参数: --yce-engine-script --yce-engine-max-results --yce-engine-max-turns --yce-relay-url --yce-relay-token --local-fallback --no-local-fallback --timeout-enhance --timeout-search"
   echo "  - 远程仓地址: $REPO_URL"
 }
 
@@ -978,7 +1015,11 @@ main() {
         cmd="help"
         shift
         ;;
-      --youwen-script|--youwen-api-url|--youwen-token|--youwen-enhance-mode|--youwen-enable-search|--youwen-mgrep-api-key|--yce-engine-script|--yce-engine-max-results|--yce-engine-max-turns|--yce-relay-url|--yce-relay-token|--mode|--timeout-enhance|--timeout-search)
+      --no-local-fallback)
+        setup_args+=("$1")
+        shift
+        ;;
+      --youwen-script|--youwen-api-url|--youwen-token|--youwen-enhance-mode|--youwen-enable-search|--youwen-mgrep-api-key|--yce-engine-script|--yce-engine-max-results|--yce-engine-max-turns|--yce-relay-url|--yce-relay-token|--mode|--timeout-enhance|--timeout-search|--local-fallback)
         setup_args+=("$1")
         shift
         [[ $# -gt 0 ]] && {

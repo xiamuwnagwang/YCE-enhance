@@ -11,9 +11,7 @@ const CORE_PATH = join(SCRIPT_DIR, "lib", "core.mjs");
 function usage() {
   return `Usage:
   yce-engine --query <query> [--project <path>] [options]
-  yce-engine --check-key [--db-path <path>]
-  yce-engine --print-key [--db-path <path>]
-  yce-engine --key-env [--db-path <path>]
+  yce-engine --check-key
 
 Options:
   -q, --query <text>              Natural-language search query
@@ -34,10 +32,7 @@ Options:
       --no-bootstrap              Disable bootstrap phase
       --bootstrap-max-turns <n>   Bootstrap phase turns
       --bootstrap-max-commands <n> Bootstrap commands per turn
-      --check-key                 Verify YCE key discovery without printing the full key
-      --print-key                 Print the full discovered YCE key to stdout
-      --key-env                   Print an export command for YCE_API_KEY
-      --db-path <path>            Custom local key database path for key commands
+      --check-key                 Verify relay / YCE_API_KEY without printing the full key
       --help                      Show this help`;
 }
 
@@ -82,9 +77,6 @@ function parseArgs(argv) {
     bootstrapMaxTurns: 2,
     bootstrapMaxCommands: 6,
     checkKey: false,
-    printKey: false,
-    keyEnv: false,
-    dbPath: undefined,
     help: false,
   };
 
@@ -163,16 +155,6 @@ function parseArgs(argv) {
       case "--check-key":
         opts.checkKey = true;
         break;
-      case "--print-key":
-        opts.printKey = true;
-        break;
-      case "--key-env":
-        opts.keyEnv = true;
-        break;
-      case "--db-path":
-        opts.dbPath = takeValue(argv, i, arg);
-        i++;
-        break;
       case "-h":
       case "--help":
         opts.help = true;
@@ -183,12 +165,7 @@ function parseArgs(argv) {
   }
 
   opts.projectRoot = resolve(opts.projectRoot);
-  if (opts.dbPath) opts.dbPath = resolve(opts.dbPath);
   opts.excludePaths = [...new Set(opts.excludePaths)];
-  const keyCommandCount = [opts.checkKey, opts.printKey, opts.keyEnv].filter(Boolean).length;
-  if (keyCommandCount > 1) {
-    throw new Error("Choose only one key command: --check-key, --print-key, or --key-env");
-  }
   return opts;
 }
 
@@ -196,10 +173,6 @@ function maskKey(key) {
   if (!key) return "";
   if (key.length <= 12) return `${key.slice(0, 2)}...${key.slice(-2)}`;
   return `${key.slice(0, 8)}...${key.slice(-6)}`;
-}
-
-function shellQuote(value) {
-  return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
 async function loadCore() {
@@ -255,34 +228,13 @@ async function main() {
   try {
     const { searchWithContent, extractKeyInfo } = await loadCore();
 
-    if (opts.checkKey || opts.printKey || opts.keyEnv) {
-      const result = await extractKeyInfo(opts.dbPath);
+    if (opts.checkKey) {
+      const result = await extractKeyInfo();
       if (result.error) {
         console.error(`YCE key discovery failed: ${result.error}`);
         if (result.hint) console.error(result.hint);
         if (result.detail) console.error(result.detail);
         if (result.db_path) console.error(`Relay: ${result.db_path}`);
-        process.exit(1);
-      }
-
-      if (opts.printKey) {
-        console.log(result.api_key);
-        return;
-      }
-
-      if (opts.keyEnv) {
-        console.log(`export YCE_API_KEY=${shellQuote(result.api_key)}`);
-        return;
-      }
-
-      const { isUsableDiscoveredApiKey } = await import(
-        pathToFileURL(join(SCRIPT_DIR, "lib", "extract-key.mjs")).href
-      );
-      if (!isUsableDiscoveredApiKey(result.api_key)) {
-        console.error("YCE key was found locally but its format is not usable for search.");
-        console.error("Configure YCE_RELAY_URL/YCE_RELAY_TOKEN or set a fresh YCE_API_KEY.");
-        console.error(`Key prefix: ${maskKey(result.api_key)}`);
-        console.error(`Source: ${result.db_path}`);
         process.exit(1);
       }
 

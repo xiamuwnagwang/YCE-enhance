@@ -24,7 +24,6 @@ import {
   connectFrameDecode,
 } from "./protobuf.mjs";
 import { ToolExecutor } from "./executor.mjs";
-import { extractKey, isUsableDiscoveredApiKey } from "./extract-key.mjs";
 import { scoreDirectories, tokenize as tokenizeBM25 } from "./directory-scorer.mjs";
 
 // ─── Error Classification ──────────────────────────────────
@@ -74,12 +73,17 @@ function _classifyError(err) {
 
 // ─── Protocol Constants ────────────────────────────────────
 
-const API_BASE = "https://server.self-serve.windsurf.com/exa.api_server_pb.ApiServerService";
-const AUTH_BASE = "https://server.self-serve.windsurf.com/exa.auth_pb.AuthService";
-const WS_APP = "windsurf";
-const WS_APP_VER = process.env.WS_APP_VER || "1.48.2";
-const WS_LS_VER = process.env.WS_LS_VER || "1.9544.35";
-const WS_MODEL = process.env.WS_MODEL || "MODEL_SWE_1_6_FAST";
+// YCE remote inference protocol endpoints and client metadata.
+const API_BASE =
+  process.env.YCE_API_BASE ||
+  "https://server.self-serve.windsurf.com/exa.api_server_pb.ApiServerService";
+const AUTH_BASE =
+  process.env.YCE_AUTH_BASE ||
+  "https://server.self-serve.windsurf.com/exa.auth_pb.AuthService";
+const YCE_REMOTE_APP_ID = process.env.YCE_REMOTE_APP_ID || "windsurf";
+const YCE_REMOTE_APP_VER = process.env.YCE_REMOTE_APP_VER || process.env.WS_APP_VER || "1.48.2";
+const YCE_REMOTE_LS_VER = process.env.YCE_REMOTE_LS_VER || process.env.WS_LS_VER || "1.9544.35";
+const YCE_REMOTE_MODEL = process.env.YCE_REMOTE_MODEL || process.env.WS_MODEL || "MODEL_SWE_1_6_FAST";
 const DEBUG_MODE = process.env.YCE_ENGINE_DEBUG === "1" || process.env.YCE_ENGINE_DEBUG === "true" || process.env.FAST_CONTEXT_DEBUG === "1" || process.env.FAST_CONTEXT_DEBUG === "true";
 
 // Default excludes aligned with YCE fast-search guidance.
@@ -636,20 +640,12 @@ function getToolDefinitions(maxCommands = 8) {
 
 // ─── Credentials ───────────────────────────────────────────
 
-/**
- * Auto-discover a local YCE-compatible API key.
- * @returns {Promise<string|null>}
- */
-async function autoDiscoverApiKey() {
-  try {
-    const result = await extractKey();
-    if (result.api_key && isUsableDiscoveredApiKey(result.api_key)) {
-      return result.api_key;
-    }
-  } catch {
-    // Extraction failed
-  }
-  return null;
+function isUsableLeasedApiKey(apiKey) {
+  const key = String(apiKey || "").trim();
+  if (!key) return false;
+  if (key.startsWith("sk-")) return true;
+  if (key.startsWith("devin-session-token")) return true;
+  return key.length >= 32;
 }
 
 let _leasedRelay = null;
@@ -683,7 +679,7 @@ async function leaseApiKeyFromRelay() {
 
     const payload = await response.json();
     const apiKey = String(payload?.api_key || "").trim();
-    if (!isUsableDiscoveredApiKey(apiKey)) return null;
+    if (!isUsableLeasedApiKey(apiKey)) return null;
 
     _leasedRelay = {
       apiKey,
@@ -759,13 +755,9 @@ async function _reportYceUsage(usageContext, { statusCode = null, errorMessage =
 }
 
 /**
- * Get API key from relay lease, env var, or optional local auto-discovery.
+ * Get API key from relay lease or explicit env var.
  * @returns {Promise<string>}
  */
-function allowLocalKeyDiscovery() {
-  return String(process.env.YCE_ALLOW_LOCAL_KEY || "").trim().toLowerCase() === "true";
-}
-
 async function getApiKey() {
   const leased = await leaseApiKeyFromRelay();
   if (leased) return leased;
@@ -773,15 +765,9 @@ async function getApiKey() {
   const key = process.env.YCE_API_KEY;
   if (key) return key;
 
-  if (allowLocalKeyDiscovery()) {
-    const discovered = await autoDiscoverApiKey();
-    if (discovered) return discovered;
-  }
-
   throw new Error(
     "YCE API key not found. Configure YCE_RELAY_URL/YCE_RELAY_TOKEN (default relay: https://yce.aigy.de; 兑换码可从 https://a.aigy.de 获取) " +
-    "or set YCE_API_KEY. Local key discovery is disabled unless YCE_ALLOW_LOCAL_KEY=true. " +
-    "Run yce-engine.mjs --check-key to verify relay connectivity."
+    "or set YCE_API_KEY. Run yce-engine.mjs --check-key to verify relay connectivity."
   );
 }
 
@@ -894,7 +880,7 @@ async function _unaryRequest(url, protoBytes, compress = true) {
 }
 
 /**
- * Connect-RPC streaming POST to GetDevstralStream with retry.
+ * Connect-RPC streaming POST to the YCE semantic search stream with retry.
  * @param {Buffer} protoBytes
  * @param {number} [timeoutMs=30000]
  * @param {number} [maxRetries=2]
@@ -916,7 +902,7 @@ async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2, 
     "Connect-Timeout-Ms": String(baseTimeoutMs),
     "User-Agent": "connect-go/1.18.1 (go1.25.5)",
     "Accept-Encoding": "identity",
-    "Baggage": `sentry-release=language-server-windsurf@${WS_LS_VER},` +
+    "Baggage": `sentry-release=language-server-windsurf@${YCE_REMOTE_LS_VER},` +
       `sentry-environment=stable,sentry-sampled=false,` +
       `sentry-trace_id=${traceId},` +
       `sentry-public_key=b813f73488da69eedec534dba1029111`,
@@ -1005,12 +991,12 @@ async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2, 
  */
 async function fetchJwt(apiKey) {
   const meta = new ProtobufEncoder();
-  meta.writeString(1, WS_APP);
-  meta.writeString(2, WS_APP_VER);
+  meta.writeString(1, YCE_REMOTE_APP_ID);
+  meta.writeString(2, YCE_REMOTE_APP_VER);
   meta.writeString(3, apiKey);
   meta.writeString(4, "zh-cn");
-  meta.writeString(7, WS_LS_VER);
-  meta.writeString(12, WS_APP);
+  meta.writeString(7, YCE_REMOTE_LS_VER);
+  meta.writeString(12, YCE_REMOTE_APP_ID);
   meta.writeBytes(30, Buffer.from([0x00, 0x01]));
 
   const outer = new ProtobufEncoder();
@@ -1034,7 +1020,7 @@ async function fetchJwt(apiKey) {
 async function checkRateLimit(apiKey, jwt) {
   const req = new ProtobufEncoder();
   req.writeMessage(1, _buildMetadata(apiKey, jwt));
-  req.writeString(3, WS_MODEL);
+  req.writeString(3, YCE_REMOTE_MODEL);
 
   try {
     await _unaryRequest(`${API_BASE}/CheckUserMessageRateLimit`, req.toBuffer(), true);
@@ -1055,8 +1041,8 @@ async function checkRateLimit(apiKey, jwt) {
  */
 function _buildMetadata(apiKey, jwt) {
   const meta = new ProtobufEncoder();
-  meta.writeString(1, WS_APP);
-  meta.writeString(2, WS_APP_VER);
+  meta.writeString(1, YCE_REMOTE_APP_ID);
+  meta.writeString(2, YCE_REMOTE_APP_VER);
   meta.writeString(3, apiKey);
   meta.writeString(4, "zh-cn");
 
@@ -1072,7 +1058,7 @@ function _buildMetadata(apiKey, jwt) {
     ProductVersion: "",
   };
   meta.writeString(5, JSON.stringify(sysInfo));
-  meta.writeString(7, WS_LS_VER);
+  meta.writeString(7, YCE_REMOTE_LS_VER);
 
   const cpuList = cpus();
   const ncpu = cpuList.length || 4;
@@ -1088,7 +1074,7 @@ function _buildMetadata(apiKey, jwt) {
     Memory: mem,
   };
   meta.writeString(8, JSON.stringify(cpuInfo));
-  meta.writeString(12, WS_APP);
+  meta.writeString(12, YCE_REMOTE_APP_ID);
   meta.writeString(21, jwt);
   meta.writeBytes(30, Buffer.from([0x00, 0x01]));
   return meta;
@@ -1981,7 +1967,7 @@ export async function searchWithContent({
       if (meta.errorCode === "PAYLOAD_TOO_LARGE" || meta.errorCode === "TIMEOUT") {
         errMsg += `\n[hint] Payload/timeout error. Try: reduce tree_depth, reduce max_turns, add exclude_paths, or narrow project_path to a subdirectory.`;
       } else if (meta.errorCode === "AUTH_ERROR") {
-        errMsg += `\n[hint] Authentication error. On Windows this usually means the local desktop key is missing/expired or the relay token was not configured. Configure YCE_RELAY_URL/YCE_RELAY_TOKEN, or set a fresh YCE_API_KEY, then run yce-engine.mjs --check-key.`;
+        errMsg += `\n[hint] Authentication error. Configure YCE_RELAY_URL/YCE_RELAY_TOKEN (兑换码来自 a.aigy.de), or set YCE_API_KEY, then run yce-engine.mjs --check-key.`;
       } else if (meta.errorCode === "RATE_LIMITED") {
         errMsg += `\n[hint] Rate limited. Wait a moment and retry.`;
       } else {
@@ -2041,7 +2027,7 @@ export async function searchWithContent({
  * Extract YCE API key info (for CLI/tool use).
  * @returns {Promise<Object>}
  */
-export async function extractKeyInfo(dbPath) {
+export async function extractKeyInfo() {
   const leased = await leaseApiKeyFromRelay();
   if (leased) {
     return { api_key: leased, db_path: "relay:/yce/lease-key" };
@@ -2052,15 +2038,11 @@ export async function extractKeyInfo(dbPath) {
     return { api_key: envKey, db_path: "env:YCE_API_KEY" };
   }
 
-  if (allowLocalKeyDiscovery()) {
-    return extractKey(dbPath);
-  }
-
   return {
     error: "YCE relay key lease failed.",
     hint:
-      "Configure YCE_RELAY_URL/YCE_RELAY_TOKEN (default relay: https://yce.aigy.de; 兑换码可从 https://a.aigy.de 获取). " +
-      "Local discovery requires YCE_ALLOW_LOCAL_KEY=true.",
+      "Configure YCE_RELAY_URL/YCE_RELAY_TOKEN (default relay: https://yce.aigy.de; 兑换码可从 https://a.aigy.de 获取) " +
+      "or set YCE_API_KEY.",
     detail: _lastRelayError || undefined,
     db_path: _normalizeRelayUrl(process.env.YCE_RELAY_URL) || "https://yce.aigy.de",
   };

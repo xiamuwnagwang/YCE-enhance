@@ -516,7 +516,7 @@ function getDefaultSkillDirs() {
     path.join(home, ".agents", "skills"),
     // Cursor
     path.join(home, ".cursor", "skills"),
-    // Windsurf (Codeium)
+    // Legacy Codeium skills directory
     path.join(home, ".codeium", "windsurf", "skills"),
     // Cline
     path.join(home, ".cline", "skills"),

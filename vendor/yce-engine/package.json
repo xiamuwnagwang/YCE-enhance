@@ -21,13 +21,10 @@
   "keywords": [
     "yce",
     "semantic-search",
-    "windsurf",
-    "devstral",
     "code-search"
   ],
   "dependencies": {
     "@vscode/ripgrep": "^1.15.9",
-    "sql.js": "^1.14.0",
     "tree-node-cli": "^1.6.0"
   }
 }

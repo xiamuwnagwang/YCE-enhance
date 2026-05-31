@@ -14,7 +14,7 @@ function isLocalFallbackEnabled(env) {
 
 function mapYceEngineFailure(text) {
   const t = text || "";
-  if (/key discovery failed|yceAuthStatus|windsurfAuthStatus|apiKey field is empty|database not found|API Key not found|HTTP 401|HTTP 403/i.test(t)) {
+  if (/key discovery failed|relay key lease failed|API Key not found|HTTP 401|HTTP 403/i.test(t)) {
     return { code: "AUTH_ERROR", message: t.trim() || "YCE engine authentication failed. Configure YCE_RELAY_URL/YCE_RELAY_TOKEN or set YCE_API_KEY, then run YCE setup again." };
   }
   if (/vendored core is missing|Cannot find|MODULE_NOT_FOUND/i.test(t)) {

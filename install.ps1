@@ -43,6 +43,8 @@ param(
   [string]$Mode,
   [string]$TimeoutEnhance,
   [string]$TimeoutSearch,
+  [string]$LocalFallback,
+  [switch]$NoLocalFallback,
   [switch]$Help
 )
 
@@ -66,6 +68,7 @@ $DefaultYceRelayUrl = "https://yce.aigy.de"
 $DefaultMode = "auto"
 $DefaultTimeoutEnhance = "300000"
 $DefaultTimeoutSearch = "180000"
+$DefaultLocalFallback = "false"
 $DefaultYouwenScript = ".\scripts\youwen.js"
 $InstallFiles = @("scripts", "vendor", "SKILL.md", "install.sh", "install.ps1", ".env.example", ".gitignore")
 
@@ -118,6 +121,14 @@ Initialize-NetworkDefaults
 function Write-Info([string]$Message) { Write-Host "▸ $Message" -ForegroundColor Blue }
 function Write-Ok([string]$Message) { Write-Host "$([char]0x2714) $Message" -ForegroundColor Green }
 function Write-Warn([string]$Message) { Write-Host "! $Message" -ForegroundColor Yellow }
+
+function Normalize-LocalFallback {
+  param([string]$Value = 'false')
+  switch -Regex ($Value.Trim().ToLower()) {
+    '^(true|yes|y|1|on)$' { return 'true' }
+    default { return 'false' }
+  }
+}
 function Write-Fail([string]$Message) { Write-Host "$([char]0x2718) $Message" -ForegroundColor Red }
 function Write-DryRun([string]$Message) { Write-Host "[DryRun] $Message" -ForegroundColor Yellow }
 
@@ -425,7 +436,8 @@ function Write-RuntimeConfig {
     [string]$RuntimeYceRelayToken,
     [string]$RuntimeMode,
     [string]$RuntimeTimeoutEnhance,
-    [string]$RuntimeTimeoutSearch
+    [string]$RuntimeTimeoutSearch,
+    [string]$RuntimeLocalFallback
   )
 
   $resolvedYouwen = Resolve-YcePath $RuntimeYouwenScript
@@ -440,6 +452,7 @@ function Write-RuntimeConfig {
 
   if (-not $RuntimeYceRelayUrl) { $RuntimeYceRelayUrl = $DefaultYceRelayUrl }
   if (-not $RuntimeYceRelayToken -and $RuntimeYouwenToken) { $RuntimeYceRelayToken = $RuntimeYouwenToken }
+  $RuntimeLocalFallback = Normalize-LocalFallback $(if ($RuntimeLocalFallback) { $RuntimeLocalFallback } else { $DefaultLocalFallback })
 
   if ($DryRun) {
     Write-DryRun "将生成 .env"
@@ -458,6 +471,7 @@ function Write-RuntimeConfig {
     Write-DryRun "  YCE_DEFAULT_MODE = $RuntimeMode"
     Write-DryRun "  YCE_TIMEOUT_ENHANCE_MS = $RuntimeTimeoutEnhance"
     Write-DryRun "  YCE_TIMEOUT_SEARCH_MS = $RuntimeTimeoutSearch"
+    Write-DryRun "  YCE_LOCAL_FALLBACK = $RuntimeLocalFallback"
     return
   }
 
@@ -475,13 +489,15 @@ function Write-RuntimeConfig {
     "YCE_YOUWEN_MGREP_API_KEY=$RuntimeYouwenMgrepApiKey"
     ""
     "# yce-engine adapter (远端优先：默认连接 yce.aigy.de relay)"
-    "# 兑换码（YCE_YOUWEN_TOKEN）会同步用作 YCE_RELAY_TOKEN；本地 key 需显式 YCE_ALLOW_LOCAL_KEY=true"
+    "# 兑换码（YCE_YOUWEN_TOKEN）会同步用作 YCE_RELAY_TOKEN"
     "YCE_ENGINE_SCRIPT=$RuntimeYceEngineScript"
     "YCE_ENGINE_MAX_RESULTS=$RuntimeYceEngineMaxResults"
     "YCE_ENGINE_MAX_TURNS=$RuntimeYceEngineMaxTurns"
     "YCE_RELAY_URL=$RuntimeYceRelayUrl"
     "YCE_RELAY_TOKEN=$RuntimeYceRelayToken"
     "# YCE_API_KEY="
+    "# 远端检索失败时是否启用本地 fast fallback（rg/heuristic）"
+    "YCE_LOCAL_FALLBACK=$RuntimeLocalFallback"
     ""
     "# yce orchestrator (milliseconds)"
     "YCE_DEFAULT_MODE=$RuntimeMode"
@@ -493,6 +509,7 @@ function Write-RuntimeConfig {
   Write-Host "  .env: $EnvFile"
   Write-Host "  yce-engine: $RuntimeYceEngineScript"
   if ($RuntimeYouwenToken) { Write-Host "  兑换码 / Token: $(Get-MaskedValue $RuntimeYouwenToken)" }
+  Write-Host "  本地检索 fallback: $RuntimeLocalFallback"
 }
 
 function Invoke-Check {
@@ -760,14 +777,23 @@ function Invoke-Setup {
   $runtimeTimeoutEnhance = if ($TimeoutEnhance) { $TimeoutEnhance } elseif ($currentVars.ContainsKey('YCE_TIMEOUT_ENHANCE_MS')) { $currentVars['YCE_TIMEOUT_ENHANCE_MS'] } else { $DefaultTimeoutEnhance }
   $runtimeTimeoutSearch = if ($TimeoutSearch) { $TimeoutSearch } elseif ($currentVars.ContainsKey('YCE_TIMEOUT_SEARCH_MS')) { $currentVars['YCE_TIMEOUT_SEARCH_MS'] } else { $DefaultTimeoutSearch }
 
-  $hasDirectArgs = $YouwenScript -or $YouwenApiUrl -or $YouwenToken -or $YouwenEnhanceMode -or $YouwenEnableSearch -or $YouwenMgrepApiKey -or $YceEngineScript -or $YceEngineMaxResults -or $YceEngineMaxTurns -or $YceRelayUrl -or $YceRelayToken -or $Mode -or $TimeoutEnhance -or $TimeoutSearch
+  if ($NoLocalFallback) {
+    $runtimeLocalFallback = 'false'
+  } elseif ($LocalFallback) {
+    $runtimeLocalFallback = Normalize-LocalFallback $LocalFallback
+  } elseif ($currentVars.ContainsKey('YCE_LOCAL_FALLBACK')) {
+    $runtimeLocalFallback = Normalize-LocalFallback $currentVars['YCE_LOCAL_FALLBACK']
+  } else {
+    $runtimeLocalFallback = $DefaultLocalFallback
+  }
+
+  $hasDirectArgs = $YouwenScript -or $YouwenApiUrl -or $YouwenToken -or $YouwenEnhanceMode -or $YouwenEnableSearch -or $YouwenMgrepApiKey -or $YceEngineScript -or $YceEngineMaxResults -or $YceEngineMaxTurns -or $YceRelayUrl -or $YceRelayToken -or $Mode -or $TimeoutEnhance -or $TimeoutSearch -or $LocalFallback -or $NoLocalFallback
 
   if (-not $hasDirectArgs -or $Edit -or $Reset) {
     Write-Host '--- 交互式配置 ---'
     Write-Host ''
     Write-Host '提示：检索默认连接远端 https://yce.aigy.de。' -ForegroundColor Cyan
     Write-Host '      兑换码请前往 https://a.aigy.de 获取，会同时用于增强与检索 relay。' -ForegroundColor Cyan
-    Write-Host '      本地 key 自动发现默认关闭；仅在需要时设置 YCE_ALLOW_LOCAL_KEY=true。' -ForegroundColor Cyan
     Write-Host ''
 
     Write-Host "yw-enhance 脚本当前: $(if ($runtimeYouwen) { $runtimeYouwen } else { '未检测到仓内脚本' })"
@@ -824,9 +850,20 @@ function Invoke-Setup {
     Write-Host "检索超时当前: $runtimeTimeoutSearch"
     $newSearchTimeout = Read-Host '检索超时 ms（回车保留）'
     if ($newSearchTimeout) { $runtimeTimeoutSearch = $newSearchTimeout }
+
+    Write-Host '提示：本地检索 fallback 会在远端 relay 失败时，用本机 rg/heuristic 继续定位代码。' -ForegroundColor Cyan
+    Write-Host "本地检索 fallback 当前: $runtimeLocalFallback"
+    $newLocalFallback = Read-Host '启用本地检索 fallback？(y/N，回车保留)'
+    if ($newLocalFallback) {
+      if ($newLocalFallback -match '^[Yy]|^true$|^1$') {
+        $runtimeLocalFallback = 'true'
+      } elseif ($newLocalFallback -match '^[Nn]|^false$|^0$') {
+        $runtimeLocalFallback = 'false'
+      }
+    }
   }
 
-  Write-RuntimeConfig -RuntimeYouwenScript $runtimeYouwen -RuntimeYouwenApiUrl $runtimeYouwenApiUrl -RuntimeYouwenToken $runtimeYouwenToken -RuntimeYouwenEnhanceMode $runtimeYouwenEnhanceMode -RuntimeYouwenEnableSearch $runtimeYouwenEnableSearch -RuntimeYouwenMgrepApiKey $runtimeYouwenMgrepApiKey -RuntimeYceEngineScript $runtimeYceEngineScript -RuntimeYceEngineMaxResults $runtimeYceEngineMaxResults -RuntimeYceEngineMaxTurns $runtimeYceEngineMaxTurns -RuntimeYceRelayUrl $runtimeYceRelayUrl -RuntimeYceRelayToken $runtimeYceRelayToken -RuntimeMode $runtimeMode -RuntimeTimeoutEnhance $runtimeTimeoutEnhance -RuntimeTimeoutSearch $runtimeTimeoutSearch
+  Write-RuntimeConfig -RuntimeYouwenScript $runtimeYouwen -RuntimeYouwenApiUrl $runtimeYouwenApiUrl -RuntimeYouwenToken $runtimeYouwenToken -RuntimeYouwenEnhanceMode $runtimeYouwenEnhanceMode -RuntimeYouwenEnableSearch $runtimeYouwenEnableSearch -RuntimeYouwenMgrepApiKey $runtimeYouwenMgrepApiKey -RuntimeYceEngineScript $runtimeYceEngineScript -RuntimeYceEngineMaxResults $runtimeYceEngineMaxResults -RuntimeYceEngineMaxTurns $runtimeYceEngineMaxTurns -RuntimeYceRelayUrl $runtimeYceRelayUrl -RuntimeYceRelayToken $runtimeYceRelayToken -RuntimeMode $runtimeMode -RuntimeTimeoutEnhance $runtimeTimeoutEnhance -RuntimeTimeoutSearch $runtimeTimeoutSearch -RuntimeLocalFallback $runtimeLocalFallback
 
   $detected = Find-OtherInstalls
   if ($detected.Count -gt 0) {
@@ -910,7 +947,7 @@ if ($Help) {
   Write-Host ''
   Write-Host '说明:'
   Write-Host '  - 检索默认连接远端 relay（https://yce.aigy.de）；兑换码从 a.aigy.de 获取并写入 YCE_YOUWEN_TOKEN / YCE_RELAY_TOKEN'
-  Write-Host '  - 本地 key 自动发现默认关闭；需要时可设置 YCE_ALLOW_LOCAL_KEY=true'
+  Write-Host '  - -Setup 可交互选择 YCE_LOCAL_FALLBACK；也可用 -LocalFallback true/false 或 -NoLocalFallback'
   Write-Host '  - -Setup 会优先复用当前 .env，并优先对齐仓内 scripts\youwen.js 对应的 YCE 根目录配置'
   Write-Host "  - YCE_YOUWEN_SCRIPT 默认使用仓内脚本: $DefaultYouwenScript；如需特殊覆盖，仍可通过 -YouwenScript 或 .env 指定"
   Write-Host '  - 本仓已内置 yce-engine 检索引擎（vendor\yce-engine）与 yce enhance 脚本'

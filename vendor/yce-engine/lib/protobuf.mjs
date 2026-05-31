@@ -1,7 +1,7 @@
 /**
  * Hand-written Protobuf encoder/decoder + Connect-RPC frame handling.
  *
- * Matches the Windsurf wire format exactly.
+ * Matches the YCE remote search wire format.
  * Python bytearray → Node.js Buffer
  * struct.pack(">I", len) → buf.writeUInt32BE
  * gzip.compress/decompress → zlib.gzipSync/gunzipSync

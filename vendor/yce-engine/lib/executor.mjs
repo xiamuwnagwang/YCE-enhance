@@ -1,5 +1,5 @@
 /**
- * Tool executor for Windsurf's restricted commands.
+ * Tool executor for YCE semantic search agent commands.
  *
  * Uses @vscode/ripgrep for built-in rg binary — no system install needed.
  * Matches Python ToolExecutor behavior exactly.
@@ -64,7 +64,7 @@ export class ToolExecutor {
   }
 
   /**
-   * Truncate output to match Windsurf behavior:
+   * Truncate tool output to the configured line/char limits.
    * 50 line limit, 250 char per-line silent truncation.
    * @param {string} text
    * @returns {string}
