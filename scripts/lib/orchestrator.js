@@ -1,5 +1,5 @@
 const { runYwEnhance } = require("./adapters/ywEnhance");
-const { runYceBinarySearch, runYceSearch } = require("./adapters/yceSearch");
+const { runYceEngineSearch } = require("./adapters/yceEngineSearch");
 const { buildError, normalizeSearchQuery, nowIso } = require("./utils");
 
 const SEARCH_KEYWORDS = [
@@ -48,7 +48,7 @@ function resolveAction(mode, query) {
 function buildDegradationMeta({ resolvedAction, query, enhance, search, errors }) {
   const enhanceAttempted = Boolean(enhance && enhance.executed);
   const enhanceFailed = Boolean(enhanceAttempted && enhance.success !== true);
-  const searchUsable = Boolean(search && search.result_present);
+  const searchUsable = Boolean(search && search.success === true && search.result_present);
 
   if (resolvedAction !== "enhance_then_search" || !enhanceFailed || !searchUsable) {
     return { active: false };
@@ -116,22 +116,15 @@ async function orchestrate(input) {
   if (resolvedAction === "search" || resolvedAction === "enhance_then_search") {
     const rawSearchQuery = enhance && enhance.success && enhance.prompt ? enhance.prompt : query;
     const searchQuery = normalizeSearchQuery(rawSearchQuery);
-    const searchResult =
-      config.yceBinary && config.yceConfig
-        ? await runYceBinarySearch({
-            query: searchQuery,
-            cwd,
-            binaryPath: config.yceBinary,
-            configPath: config.yceConfig,
-            timeoutMs: input.timeoutSearchMs,
-            cliOptions: config.yceCliOptions,
-          })
-        : await runYceSearch({
-            query: searchQuery,
-            cwd,
-            scriptPath: config.yceSearchScript,
-            timeoutMs: input.timeoutSearchMs,
-          });
+    const searchResult = await runYceEngineSearch({
+      query: searchQuery,
+      cwd,
+      scriptPath: config.yceEngineScript,
+      timeoutMs: input.timeoutSearchMs,
+      maxResults: config.yceEngineMaxResults,
+      maxTurns: config.yceEngineMaxTurns,
+      env: config.yceEngineEnv,
+    });
     search = searchResult.search;
     durations.search = searchResult.durationMs;
     if (searchResult.error) {
@@ -142,7 +135,7 @@ async function orchestrate(input) {
   durations.total = Date.now() - startedAt;
 
   const hasUsableEnhance = Boolean(enhance && enhance.success && enhance.prompt);
-  const hasUsableSearch = Boolean(search && search.result_present);
+  const hasUsableSearch = Boolean(search && search.success === true && search.result_present);
   const success = hasUsableEnhance || hasUsableSearch;
   const degradation = buildDegradationMeta({
     resolvedAction,
@@ -169,9 +162,7 @@ async function orchestrate(input) {
       durations_ms: durations,
       dependency_paths: {
         yw_enhance_script: config.youwenScript,
-        yce_search_script: config.yceSearchScript,
-        yce_binary: config.yceBinary || null,
-        yce_config: config.yceConfig || null,
+        yce_engine_script: config.yceEngineScript,
       },
       degradation,
       timestamp: nowIso(),

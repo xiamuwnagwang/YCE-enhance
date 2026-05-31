@@ -1,0 +1,33 @@
+{
+  "name": "yce-engine",
+  "version": "0.1.0",
+  "description": "Vendored semantic code search engine for the YCE skill. Runs Windsurf Devstral search locally without an MCP server. Adapted from fast-context-mcp.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "yce-engine": "yce-engine.mjs"
+  },
+  "files": [
+    "yce-engine.mjs",
+    "lib/",
+    "LICENSE",
+    "NOTICE.md"
+  ],
+  "scripts": {
+    "search": "node yce-engine.mjs",
+    "test": "node --check yce-engine.mjs && node --check lib/core.mjs && node yce-engine.mjs --help >/dev/null"
+  },
+  "keywords": [
+    "yce",
+    "semantic-search",
+    "windsurf",
+    "devstral",
+    "code-search"
+  ],
+  "dependencies": {
+    "@vscode/ripgrep": "^1.15.9",
+    "sql.js": "^1.14.0",
+    "tree-node-cli": "^1.6.0"
+  }
+}

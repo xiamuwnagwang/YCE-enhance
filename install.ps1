@@ -11,8 +11,8 @@
   .\install.ps1 -Install
   .\install.ps1 -Target agents
   .\install.ps1 -Check
-  .\install.ps1 -Setup -YceToken "your-token"
-  .\install.ps1 -Setup -YceToken "your-token" -YceUrl "https://your-augment-request-url"
+  .\install.ps1 -Setup
+  .\install.ps1 -Setup -YouwenToken "your-redemption-code"
   .\install.ps1 -Sync
   .\install.ps1 -SyncEnv
   .\install.ps1 -Uninstall
@@ -29,22 +29,15 @@ param(
   [switch]$Edit,
   [switch]$Reset,
   [string]$Target,
-  [string]$YceUrl,
-  [string]$YceToken,
   [string]$YouwenScript,
   [string]$YouwenApiUrl,
   [string]$YouwenToken,
   [string]$YouwenEnhanceMode,
   [string]$YouwenEnableSearch,
   [string]$YouwenMgrepApiKey,
-  [string]$YceSearchScript,
-  [string]$YceBinary,
-  [string]$YceMaxLinesPerBlob,
-  [string]$YceUploadTimeout,
-  [string]$YceUploadConcurrency,
-  [string]$YceRetrievalTimeout,
-  [string]$YceNoAdaptive,
-  [string]$YceNoWebbrowserEnhancePrompt,
+  [string]$YceEngineScript,
+  [string]$YceEngineMaxResults,
+  [string]$YceEngineMaxTurns,
   [string]$Mode,
   [string]$TimeoutEnhance,
   [string]$TimeoutSearch,
@@ -55,7 +48,6 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $EnvFile = Join-Path $ScriptDir ".env"
-$YceCfgFile = Join-Path $ScriptDir "vendor\yce-tool.json"
 $RepoUrl = "https://github.com/xiamuwnagwang/YCE-enhance"
 $RepoArchiveFallbackZip = "https://github.com/xiamuwnagwang/YCE-enhance/archive/refs/heads/main.zip"
 $RemoteSkillMdUrl = "https://raw.githubusercontent.com/xiamuwnagwang/YCE-enhance/main/SKILL.md"
@@ -65,20 +57,13 @@ $DefaultYouwenApiUrl = "https://a.aigy.de"
 $DefaultYouwenEnhanceMode = "agent"
 $DefaultYouwenEnableSearch = "true"
 $DefaultYouwenMgrepApiKey = ""
-$DefaultYceUrl = "https://yce.aigy.de/"
-$DefaultYceMaxLinesPerBlob = "800"
-$DefaultYceUploadTimeout = ""
-$DefaultYceUploadConcurrency = ""
-$DefaultYceRetrievalTimeout = "60"
-$DefaultYceNoAdaptive = "false"
-$DefaultYceNoWebbrowserEnhancePrompt = "false"
+$DefaultYceEngineScript = ".\vendor\yce-engine\yce-engine.mjs"
+$DefaultYceEngineMaxResults = "10"
+$DefaultYceEngineMaxTurns = "3"
 $DefaultMode = "auto"
 $DefaultTimeoutEnhance = "300000"
 $DefaultTimeoutSearch = "180000"
 $DefaultYouwenScript = ".\scripts\youwen.js"
-$DefaultYceSearchScript = ".\scripts\yce-search.ps1"
-$DefaultYceBinary = ".\vendor\windows-x64\yce-tool-rs.exe"
-$DefaultYceConfig = ".\vendor\yce-tool.json"
 $InstallFiles = @("scripts", "vendor", "SKILL.md", "install.sh", "install.ps1", ".env.example", ".gitignore")
 
 function Initialize-NetworkDefaults {
@@ -229,16 +214,6 @@ function Get-RemoteVersion {
   return $null
 }
 
-function Read-ExistingYceConfig {
-  if (-not (Test-Path $YceCfgFile)) { return $null }
-  try {
-    $raw = Get-Content $YceCfgFile -Raw -Encoding UTF8
-    return $raw | ConvertFrom-Json
-  } catch {
-    return $null
-  }
-}
-
 function Get-LatestSource {
   $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) "yce-$(Get-Random)"
   New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
@@ -352,21 +327,15 @@ function Install-ToDir {
     Write-DryRun "将安装/更新到 ${ToolName}"
     Write-DryRun "  SourceDir = $SourceDir"
     Write-DryRun "  TargetDir = $TargetDir"
-    Write-DryRun "  保留目标 .env 和 vendor/yce-tool.json（如果存在）"
+    Write-DryRun "  保留目标 .env（如果存在）"
     return
   }
 
   $envBackup = $null
-  $yceCfgBackup = $null
   $envTarget = Join-Path $TargetDir ".env"
-  $yceCfgTarget = Join-Path $TargetDir "vendor\yce-tool.json"
   if (Test-Path $envTarget) {
     $envBackup = [System.IO.Path]::GetTempFileName()
     Copy-Item $envTarget $envBackup -Force
-  }
-  if (Test-Path $yceCfgTarget) {
-    $yceCfgBackup = [System.IO.Path]::GetTempFileName()
-    Copy-Item $yceCfgTarget $yceCfgBackup -Force
   }
 
   if (-not (Test-Path $TargetDir)) { New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null }
@@ -387,13 +356,6 @@ function Install-ToDir {
     Copy-Item (Join-Path $TargetDir '.env.example') $envTarget -Force
   }
 
-  if ($yceCfgBackup -and (Test-Path $yceCfgBackup)) {
-    $yceCfgParent = Split-Path -Parent $yceCfgTarget
-    if (-not (Test-Path $yceCfgParent)) { New-Item -ItemType Directory -Path $yceCfgParent -Force | Out-Null }
-    Copy-Item $yceCfgBackup $yceCfgTarget -Force
-    Remove-Item $yceCfgBackup -Force
-  }
-
   Write-Ok "${ToolName}: 已安装/更新"
 }
 
@@ -404,7 +366,6 @@ function Sync-EnvToDir {
     Write-DryRun "将同步配置到 ${ToolName}"
     Write-DryRun "  TargetDir = $TargetDir"
     Write-DryRun "  .env => $(Join-Path $TargetDir '.env')"
-    Write-DryRun "  yce-tool.json => $(Join-Path $TargetDir 'vendor\\yce-tool.json')"
     return
   }
 
@@ -413,13 +374,6 @@ function Sync-EnvToDir {
     if (-not (Test-Path $TargetDir)) { New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null }
     Copy-Item $EnvFile $envTarget -Force
     Write-Host "  $([char]0x2714) ${ToolName}: .env 已同步" -ForegroundColor Green
-  }
-
-  if (Test-Path $YceCfgFile) {
-    $yceTargetDir = Join-Path $TargetDir "vendor"
-    if (-not (Test-Path $yceTargetDir)) { New-Item -ItemType Directory -Path $yceTargetDir -Force | Out-Null }
-    Copy-Item $YceCfgFile (Join-Path $yceTargetDir "yce-tool.json") -Force
-    Write-Host "  $([char]0x2714) ${ToolName}: vendor/yce-tool.json 已同步" -ForegroundColor Green
   }
 }
 
@@ -456,67 +410,45 @@ function Select-SyncTargets {
 
 function Write-RuntimeConfig {
   param(
-    [string]$RuntimeYceToken,
-    [string]$RuntimeYceUrl,
     [string]$RuntimeYouwenScript,
     [string]$RuntimeYouwenApiUrl,
     [string]$RuntimeYouwenToken,
     [string]$RuntimeYouwenEnhanceMode,
     [string]$RuntimeYouwenEnableSearch,
     [string]$RuntimeYouwenMgrepApiKey,
-    [string]$RuntimeYceSearchScript,
-    [string]$RuntimeYceBinary,
-    [string]$RuntimeYceMaxLinesPerBlob,
-    [string]$RuntimeYceUploadTimeout,
-    [string]$RuntimeYceUploadConcurrency,
-    [string]$RuntimeYceRetrievalTimeout,
-    [string]$RuntimeYceNoAdaptive,
-    [string]$RuntimeYceNoWebbrowserEnhancePrompt,
+    [string]$RuntimeYceEngineScript,
+    [string]$RuntimeYceEngineMaxResults,
+    [string]$RuntimeYceEngineMaxTurns,
     [string]$RuntimeMode,
     [string]$RuntimeTimeoutEnhance,
     [string]$RuntimeTimeoutSearch
   )
 
-  if (-not $RuntimeYceToken) {
-    Write-Fail "-YceToken 是必填项"
-    exit 1
-  }
-
   $resolvedYouwen = Resolve-YcePath $RuntimeYouwenScript
-  $resolvedSearch = Resolve-YcePath $RuntimeYceSearchScript
-  $resolvedBinary = Resolve-YcePath $RuntimeYceBinary
+  $resolvedEngine = Resolve-YcePath $RuntimeYceEngineScript
 
   if (-not $RuntimeYouwenScript) {
     Write-Warn "未检测到仓内 yce enhance 脚本: $DefaultYouwenScript"
   } elseif (-not (Test-Path $resolvedYouwen)) {
     Write-Warn "youwen.js 不存在: $RuntimeYouwenScript"
   }
-  if (-not (Test-Path $resolvedSearch)) { Write-Warn "yce search wrapper 不存在: $RuntimeYceSearchScript" }
-  if (-not (Test-Path $resolvedBinary)) { Write-Warn "yce-tool-rs 不存在: $RuntimeYceBinary" }
+  if (-not (Test-Path $resolvedEngine)) { Write-Warn "yce-engine 入口不存在: $RuntimeYceEngineScript" }
 
   if ($DryRun) {
-    Write-DryRun "将生成 .env 和 vendor/yce-tool.json"
+    Write-DryRun "将生成 .env"
     Write-DryRun "  .env => $EnvFile"
-    Write-DryRun "  yce-tool.json => $YceCfgFile"
     Write-DryRun "  YCE_YOUWEN_SCRIPT = $RuntimeYouwenScript"
     Write-DryRun "  YCE_YOUWEN_API_URL = $RuntimeYouwenApiUrl"
     Write-DryRun "  YCE_YOUWEN_TOKEN = $(if ($RuntimeYouwenToken) { Get-MaskedValue $RuntimeYouwenToken } else { '(empty)' })"
     Write-DryRun "  YCE_YOUWEN_ENHANCE_MODE = $RuntimeYouwenEnhanceMode"
     Write-DryRun "  YCE_YOUWEN_ENABLE_SEARCH = $RuntimeYouwenEnableSearch"
     Write-DryRun "  YCE_YOUWEN_MGREP_API_KEY = $(if ($RuntimeYouwenMgrepApiKey) { Get-MaskedValue $RuntimeYouwenMgrepApiKey } else { '(empty)' })"
-    Write-DryRun "  YCE_SEARCH_SCRIPT = $RuntimeYceSearchScript"
-    Write-DryRun "  YCE_BINARY = $RuntimeYceBinary"
-    Write-DryRun "  YCE_MAX_LINES_PER_BLOB = $RuntimeYceMaxLinesPerBlob"
-    Write-DryRun "  YCE_UPLOAD_TIMEOUT = $RuntimeYceUploadTimeout"
-    Write-DryRun "  YCE_UPLOAD_CONCURRENCY = $RuntimeYceUploadConcurrency"
-    Write-DryRun "  YCE_RETRIEVAL_TIMEOUT = $RuntimeYceRetrievalTimeout"
-    Write-DryRun "  YCE_NO_ADAPTIVE = $RuntimeYceNoAdaptive"
-    Write-DryRun "  YCE_NO_WEBBROWSER_ENHANCE_PROMPT = $RuntimeYceNoWebbrowserEnhancePrompt"
+    Write-DryRun "  YCE_ENGINE_SCRIPT = $RuntimeYceEngineScript"
+    Write-DryRun "  YCE_ENGINE_MAX_RESULTS = $RuntimeYceEngineMaxResults"
+    Write-DryRun "  YCE_ENGINE_MAX_TURNS = $RuntimeYceEngineMaxTurns"
     Write-DryRun "  YCE_DEFAULT_MODE = $RuntimeMode"
     Write-DryRun "  YCE_TIMEOUT_ENHANCE_MS = $RuntimeTimeoutEnhance"
     Write-DryRun "  YCE_TIMEOUT_SEARCH_MS = $RuntimeTimeoutSearch"
-    Write-DryRun "  Yce base_url = $RuntimeYceUrl"
-    Write-DryRun "  Yce token = $(Get-MaskedValue $RuntimeYceToken)"
     return
   }
 
@@ -533,16 +465,12 @@ function Write-RuntimeConfig {
     "YCE_YOUWEN_ENABLE_SEARCH=$RuntimeYouwenEnableSearch"
     "YCE_YOUWEN_MGREP_API_KEY=$RuntimeYouwenMgrepApiKey"
     ""
-    "# yce adapter"
-    "YCE_SEARCH_SCRIPT=$RuntimeYceSearchScript"
-    "YCE_BINARY=$RuntimeYceBinary"
-    "YCE_CONFIG=./vendor/yce-tool.json"
-    "YCE_MAX_LINES_PER_BLOB=$RuntimeYceMaxLinesPerBlob"
-    "YCE_UPLOAD_TIMEOUT=$RuntimeYceUploadTimeout"
-    "YCE_UPLOAD_CONCURRENCY=$RuntimeYceUploadConcurrency"
-    "YCE_RETRIEVAL_TIMEOUT=$RuntimeYceRetrievalTimeout"
-    "YCE_NO_ADAPTIVE=$RuntimeYceNoAdaptive"
-    "YCE_NO_WEBBROWSER_ENHANCE_PROMPT=$RuntimeYceNoWebbrowserEnhancePrompt"
+    "# yce-engine adapter (Windsurf Devstral 本地语义搜索)"
+    "# key 运行时自动从本机 Windsurf 发现；不依赖本地 Windsurf 时设置 YCE_API_KEY"
+    "YCE_ENGINE_SCRIPT=$RuntimeYceEngineScript"
+    "YCE_ENGINE_MAX_RESULTS=$RuntimeYceEngineMaxResults"
+    "YCE_ENGINE_MAX_TURNS=$RuntimeYceEngineMaxTurns"
+    "# YCE_API_KEY="
     ""
     "# yce orchestrator (milliseconds)"
     "YCE_DEFAULT_MODE=$RuntimeMode"
@@ -550,23 +478,10 @@ function Write-RuntimeConfig {
     "YCE_TIMEOUT_SEARCH_MS=$RuntimeTimeoutSearch"
   )
 
-  $vendorDir = Join-Path $ScriptDir "vendor"
-  if (-not (Test-Path $vendorDir)) { New-Item -ItemType Directory -Path $vendorDir -Force | Out-Null }
-
-  Write-Host "Generating vendor/yce-tool.json..."
-  Write-Utf8NoBomLines -FilePath $YceCfgFile -Lines @(
-    "{"
-    "  ""base_url"": ""$RuntimeYceUrl"","
-    "  ""token"": ""$RuntimeYceToken"""
-    "}"
-  )
-
   Write-Ok "配置完成"
   Write-Host "  .env: $EnvFile"
-  Write-Host "  yce-tool.json: $YceCfgFile"
-  Write-Host "  yce base_url: $RuntimeYceUrl"
+  Write-Host "  yce-engine: $RuntimeYceEngineScript"
   if ($RuntimeYouwenToken) { Write-Host "  兑换码 / Token: $(Get-MaskedValue $RuntimeYouwenToken)" }
-  Write-Host "  note: 若没有公益 relay，请改用你的 augment 请求地址重新执行 install.ps1 -Setup"
 }
 
 function Invoke-Check {
@@ -590,7 +505,7 @@ function Invoke-Check {
   }
 
   if (Test-Path $EnvFile) { Write-Ok "本地 .env 已存在" } else { Write-Warn "本地 .env 不存在，可运行 .\install.ps1 -Setup" }
-  if (Test-Path $YceCfgFile) { Write-Ok "本地 vendor/yce-tool.json 已存在" } else { Write-Warn "本地 vendor/yce-tool.json 不存在，可运行 .\install.ps1 -Setup" }
+  if (Test-Path (Join-Path $ScriptDir "vendor\yce-engine\yce-engine.mjs")) { Write-Ok "本地 yce-engine 引擎已存在" } else { Write-Warn "本地 vendor/yce-engine/yce-engine.mjs 不存在，请重新安装/同步" }
   Write-Host ""
 }
 
@@ -692,7 +607,7 @@ function Invoke-Install {
   Write-Ok "完成"
   Write-Host ""
   Write-Host "  配置: .\install.ps1 -Setup" -ForegroundColor Cyan
-  Write-Host "  直写: .\install.ps1 -Setup -YceToken \"your-token\" -YouwenToken \"your-redemption-code\"" -ForegroundColor Cyan
+  Write-Host "  直写: .\install.ps1 -Setup -YouwenToken \"your-redemption-code\"" -ForegroundColor Cyan
   Write-Host "  测试: node scripts\yce.js \"定位 provider 列表获取逻辑\" --mode search" -ForegroundColor Cyan
   Write-Host ""
 }
@@ -736,15 +651,12 @@ function Invoke-Uninstall {
   Write-Host ""
   foreach ($tool in $targets) {
     $envTarget = Join-Path $tool.Dir '.env'
-    $yceTarget = Join-Path $tool.Dir 'vendor\yce-tool.json'
     if ($DryRun) {
       Write-DryRun "将卸载: $($tool.Label)"
       Write-DryRun "  TargetDir = $($tool.Dir)"
       if (Test-Path $envTarget) { Write-DryRun "  将备份 .env => $envTarget.uninstall-backup" }
-      if (Test-Path $yceTarget) { Write-DryRun "  将备份 yce-tool.json => $yceTarget.uninstall-backup" }
     } else {
       if (Test-Path $envTarget) { Copy-Item $envTarget "$envTarget.uninstall-backup" -Force }
-      if (Test-Path $yceTarget) { Copy-Item $yceTarget "$yceTarget.uninstall-backup" -Force }
       Remove-Item $tool.Dir -Recurse -Force
       Write-Ok "已卸载: $($tool.Label)"
     }
@@ -809,10 +721,6 @@ function Invoke-Setup {
     }
   }
 
-  $existingYceConfig = Read-ExistingYceConfig
-
-  $runtimeYceUrl = if ($YceUrl) { $YceUrl } elseif ($existingYceConfig -and $existingYceConfig.base_url) { [string]$existingYceConfig.base_url } else { $DefaultYceUrl }
-  $runtimeYceToken = if ($YceToken) { $YceToken } elseif ($existingYceConfig -and $existingYceConfig.token) { [string]$existingYceConfig.token } else { $null }
   $runtimeYouwen = if ($YouwenScript) { $YouwenScript } elseif ($currentVars.ContainsKey('YCE_YOUWEN_SCRIPT')) { $currentVars['YCE_YOUWEN_SCRIPT'] } else { $DefaultYouwenScript }
   $resolvedRepoYouwen = Resolve-YcePath $DefaultYouwenScript
   if (Test-Path $resolvedRepoYouwen) {
@@ -832,36 +740,21 @@ function Invoke-Setup {
   $runtimeYouwenEnableSearch = if ($YouwenEnableSearch) { $YouwenEnableSearch } elseif ($currentVars.ContainsKey('YCE_YOUWEN_ENABLE_SEARCH')) { $currentVars['YCE_YOUWEN_ENABLE_SEARCH'] } elseif ($upstreamYouwenEnv) { Read-EnvValueFromFile -FilePath $upstreamYouwenEnv -Key 'YOUWEN_ENABLE_SEARCH' } else { $DefaultYouwenEnableSearch }
   if (-not $runtimeYouwenEnableSearch) { $runtimeYouwenEnableSearch = $DefaultYouwenEnableSearch }
   $runtimeYouwenMgrepApiKey = if ($YouwenMgrepApiKey) { $YouwenMgrepApiKey } elseif ($currentVars.ContainsKey('YCE_YOUWEN_MGREP_API_KEY')) { $currentVars['YCE_YOUWEN_MGREP_API_KEY'] } elseif ($upstreamYouwenEnv) { Read-EnvValueFromFile -FilePath $upstreamYouwenEnv -Key 'YOUWEN_MGREP_API_KEY' } else { $DefaultYouwenMgrepApiKey }
-  $runtimeSearch = if ($YceSearchScript) { $YceSearchScript } elseif ($currentVars.ContainsKey('YCE_SEARCH_SCRIPT')) { $currentVars['YCE_SEARCH_SCRIPT'] } else { $DefaultYceSearchScript }
-  $runtimeBinary = if ($YceBinary) { $YceBinary } elseif ($currentVars.ContainsKey('YCE_BINARY')) { $currentVars['YCE_BINARY'] } else { $DefaultYceBinary }
-  $runtimeYceMaxLinesPerBlob = if ($YceMaxLinesPerBlob) { $YceMaxLinesPerBlob } elseif ($currentVars.ContainsKey('YCE_MAX_LINES_PER_BLOB')) { $currentVars['YCE_MAX_LINES_PER_BLOB'] } else { $DefaultYceMaxLinesPerBlob }
-  $runtimeYceUploadTimeout = if ($YceUploadTimeout) { $YceUploadTimeout } elseif ($currentVars.ContainsKey('YCE_UPLOAD_TIMEOUT')) { $currentVars['YCE_UPLOAD_TIMEOUT'] } else { $DefaultYceUploadTimeout }
-  $runtimeYceUploadConcurrency = if ($YceUploadConcurrency) { $YceUploadConcurrency } elseif ($currentVars.ContainsKey('YCE_UPLOAD_CONCURRENCY')) { $currentVars['YCE_UPLOAD_CONCURRENCY'] } else { $DefaultYceUploadConcurrency }
-  $runtimeYceRetrievalTimeout = if ($YceRetrievalTimeout) { $YceRetrievalTimeout } elseif ($currentVars.ContainsKey('YCE_RETRIEVAL_TIMEOUT')) { $currentVars['YCE_RETRIEVAL_TIMEOUT'] } else { $DefaultYceRetrievalTimeout }
-  $runtimeYceNoAdaptive = if ($YceNoAdaptive) { $YceNoAdaptive } elseif ($currentVars.ContainsKey('YCE_NO_ADAPTIVE')) { $currentVars['YCE_NO_ADAPTIVE'] } else { $DefaultYceNoAdaptive }
-  $runtimeYceNoWebbrowserEnhancePrompt = if ($YceNoWebbrowserEnhancePrompt) { $YceNoWebbrowserEnhancePrompt } elseif ($currentVars.ContainsKey('YCE_NO_WEBBROWSER_ENHANCE_PROMPT')) { $currentVars['YCE_NO_WEBBROWSER_ENHANCE_PROMPT'] } else { $DefaultYceNoWebbrowserEnhancePrompt }
+  $runtimeYceEngineScript = if ($YceEngineScript) { $YceEngineScript } elseif ($currentVars.ContainsKey('YCE_ENGINE_SCRIPT')) { $currentVars['YCE_ENGINE_SCRIPT'] } else { $DefaultYceEngineScript }
+  $runtimeYceEngineMaxResults = if ($YceEngineMaxResults) { $YceEngineMaxResults } elseif ($currentVars.ContainsKey('YCE_ENGINE_MAX_RESULTS')) { $currentVars['YCE_ENGINE_MAX_RESULTS'] } else { $DefaultYceEngineMaxResults }
+  $runtimeYceEngineMaxTurns = if ($YceEngineMaxTurns) { $YceEngineMaxTurns } elseif ($currentVars.ContainsKey('YCE_ENGINE_MAX_TURNS')) { $currentVars['YCE_ENGINE_MAX_TURNS'] } else { $DefaultYceEngineMaxTurns }
   $runtimeMode = if ($Mode) { $Mode } elseif ($currentVars.ContainsKey('YCE_DEFAULT_MODE')) { $currentVars['YCE_DEFAULT_MODE'] } else { $DefaultMode }
   $runtimeTimeoutEnhance = if ($TimeoutEnhance) { $TimeoutEnhance } elseif ($currentVars.ContainsKey('YCE_TIMEOUT_ENHANCE_MS')) { $currentVars['YCE_TIMEOUT_ENHANCE_MS'] } else { $DefaultTimeoutEnhance }
   $runtimeTimeoutSearch = if ($TimeoutSearch) { $TimeoutSearch } elseif ($currentVars.ContainsKey('YCE_TIMEOUT_SEARCH_MS')) { $currentVars['YCE_TIMEOUT_SEARCH_MS'] } else { $DefaultTimeoutSearch }
 
-  $hasDirectArgs = $YceUrl -or $YceToken -or $YouwenScript -or $YouwenApiUrl -or $YouwenToken -or $YouwenEnhanceMode -or $YouwenEnableSearch -or $YouwenMgrepApiKey -or $YceSearchScript -or $YceBinary -or $YceMaxLinesPerBlob -or $YceUploadTimeout -or $YceUploadConcurrency -or $YceRetrievalTimeout -or $YceNoAdaptive -or $YceNoWebbrowserEnhancePrompt -or $Mode -or $TimeoutEnhance -or $TimeoutSearch
+  $hasDirectArgs = $YouwenScript -or $YouwenApiUrl -or $YouwenToken -or $YouwenEnhanceMode -or $YouwenEnableSearch -or $YouwenMgrepApiKey -or $YceEngineScript -or $YceEngineMaxResults -or $YceEngineMaxTurns -or $Mode -or $TimeoutEnhance -or $TimeoutSearch
 
   if (-not $hasDirectArgs -or $Edit -or $Reset) {
     Write-Host '--- 交互式配置 ---'
     Write-Host ''
-    Write-Host '提示：YCE 密钥请前往 https://yce.aige.de 获取' -ForegroundColor Cyan
+    Write-Host '提示：检索引擎为内置 yce-engine（Windsurf Devstral 本地搜索）。' -ForegroundColor Cyan
+    Write-Host '      key 运行时自动从本机 Windsurf 发现；不依赖本地 Windsurf 时可在 .env 设置 YCE_API_KEY。' -ForegroundColor Cyan
     Write-Host ''
-    if (-not $runtimeYceToken) {
-      $runtimeYceToken = Read-Host 'Yce Token（必填）'
-    } else {
-      Write-Host "Yce Token 当前: $(Get-MaskedValue $runtimeYceToken)"
-      $newToken = Read-Host 'Yce Token（回车保留）'
-      if ($newToken) { $runtimeYceToken = $newToken }
-    }
-
-    Write-Host "Yce URL 当前: $runtimeYceUrl"
-    $newUrl = Read-Host 'Yce URL（回车保留）'
-    if ($newUrl) { $runtimeYceUrl = $newUrl }
 
     Write-Host "yw-enhance 脚本当前: $(if ($runtimeYouwen) { $runtimeYouwen } else { '未检测到仓内脚本' })"
 
@@ -886,37 +779,17 @@ function Invoke-Setup {
     $newMgrepKey = Read-Host 'yw-enhance Mixedbread Key（回车保留）'
     if ($newMgrepKey) { $runtimeYouwenMgrepApiKey = $newMgrepKey }
 
-    Write-Host "Yce search wrapper 当前: $runtimeSearch"
-    $newSearch = Read-Host 'Yce search wrapper（回车保留）'
-    if ($newSearch) { $runtimeSearch = $newSearch }
+    Write-Host "yce-engine 入口当前: $runtimeYceEngineScript"
+    $newEngineScript = Read-Host 'yce-engine 入口（回车保留）'
+    if ($newEngineScript) { $runtimeYceEngineScript = $newEngineScript }
 
-    Write-Host "Yce binary 当前: $runtimeBinary"
-    $newBinary = Read-Host 'Yce binary（回车保留）'
-    if ($newBinary) { $runtimeBinary = $newBinary }
+    Write-Host "yce-engine 最大结果数当前: $runtimeYceEngineMaxResults"
+    $newEngineMaxResults = Read-Host 'yce-engine max results（回车保留）'
+    if ($newEngineMaxResults) { $runtimeYceEngineMaxResults = $newEngineMaxResults }
 
-    Write-Host "Yce max lines 当前: $runtimeYceMaxLinesPerBlob"
-    $newMaxLines = Read-Host 'Yce max lines per blob（回车保留）'
-    if ($newMaxLines) { $runtimeYceMaxLinesPerBlob = $newMaxLines }
-
-    Write-Host "Yce upload timeout 当前: $runtimeYceUploadTimeout"
-    $newUploadTimeout = Read-Host 'Yce upload timeout 秒（回车保留）'
-    if ($newUploadTimeout) { $runtimeYceUploadTimeout = $newUploadTimeout }
-
-    Write-Host "Yce upload concurrency 当前: $runtimeYceUploadConcurrency"
-    $newUploadConcurrency = Read-Host 'Yce upload concurrency（回车保留）'
-    if ($newUploadConcurrency) { $runtimeYceUploadConcurrency = $newUploadConcurrency }
-
-    Write-Host "Yce retrieval timeout 当前: $runtimeYceRetrievalTimeout"
-    $newRetrievalTimeout = Read-Host 'Yce retrieval timeout 秒（回车保留）'
-    if ($newRetrievalTimeout) { $runtimeYceRetrievalTimeout = $newRetrievalTimeout }
-
-    Write-Host "Yce no adaptive 当前: $runtimeYceNoAdaptive"
-    $newNoAdaptive = Read-Host 'Yce no adaptive（true/false，回车保留）'
-    if ($newNoAdaptive) { $runtimeYceNoAdaptive = $newNoAdaptive }
-
-    Write-Host "Yce no webbrowser enhance 当前: $runtimeYceNoWebbrowserEnhancePrompt"
-    $newNoWebbrowser = Read-Host 'Yce no webbrowser enhance（true/false，回车保留）'
-    if ($newNoWebbrowser) { $runtimeYceNoWebbrowserEnhancePrompt = $newNoWebbrowser }
+    Write-Host "yce-engine 最大轮次当前: $runtimeYceEngineMaxTurns"
+    $newEngineMaxTurns = Read-Host 'yce-engine max turns（回车保留）'
+    if ($newEngineMaxTurns) { $runtimeYceEngineMaxTurns = $newEngineMaxTurns }
 
     Write-Host "默认模式当前: $runtimeMode"
     $newMode = Read-Host '默认模式（回车保留）'
@@ -931,7 +804,7 @@ function Invoke-Setup {
     if ($newSearchTimeout) { $runtimeTimeoutSearch = $newSearchTimeout }
   }
 
-  Write-RuntimeConfig -RuntimeYceToken $runtimeYceToken -RuntimeYceUrl $runtimeYceUrl -RuntimeYouwenScript $runtimeYouwen -RuntimeYouwenApiUrl $runtimeYouwenApiUrl -RuntimeYouwenToken $runtimeYouwenToken -RuntimeYouwenEnhanceMode $runtimeYouwenEnhanceMode -RuntimeYouwenEnableSearch $runtimeYouwenEnableSearch -RuntimeYouwenMgrepApiKey $runtimeYouwenMgrepApiKey -RuntimeYceSearchScript $runtimeSearch -RuntimeYceBinary $runtimeBinary -RuntimeYceMaxLinesPerBlob $runtimeYceMaxLinesPerBlob -RuntimeYceUploadTimeout $runtimeYceUploadTimeout -RuntimeYceUploadConcurrency $runtimeYceUploadConcurrency -RuntimeYceRetrievalTimeout $runtimeYceRetrievalTimeout -RuntimeYceNoAdaptive $runtimeYceNoAdaptive -RuntimeYceNoWebbrowserEnhancePrompt $runtimeYceNoWebbrowserEnhancePrompt -RuntimeMode $runtimeMode -RuntimeTimeoutEnhance $runtimeTimeoutEnhance -RuntimeTimeoutSearch $runtimeTimeoutSearch
+  Write-RuntimeConfig -RuntimeYouwenScript $runtimeYouwen -RuntimeYouwenApiUrl $runtimeYouwenApiUrl -RuntimeYouwenToken $runtimeYouwenToken -RuntimeYouwenEnhanceMode $runtimeYouwenEnhanceMode -RuntimeYouwenEnableSearch $runtimeYouwenEnableSearch -RuntimeYouwenMgrepApiKey $runtimeYouwenMgrepApiKey -RuntimeYceEngineScript $runtimeYceEngineScript -RuntimeYceEngineMaxResults $runtimeYceEngineMaxResults -RuntimeYceEngineMaxTurns $runtimeYceEngineMaxTurns -RuntimeMode $runtimeMode -RuntimeTimeoutEnhance $runtimeTimeoutEnhance -RuntimeTimeoutSearch $runtimeTimeoutSearch
 
   $detected = Find-OtherInstalls
   if ($detected.Count -gt 0) {
@@ -1003,27 +876,25 @@ if ($Help) {
   Write-Host '  .\install.ps1                            # 交互式菜单（推荐）'
   Write-Host '  .\install.ps1 -Install                   # 安装或更新（必要时自动下载远程最新版本）'
   Write-Host '  .\install.ps1 -Target agents             # 仅安装到指定工具'
-  Write-Host '  .\install.ps1 -Setup                     # 交互式配置 Yce Token / 兑换码 / API（默认使用仓内 scripts\youwen.js）'
-  Write-Host '  .\install.ps1 -Setup -YceToken <token> -YouwenToken <code> # 直接写入 Yce Token + 兑换码 / Token'
+  Write-Host '  .\install.ps1 -Setup                     # 交互式配置 兑换码 / API（默认使用仓内 scripts\youwen.js）'
+  Write-Host '  .\install.ps1 -Setup -YouwenScript <path> -YouwenToken <code> # 直接写入 yw-enhance 路径 + 兑换码 / Token'
   Write-Host '  .\install.ps1 -Sync                      # 同步脚本 + 配置到其他已安装目录'
-  Write-Host '  .\install.ps1 -SyncEnv                   # 仅同步 .env 和 vendor/yce-tool.json'
+  Write-Host '  .\install.ps1 -SyncEnv                   # 仅同步 .env'
   Write-Host '  .\install.ps1 -Check                     # 检查安装状态'
   Write-Host '  .\install.ps1 -Uninstall                 # 卸载'
-  Write-Host '  .\install.ps1 -Setup -YceToken <token> -YouwenScript <path> -DryRun'
+  Write-Host '  .\install.ps1 -Setup -YouwenScript <path> -DryRun'
   Write-Host ''
   Write-Host "支持的工具: $($ToolMap.Key -join ', ')"
   Write-Host ''
   Write-Host '说明:'
-  Write-Host "  - 默认 Yce 地址: $DefaultYceUrl"
-  Write-Host '  - 没有公益站时，请在 -Setup 后补 -YceUrl <你的 augment 请求地址>'
-  Write-Host '  - -Setup 会优先复用当前 .env / vendor/yce-tool.json，并优先对齐仓内 scripts\youwen.js 对应的 YCE 根目录配置'
+  Write-Host '  - 检索引擎为内置 yce-engine（Windsurf Devstral 本地搜索），key 运行时自动从本机 Windsurf 发现；不依赖本地 Windsurf 时在 .env 设置 YCE_API_KEY'
+  Write-Host '  - -Setup 会优先复用当前 .env，并优先对齐仓内 scripts\youwen.js 对应的 YCE 根目录配置'
   Write-Host "  - YCE_YOUWEN_SCRIPT 默认使用仓内脚本: $DefaultYouwenScript；如需特殊覆盖，仍可通过 -YouwenScript 或 .env 指定"
-  Write-Host '  - 会按当前系统自动选择 Yce wrapper（Windows 用 scripts\yce-search.ps1）'
+  Write-Host '  - 本仓已内置 yce-engine 检索引擎（vendor\yce-engine）与 yce enhance 脚本'
   Write-Host '  - 当前 install.ps1 目标兼容 Windows PowerShell 5.1'
   Write-Host '  - scripts\lib\* 是内部模块，不应直接配置成 YCE_YOUWEN_SCRIPT'
-  Write-Host '  - 可交互配置：Yce Token、Yce URL、兑换码 / Token、yw-enhance API'
   Write-Host '  - yw-enhance 扩展参数: -YouwenApiUrl -YouwenToken -YouwenEnhanceMode -YouwenEnableSearch -YouwenMgrepApiKey'
-  Write-Host '  - Yce 扩展参数: -YceMaxLinesPerBlob -YceUploadTimeout -YceUploadConcurrency -YceRetrievalTimeout -YceNoAdaptive -YceNoWebbrowserEnhancePrompt -TimeoutEnhance -TimeoutSearch'
+  Write-Host '  - yce-engine 扩展参数: -YceEngineScript -YceEngineMaxResults -YceEngineMaxTurns -TimeoutEnhance -TimeoutSearch'
   Write-Host '  - 可加 -DryRun 只看将要执行的动作，不真正写文件/删除/同步'
   exit 0
 }

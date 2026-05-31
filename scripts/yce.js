@@ -36,9 +36,7 @@ function buildInvalidArgsResponse(message, config, cwd) {
       },
       dependency_paths: {
         yw_enhance_script: config.youwenScript,
-        yce_search_script: config.yceSearchScript,
-        yce_binary: config.yceBinary || null,
-        yce_config: config.yceConfig || null,
+        yce_engine_script: config.yceEngineScript,
       },
       timestamp: new Date().toISOString(),
     },
@@ -160,9 +158,7 @@ async function main() {
         },
         dependency_paths: {
           yw_enhance_script: config.youwenScript,
-          yce_search_script: config.yceSearchScript,
-          yce_binary: config.yceBinary || null,
-          yce_config: config.yceConfig || null,
+          yce_engine_script: config.yceEngineScript,
         },
         timestamp: new Date().toISOString(),
       },

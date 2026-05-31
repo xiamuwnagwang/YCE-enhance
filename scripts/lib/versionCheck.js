@@ -6,7 +6,7 @@ const http = require("http");
 
 const VERSION_ENDPOINT =
   process.env.YCE_VERSION_API_URL ||
-  "https://a.aigy.de/api/skill/version";
+  "";
 const REMOTE_SKILL_NAME =
   process.env.YCE_VERSION_SKILL_NAME ||
   "yce";
@@ -41,7 +41,7 @@ function compareSemver(a, b) {
 }
 
 function getCacheKey() {
-  return `${VERSION_ENDPOINT}::${REMOTE_SKILL_NAME}`;
+  return `${VERSION_ENDPOINT || "disabled"}::${REMOTE_SKILL_NAME}`;
 }
 
 function readCache() {
@@ -110,6 +110,10 @@ function fetchJson(url, timeoutMs) {
 }
 
 async function getRemoteVersion({ force = false } = {}) {
+  if (!VERSION_ENDPOINT) {
+    return { version: null, fromCache: false };
+  }
+
   const cache = readCache();
   if (!force && cache && Date.now() - cache.checkedAt < CACHE_TTL_MS) {
     return { version: cache.remoteVersion, fromCache: true };

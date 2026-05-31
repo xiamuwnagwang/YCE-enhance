@@ -4,7 +4,6 @@ set -eo pipefail
 SKILL_NAME="yce"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
-YCE_CFG_FILE="$SCRIPT_DIR/vendor/yce-tool.json"
 REPO_URL="https://github.com/xiamuwnagwang/YCE-enhance"
 REPO_ARCHIVE_FALLBACK="https://github.com/xiamuwnagwang/YCE-enhance/archive/refs/heads/main.tar.gz"
 REMOTE_SKILL_MD_URL="https://raw.githubusercontent.com/xiamuwnagwang/YCE-enhance/main/SKILL.md"
@@ -84,13 +83,9 @@ DEFAULT_YOUWEN_API_URL="https://a.aigy.de"
 DEFAULT_YOUWEN_ENHANCE_MODE="agent"
 DEFAULT_YOUWEN_ENABLE_SEARCH="true"
 DEFAULT_YOUWEN_MGREP_API_KEY=""
-DEFAULT_YCE_URL="https://yce.aigy.de/"
-DEFAULT_YCE_MAX_LINES_PER_BLOB="800"
-DEFAULT_YCE_UPLOAD_TIMEOUT=""
-DEFAULT_YCE_UPLOAD_CONCURRENCY=""
-DEFAULT_YCE_RETRIEVAL_TIMEOUT="60"
-DEFAULT_YCE_NO_ADAPTIVE="false"
-DEFAULT_YCE_NO_WEBBROWSER_ENHANCE_PROMPT="false"
+DEFAULT_YCE_ENGINE_SCRIPT="./vendor/yce-engine/yce-engine.mjs"
+DEFAULT_YCE_ENGINE_MAX_RESULTS="10"
+DEFAULT_YCE_ENGINE_MAX_TURNS="3"
 DEFAULT_MODE="auto"
 DEFAULT_TIMEOUT_ENHANCE_MS="300000"
 DEFAULT_TIMEOUT_SEARCH_MS="180000"
@@ -123,28 +118,6 @@ resolve_platform_dir() {
     *) echo "unknown-platform" ;;
   esac
 }
-
-yce_binary_filename() {
-  local platform_dir="$1"
-  if [[ "$platform_dir" == "windows-x64" ]]; then
-    echo "yce-tool-rs.exe"
-  else
-    echo "yce-tool-rs"
-  fi
-}
-
-yce_search_wrapper() {
-  local platform_dir="$1"
-  if [[ "$platform_dir" == "windows-x64" ]]; then
-    echo "./scripts/yce-search.ps1"
-  else
-    echo "./scripts/yce-search.sh"
-  fi
-}
-
-DEFAULT_YCE_BINARY="./vendor/$(resolve_platform_dir)/$(yce_binary_filename "$(resolve_platform_dir)")"
-DEFAULT_YCE_SEARCH_SCRIPT="$(yce_search_wrapper "$(resolve_platform_dir)")"
-DEFAULT_YCE_CONFIG="./vendor/yce-tool.json"
 
 expand_home() {
   local value="$1"
@@ -196,27 +169,6 @@ for raw_line in Path(file_path).read_text(encoding="utf-8").splitlines():
         continue
     print(rhs.strip().strip('"').strip("'"))
     break
-PY
-}
-
-read_json_file_value() {
-  local file_path="$1"
-  local key="$2"
-  [[ ! -f "$file_path" ]] && return 0
-  python3 - "$file_path" "$key" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-file_path, key = sys.argv[1], sys.argv[2]
-data = json.loads(Path(file_path).read_text(encoding="utf-8"))
-value = data.get(key)
-if value is None:
-    raise SystemExit(0)
-if isinstance(value, bool):
-    print("true" if value else "false")
-else:
-    print(value)
 PY
 }
 
@@ -372,7 +324,6 @@ install_to_dir() {
   local yce_cfg_backup=""
 
   [[ -f "$target_dir/.env" ]] && { env_backup=$(mktemp); cp "$target_dir/.env" "$env_backup"; }
-  [[ -f "$target_dir/vendor/yce-tool.json" ]] && { yce_cfg_backup=$(mktemp); cp "$target_dir/vendor/yce-tool.json" "$yce_cfg_backup"; }
 
   mkdir -p "$target_dir"
 
@@ -392,8 +343,6 @@ install_to_dir() {
   fi
 
   if [[ -n "$yce_cfg_backup" && -f "$yce_cfg_backup" ]]; then
-    mkdir -p "$target_dir/vendor"
-    cp "$yce_cfg_backup" "$target_dir/vendor/yce-tool.json"
     rm -f "$yce_cfg_backup"
   fi
 
@@ -408,12 +357,6 @@ sync_env_to_dir() {
     mkdir -p "$target_dir"
     cp "$ENV_FILE" "$target_dir/.env"
     echo -e "  ${GREEN}✔${NC} ${BOLD}${tool_name}${NC}: .env 已同步"
-  fi
-
-  if [[ -f "$YCE_CFG_FILE" ]]; then
-    mkdir -p "$target_dir/vendor"
-    cp "$YCE_CFG_FILE" "$target_dir/vendor/yce-tool.json"
-    echo -e "  ${GREEN}✔${NC} ${BOLD}${tool_name}${NC}: vendor/yce-tool.json 已同步"
   fi
 }
 
@@ -457,53 +400,30 @@ pick_sync_targets() {
   done
 }
 
-detect_local_yce_binary() {
-  local platform_dir filename candidate
-  platform_dir="$(resolve_platform_dir)"
-  filename="$(yce_binary_filename "$platform_dir")"
-  candidate="$SCRIPT_DIR/vendor/$platform_dir/$filename"
-  if [[ -f "$candidate" ]]; then
-    echo "./vendor/$platform_dir/$filename"
-  else
-    echo "$DEFAULT_YCE_BINARY"
-  fi
-}
-
 write_runtime_config() {
-  local yce_token="$1"
-  local yce_url="${2:-$DEFAULT_YCE_URL}"
-  local youwen_script="${3:-$DEFAULT_YOUWEN_SCRIPT}"
-  local youwen_api_url="${4:-$DEFAULT_YOUWEN_API_URL}"
-  local youwen_token="${5:-}"
-  local youwen_enhance_mode="${6:-$DEFAULT_YOUWEN_ENHANCE_MODE}"
-  local youwen_enable_search="${7:-$DEFAULT_YOUWEN_ENABLE_SEARCH}"
-  local youwen_mgrep_api_key="${8:-$DEFAULT_YOUWEN_MGREP_API_KEY}"
-  local yce_search_script="${9:-$DEFAULT_YCE_SEARCH_SCRIPT}"
-  local yce_binary="${10:-$(detect_local_yce_binary)}"
-  local yce_max_lines_per_blob="${11:-$DEFAULT_YCE_MAX_LINES_PER_BLOB}"
-  local yce_upload_timeout="${12:-$DEFAULT_YCE_UPLOAD_TIMEOUT}"
-  local yce_upload_concurrency="${13:-$DEFAULT_YCE_UPLOAD_CONCURRENCY}"
-  local yce_retrieval_timeout="${14:-$DEFAULT_YCE_RETRIEVAL_TIMEOUT}"
-  local yce_no_adaptive="${15:-$DEFAULT_YCE_NO_ADAPTIVE}"
-  local yce_no_webbrowser_enhance_prompt="${16:-$DEFAULT_YCE_NO_WEBBROWSER_ENHANCE_PROMPT}"
-  local mode="${17:-$DEFAULT_MODE}"
-  local timeout_enhance_ms="${18:-$DEFAULT_TIMEOUT_ENHANCE_MS}"
-  local timeout_search_ms="${19:-$DEFAULT_TIMEOUT_SEARCH_MS}"
+  local youwen_script="${1:-$DEFAULT_YOUWEN_SCRIPT}"
+  local youwen_api_url="${2:-$DEFAULT_YOUWEN_API_URL}"
+  local youwen_token="${3:-}"
+  local youwen_enhance_mode="${4:-$DEFAULT_YOUWEN_ENHANCE_MODE}"
+  local youwen_enable_search="${5:-$DEFAULT_YOUWEN_ENABLE_SEARCH}"
+  local youwen_mgrep_api_key="${6:-$DEFAULT_YOUWEN_MGREP_API_KEY}"
+  local yce_engine_script="${7:-$DEFAULT_YCE_ENGINE_SCRIPT}"
+  local yce_engine_max_results="${8:-$DEFAULT_YCE_ENGINE_MAX_RESULTS}"
+  local yce_engine_max_turns="${9:-$DEFAULT_YCE_ENGINE_MAX_TURNS}"
+  local mode="${10:-$DEFAULT_MODE}"
+  local timeout_enhance_ms="${11:-$DEFAULT_TIMEOUT_ENHANCE_MS}"
+  local timeout_search_ms="${12:-$DEFAULT_TIMEOUT_SEARCH_MS}"
 
-  [[ -z "$yce_token" ]] && { fail "--yce-token is required"; exit 1; }
-
-  local youwen_abs yce_search_abs yce_binary_abs
+  local youwen_abs yce_engine_abs
   youwen_abs="$(resolve_path_from_script_dir "$youwen_script")"
-  yce_search_abs="$(resolve_path_from_script_dir "$yce_search_script")"
-  yce_binary_abs="$(resolve_path_from_script_dir "$yce_binary")"
+  yce_engine_abs="$(resolve_path_from_script_dir "$yce_engine_script")"
 
   if [[ -z "$youwen_script" ]]; then
     warn "未检测到仓内 yce enhance 脚本：$DEFAULT_YOUWEN_SCRIPT"
   elif [[ ! -f "$youwen_abs" ]]; then
     warn "youwen.js not found at $youwen_script"
   fi
-  [[ ! -f "$yce_search_abs" ]] && warn "yce search wrapper not found at $yce_search_script"
-  [[ ! -f "$yce_binary_abs" ]] && warn "yce-tool-rs not found at $yce_binary"
+  [[ ! -f "$yce_engine_abs" ]] && warn "yce-engine entry not found at $yce_engine_script"
 
   echo "Generating .env..."
   cat > "$ENV_FILE" <<ENVEOF
@@ -518,16 +438,12 @@ YCE_YOUWEN_ENHANCE_MODE=$youwen_enhance_mode
 YCE_YOUWEN_ENABLE_SEARCH=$youwen_enable_search
 YCE_YOUWEN_MGREP_API_KEY=$youwen_mgrep_api_key
 
-# yce adapter
-YCE_SEARCH_SCRIPT=$yce_search_script
-YCE_BINARY=$yce_binary
-YCE_CONFIG=./vendor/yce-tool.json
-YCE_MAX_LINES_PER_BLOB=$yce_max_lines_per_blob
-YCE_UPLOAD_TIMEOUT=$yce_upload_timeout
-YCE_UPLOAD_CONCURRENCY=$yce_upload_concurrency
-YCE_RETRIEVAL_TIMEOUT=$yce_retrieval_timeout
-YCE_NO_ADAPTIVE=$yce_no_adaptive
-YCE_NO_WEBBROWSER_ENHANCE_PROMPT=$yce_no_webbrowser_enhance_prompt
+# yce-engine adapter (Windsurf Devstral 本地语义搜索)
+# key 运行时自动从本机 Windsurf 发现；不依赖本地 Windsurf 时设置 YCE_API_KEY
+YCE_ENGINE_SCRIPT=$yce_engine_script
+YCE_ENGINE_MAX_RESULTS=$yce_engine_max_results
+YCE_ENGINE_MAX_TURNS=$yce_engine_max_turns
+# YCE_API_KEY=
 
 # yce orchestrator (milliseconds)
 YCE_DEFAULT_MODE=$mode
@@ -535,19 +451,9 @@ YCE_TIMEOUT_ENHANCE_MS=$timeout_enhance_ms
 YCE_TIMEOUT_SEARCH_MS=$timeout_search_ms
 ENVEOF
 
-  mkdir -p "$SCRIPT_DIR/vendor"
-  echo "Generating vendor/yce-tool.json..."
-  cat > "$YCE_CFG_FILE" <<CFGEOF
-{
-  "base_url": "$yce_url",
-  "token": "$yce_token"
-}
-CFGEOF
-
   ok "配置完成"
   echo "  .env: $ENV_FILE"
-  echo "  yce-tool.json: $YCE_CFG_FILE"
-  echo "  yce base_url: $yce_url"
+  echo "  yce-engine: $yce_engine_script"
   [[ -n "$youwen_token" ]] && echo "  兑换码 / Token: $(mask_secret "$youwen_token")"
 }
 
@@ -647,7 +553,7 @@ cmd_install() {
   ok "完成"
   echo ""
   printf "  配置: ${CYAN}bash install.sh --setup${NC}\n"
-  printf "  直写: ${CYAN}bash install.sh --setup --yce-token \"your-token\" --youwen-token \"your-redemption-code\"${NC}\n"
+  printf "  直写: ${CYAN}bash install.sh --setup --youwen-token \"your-redemption-code\"${NC}\n"
   printf "  测试: ${CYAN}node scripts/yce.js \"定位 provider 列表获取逻辑\" --mode search${NC}\n"
   echo ""
 }
@@ -657,44 +563,30 @@ cmd_setup() {
   echo ""
 
   local has_direct_args=false
-  local yce_url=""
-  local yce_token=""
   local youwen_script=""
   local youwen_api_url=""
   local youwen_token=""
   local youwen_enhance_mode=""
   local youwen_enable_search=""
   local youwen_mgrep_api_key=""
-  local yce_search_script=""
-  local yce_binary=""
-  local yce_max_lines_per_blob=""
-  local yce_upload_timeout=""
-  local yce_upload_concurrency=""
-  local yce_retrieval_timeout=""
-  local yce_no_adaptive=""
-  local yce_no_webbrowser_enhance_prompt=""
+  local yce_engine_script=""
+  local yce_engine_max_results=""
+  local yce_engine_max_turns=""
   local mode=""
   local timeout_enhance_ms=""
   local timeout_search_ms=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --yce-url) has_direct_args=true; yce_url="$2"; shift 2 ;;
-      --yce-token) has_direct_args=true; yce_token="$2"; shift 2 ;;
       --youwen-script) has_direct_args=true; youwen_script="$2"; shift 2 ;;
       --youwen-api-url) has_direct_args=true; youwen_api_url="$2"; shift 2 ;;
       --youwen-token) has_direct_args=true; youwen_token="$2"; shift 2 ;;
       --youwen-enhance-mode) has_direct_args=true; youwen_enhance_mode="$2"; shift 2 ;;
       --youwen-enable-search) has_direct_args=true; youwen_enable_search="$2"; shift 2 ;;
       --youwen-mgrep-api-key) has_direct_args=true; youwen_mgrep_api_key="$2"; shift 2 ;;
-      --yce-search-script) has_direct_args=true; yce_search_script="$2"; shift 2 ;;
-      --yce-binary) has_direct_args=true; yce_binary="$2"; shift 2 ;;
-      --yce-max-lines-per-blob) has_direct_args=true; yce_max_lines_per_blob="$2"; shift 2 ;;
-      --yce-upload-timeout) has_direct_args=true; yce_upload_timeout="$2"; shift 2 ;;
-      --yce-upload-concurrency) has_direct_args=true; yce_upload_concurrency="$2"; shift 2 ;;
-      --yce-retrieval-timeout) has_direct_args=true; yce_retrieval_timeout="$2"; shift 2 ;;
-      --yce-no-adaptive) has_direct_args=true; yce_no_adaptive="$2"; shift 2 ;;
-      --yce-no-webbrowser-enhance-prompt) has_direct_args=true; yce_no_webbrowser_enhance_prompt="$2"; shift 2 ;;
+      --yce-engine-script) has_direct_args=true; yce_engine_script="$2"; shift 2 ;;
+      --yce-engine-max-results) has_direct_args=true; yce_engine_max_results="$2"; shift 2 ;;
+      --yce-engine-max-turns) has_direct_args=true; yce_engine_max_turns="$2"; shift 2 ;;
       --mode) has_direct_args=true; mode="$2"; shift 2 ;;
       --timeout-enhance) has_direct_args=true; timeout_enhance_ms="$2"; shift 2 ;;
       --timeout-search) has_direct_args=true; timeout_search_ms="$2"; shift 2 ;;
@@ -720,11 +612,6 @@ cmd_setup() {
   local upstream_youwen_env
   upstream_youwen_env="$(resolve_youwen_env_file "$youwen_script")"
 
-  yce_url="${yce_url:-$(read_json_file_value "$YCE_CFG_FILE" "base_url")}"
-  [[ -z "$yce_url" ]] && yce_url="$DEFAULT_YCE_URL"
-
-  yce_token="${yce_token:-$(read_json_file_value "$YCE_CFG_FILE" "token")}"
-
   youwen_api_url="${youwen_api_url:-$(read_env_file_value "YCE_YOUWEN_API_URL")}"
   [[ -z "$youwen_api_url" && -n "$upstream_youwen_env" ]] && youwen_api_url="$(read_env_file_value "YOUWEN_API_URL" "$upstream_youwen_env")"
   [[ -z "$youwen_api_url" ]] && youwen_api_url="$DEFAULT_YOUWEN_API_URL"
@@ -743,29 +630,14 @@ cmd_setup() {
   youwen_mgrep_api_key="${youwen_mgrep_api_key:-$(read_env_file_value "YCE_YOUWEN_MGREP_API_KEY")}"
   [[ -z "$youwen_mgrep_api_key" && -n "$upstream_youwen_env" ]] && youwen_mgrep_api_key="$(read_env_file_value "YOUWEN_MGREP_API_KEY" "$upstream_youwen_env")"
 
-  yce_search_script="${yce_search_script:-$(read_env_file_value "YCE_SEARCH_SCRIPT")}"
-  [[ -z "$yce_search_script" ]] && yce_search_script="$DEFAULT_YCE_SEARCH_SCRIPT"
+  yce_engine_script="${yce_engine_script:-$(read_env_file_value "YCE_ENGINE_SCRIPT")}"
+  [[ -z "$yce_engine_script" ]] && yce_engine_script="$DEFAULT_YCE_ENGINE_SCRIPT"
 
-  yce_binary="${yce_binary:-$(read_env_file_value "YCE_BINARY")}"
-  [[ -z "$yce_binary" ]] && yce_binary="$(detect_local_yce_binary)"
+  yce_engine_max_results="${yce_engine_max_results:-$(read_env_file_value "YCE_ENGINE_MAX_RESULTS")}"
+  [[ -z "$yce_engine_max_results" ]] && yce_engine_max_results="$DEFAULT_YCE_ENGINE_MAX_RESULTS"
 
-  yce_max_lines_per_blob="${yce_max_lines_per_blob:-$(read_env_file_value "YCE_MAX_LINES_PER_BLOB")}"
-  [[ -z "$yce_max_lines_per_blob" ]] && yce_max_lines_per_blob="$DEFAULT_YCE_MAX_LINES_PER_BLOB"
-
-  yce_upload_timeout="${yce_upload_timeout:-$(read_env_file_value "YCE_UPLOAD_TIMEOUT")}"
-  [[ -z "$yce_upload_timeout" ]] && yce_upload_timeout="$DEFAULT_YCE_UPLOAD_TIMEOUT"
-
-  yce_upload_concurrency="${yce_upload_concurrency:-$(read_env_file_value "YCE_UPLOAD_CONCURRENCY")}"
-  [[ -z "$yce_upload_concurrency" ]] && yce_upload_concurrency="$DEFAULT_YCE_UPLOAD_CONCURRENCY"
-
-  yce_retrieval_timeout="${yce_retrieval_timeout:-$(read_env_file_value "YCE_RETRIEVAL_TIMEOUT")}"
-  [[ -z "$yce_retrieval_timeout" ]] && yce_retrieval_timeout="$DEFAULT_YCE_RETRIEVAL_TIMEOUT"
-
-  yce_no_adaptive="${yce_no_adaptive:-$(read_env_file_value "YCE_NO_ADAPTIVE")}"
-  [[ -z "$yce_no_adaptive" ]] && yce_no_adaptive="$DEFAULT_YCE_NO_ADAPTIVE"
-
-  yce_no_webbrowser_enhance_prompt="${yce_no_webbrowser_enhance_prompt:-$(read_env_file_value "YCE_NO_WEBBROWSER_ENHANCE_PROMPT")}"
-  [[ -z "$yce_no_webbrowser_enhance_prompt" ]] && yce_no_webbrowser_enhance_prompt="$DEFAULT_YCE_NO_WEBBROWSER_ENHANCE_PROMPT"
+  yce_engine_max_turns="${yce_engine_max_turns:-$(read_env_file_value "YCE_ENGINE_MAX_TURNS")}"
+  [[ -z "$yce_engine_max_turns" ]] && yce_engine_max_turns="$DEFAULT_YCE_ENGINE_MAX_TURNS"
 
   mode="${mode:-$(read_env_file_value "YCE_DEFAULT_MODE")}"
   [[ -z "$mode" ]] && mode="$DEFAULT_MODE"
@@ -779,15 +651,8 @@ cmd_setup() {
   if [[ "$has_direct_args" == false ]]; then
     echo "─── 交互式配置 ───"
     echo ""
-    printf "${CYAN}${BOLD}提示：${NC} YCE 密钥请前往 ${BOLD}https://yce.aige.de${NC} 获取\n"
-    echo ""
-    if [[ -n "$yce_token" ]]; then
-      echo "YCE Token 当前: $(mask_secret "$yce_token")"
-      read -rp "YCE Token（回车保留）: " new_val
-      [[ -n "$new_val" ]] && yce_token="$new_val"
-    else
-      read -rp "YCE Token（必填）: " yce_token
-    fi
+    printf "${CYAN}${BOLD}提示：${NC} 检索引擎为内置 yce-engine（Windsurf Devstral 本地搜索）。\n"
+    printf "      key 运行时自动从本机 Windsurf 发现；不依赖本地 Windsurf 时可在 .env 设置 ${BOLD}YCE_API_KEY${NC}。\n"
     echo ""
 
     printf "${CYAN}${BOLD}提示：${NC} 兑换码请前往 ${BOLD}https://a.aigy.de${NC} 获取\n"
@@ -796,11 +661,6 @@ cmd_setup() {
     [[ -z "$youwen_token" ]] && echo "兑换码 / Token 当前: (空)"
     read -rp "兑换码 / Token（回车保留）: " new_val
     [[ -n "$new_val" ]] && youwen_token="$new_val"
-    echo ""
-
-    echo "YCE URL 当前: $yce_url"
-    read -rp "YCE URL（回车保留）: " new_val
-    [[ -n "$new_val" ]] && yce_url="$new_val"
     echo ""
 
     if [[ -n "$youwen_script" ]]; then
@@ -826,24 +686,17 @@ cmd_setup() {
     echo ""
   fi
 
-  info "生成 .env 和 vendor/yce-tool.json"
+  info "生成 .env"
   write_runtime_config \
-    "$yce_token" \
-    "$yce_url" \
     "$youwen_script" \
     "$youwen_api_url" \
     "$youwen_token" \
     "$youwen_enhance_mode" \
     "$youwen_enable_search" \
     "$youwen_mgrep_api_key" \
-    "$yce_search_script" \
-    "$yce_binary" \
-    "$yce_max_lines_per_blob" \
-    "$yce_upload_timeout" \
-    "$yce_upload_concurrency" \
-    "$yce_retrieval_timeout" \
-    "$yce_no_adaptive" \
-    "$yce_no_webbrowser_enhance_prompt" \
+    "$yce_engine_script" \
+    "$yce_engine_max_results" \
+    "$yce_engine_max_turns" \
     "$mode" \
     "$timeout_enhance_ms" \
     "$timeout_search_ms"
@@ -923,7 +776,6 @@ cmd_uninstall() {
     dir=$(tool_dir_by_key "$tool")
     label=$(tool_label_by_key "$tool")
     [[ -f "$dir/.env" ]] && cp "$dir/.env" "$dir/.env.uninstall-backup"
-    [[ -f "$dir/vendor/yce-tool.json" ]] && cp "$dir/vendor/yce-tool.json" "$dir/vendor/yce-tool.json.uninstall-backup"
     rm -rf "$dir"
     ok "已卸载: ${label}"
   done
@@ -961,10 +813,10 @@ cmd_check() {
     warn "本地 .env 不存在，可运行 bash install.sh --setup"
   fi
 
-  if [[ -f "$YCE_CFG_FILE" ]]; then
-    ok "本地 vendor/yce-tool.json 已存在"
+  if [[ -f "$SCRIPT_DIR/vendor/yce-engine/yce-engine.mjs" ]]; then
+    ok "本地 yce-engine 引擎已存在"
   else
-    warn "本地 vendor/yce-tool.json 不存在，可运行 bash install.sh --setup"
+    warn "本地 vendor/yce-engine/yce-engine.mjs 不存在，请重新安装/同步"
   fi
   echo ""
 }
@@ -1037,25 +889,23 @@ print_help() {
   echo "  bash install.sh                            # 交互式菜单（推荐）"
   echo "  bash install.sh --install                  # 安装或更新（必要时自动下载远程最新版本）"
   echo "  bash install.sh --target agents            # 仅安装到指定工具"
-  echo "  bash install.sh --setup                    # 交互式配置 YCE Token / 兑换码 / API（默认使用仓内 scripts/youwen.js）"
-  echo "  bash install.sh --setup --yce-token <t> --youwen-script <path> --youwen-token <code>  # 直接写入 YCE Token + yw-enhance 路径 + 兑换码 / Token"
+  echo "  bash install.sh --setup                    # 交互式配置 兑换码 / API（默认使用仓内 scripts/youwen.js）"
+  echo "  bash install.sh --setup --youwen-script <path> --youwen-token <code>  # 直接写入 yw-enhance 路径 + 兑换码 / Token"
   echo "  bash install.sh --sync                     # 同步脚本 + 配置到其他已安装目录"
-  echo "  bash install.sh --sync-env                 # 仅同步 .env 和 vendor/yce-tool.json"
+  echo "  bash install.sh --sync-env                 # 仅同步 .env"
   echo "  bash install.sh --check                    # 检查安装状态"
   echo "  bash install.sh --uninstall                # 卸载"
   echo ""
   echo "支持的工具: ${TOOL_KEYS[*]}"
   echo ""
   echo "说明:"
-  echo "  - 默认 YCE 地址: $DEFAULT_YCE_URL"
-  echo "  - --setup 会优先复用当前 .env / vendor/yce-tool.json，并优先对齐仓内 scripts/youwen.js 对应的 YCE 根目录配置"
+  echo "  - 检索引擎为内置 yce-engine（Windsurf Devstral 本地搜索），key 运行时自动从本机 Windsurf 发现；不依赖本地 Windsurf 时在 .env 设置 YCE_API_KEY"
+  echo "  - --setup 会优先复用当前 .env，并优先对齐仓内 scripts/youwen.js 对应的 YCE 根目录配置"
   echo "  - YCE_YOUWEN_SCRIPT 默认使用仓内脚本: $DEFAULT_YOUWEN_SCRIPT；如需特殊覆盖，仍可通过 --youwen-script 或 .env 指定"
-  echo "  - 会按当前系统自动选择 YCE wrapper（Windows 用 yce-search.ps1，其它系统用 yce-search.sh）"
-  echo "  - 本仓已内置 yce search / yce enhance 脚本，以及 darwin-arm64 / windows-x64 yce binary"
+  echo "  - 本仓已内置 yce-engine 检索引擎（vendor/yce-engine）与 yce enhance 脚本"
   echo "  - scripts/lib/* 是内部模块，不应直接配置成 YCE_YOUWEN_SCRIPT"
-  echo "  - 可交互配置：YCE Token、YCE URL、兑换码 / Token、yw-enhance API"
   echo "  - yw-enhance 扩展参数: --youwen-api-url --youwen-token --youwen-enhance-mode --youwen-enable-search --youwen-mgrep-api-key"
-  echo "  - YCE 扩展参数: --yce-max-lines-per-blob --yce-upload-timeout --yce-upload-concurrency --yce-retrieval-timeout --yce-no-adaptive --yce-no-webbrowser-enhance-prompt --timeout-enhance --timeout-search"
+  echo "  - yce-engine 扩展参数: --yce-engine-script --yce-engine-max-results --yce-engine-max-turns --timeout-enhance --timeout-search"
   echo "  - 远程仓地址: $REPO_URL"
 }
 
@@ -1098,7 +948,7 @@ main() {
         cmd="help"
         shift
         ;;
-      --yce-url|--yce-token|--youwen-script|--youwen-api-url|--youwen-token|--youwen-enhance-mode|--youwen-enable-search|--youwen-mgrep-api-key|--yce-search-script|--yce-binary|--yce-max-lines-per-blob|--yce-upload-timeout|--yce-upload-concurrency|--yce-retrieval-timeout|--yce-no-adaptive|--yce-no-webbrowser-enhance-prompt|--mode|--timeout-enhance|--timeout-search)
+      --youwen-script|--youwen-api-url|--youwen-token|--youwen-enhance-mode|--youwen-enable-search|--youwen-mgrep-api-key|--yce-engine-script|--yce-engine-max-results|--yce-engine-max-turns|--mode|--timeout-enhance|--timeout-search)
         setup_args+=("$1")
         shift
         [[ $# -gt 0 ]] && {

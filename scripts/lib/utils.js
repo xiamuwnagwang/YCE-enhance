@@ -2,44 +2,9 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
+const { runLocalFastSearch } = require("./localFastSearch");
 
 const ROOT_DIR = path.resolve(__dirname, "..", "..");
-const YCE_TOOL_DEFAULT_CONFIG = {
-  base_url: "https://yce.aigy.de/",
-  token: "",
-};
-
-function detectPlatformDir() {
-  const platform = os.platform();
-  const arch = os.arch();
-  if (platform === "darwin") {
-    if (arch === "arm64") return "darwin-arm64";
-    if (arch === "x64") return "darwin-amd64";
-  }
-  if (platform === "linux") {
-    if (arch === "x64") return "linux-amd64";
-    if (arch === "arm64") return "linux-arm64";
-  }
-  if (platform === "win32") {
-    if (arch === "x64") return "windows-x64";
-  }
-  return null;
-}
-
-function detectBinaryFilename(platformDir) {
-  if (platformDir === "windows-x64") {
-    return "yce-tool-rs.exe";
-  }
-  return "yce-tool-rs";
-}
-
-function detectSearchScript(platformDir) {
-  if (platformDir === "windows-x64") {
-    return "./scripts/yce-search.ps1";
-  }
-  return "./scripts/yce-search.sh";
-}
-
 function expandHomePath(inputPath) {
   if (typeof inputPath !== "string") {
     return inputPath;
@@ -64,34 +29,6 @@ function resolveConfigPath(inputPath) {
   return path.resolve(ROOT_DIR, expanded);
 }
 
-function ensureYceToolConfigFile(configPath) {
-  const resolvedPath = resolveConfigPath(configPath);
-  if (typeof resolvedPath !== "string" || resolvedPath.trim().length === 0) {
-    return resolvedPath;
-  }
-
-  if (fs.existsSync(resolvedPath)) {
-    return resolvedPath;
-  }
-
-  const fallbackPath = path.join(ROOT_DIR, "vendor", "yce-tool.default.json");
-  const shouldBootstrapDefault = path.normalize(resolvedPath) === path.normalize(path.join(ROOT_DIR, "vendor", "yce-tool.json"));
-
-  fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
-
-  if (fs.existsSync(fallbackPath)) {
-    fs.copyFileSync(fallbackPath, resolvedPath);
-    return resolvedPath;
-  }
-
-  if (shouldBootstrapDefault) {
-    fs.writeFileSync(resolvedPath, `${JSON.stringify(YCE_TOOL_DEFAULT_CONFIG, null, 2)}\n`, "utf8");
-    return resolvedPath;
-  }
-
-  return resolvedPath;
-}
-
 function resolveYouwenScript(configuredValue) {
   const configuredPath = resolveConfigPath(configuredValue || DEFAULTS.youwenScript);
   return configuredPath;
@@ -102,16 +39,9 @@ const DEFAULTS = {
   youwenApiUrl: "https://a.aigy.de",
   youwenEnhanceMode: "agent",
   youwenEnableSearch: true,
-  yceSearchScript: detectSearchScript(detectPlatformDir()),
-  yceBinary: (() => {
-    const platformDir = detectPlatformDir();
-    return platformDir ? `./vendor/${platformDir}/${detectBinaryFilename(platformDir)}` : "";
-  })(),
-  yceConfig: "./vendor/yce-tool.json",
-  yceMaxLinesPerBlob: 800,
-  yceRetrievalTimeout: 60,
-  yceNoAdaptive: false,
-  yceNoWebbrowserEnhancePrompt: false,
+  yceEngineScript: "./vendor/yce-engine/yce-engine.mjs",
+  yceEngineMaxResults: 10,
+  yceEngineMaxTurns: 3,
   defaultMode: "auto",
   timeoutEnhanceMs: 300000,
   timeoutSearchMs: 180000,
@@ -213,44 +143,33 @@ function buildYwEnhanceEnv(merged) {
   return childEnv;
 }
 
-function buildYceCliOptions(merged) {
-  return {
-    maxLinesPerBlob: hasOwn(merged, "YCE_MAX_LINES_PER_BLOB") && isNonEmptyString(merged.YCE_MAX_LINES_PER_BLOB)
-      ? toOptionalPositiveInt(merged.YCE_MAX_LINES_PER_BLOB, DEFAULTS.yceMaxLinesPerBlob)
-      : null,
-    uploadTimeout: hasOwn(merged, "YCE_UPLOAD_TIMEOUT") && isNonEmptyString(merged.YCE_UPLOAD_TIMEOUT)
-      ? toOptionalPositiveInt(merged.YCE_UPLOAD_TIMEOUT, null)
-      : null,
-    uploadConcurrency: hasOwn(merged, "YCE_UPLOAD_CONCURRENCY") && isNonEmptyString(merged.YCE_UPLOAD_CONCURRENCY)
-      ? toOptionalPositiveInt(merged.YCE_UPLOAD_CONCURRENCY, null)
-      : null,
-    retrievalTimeout: hasOwn(merged, "YCE_RETRIEVAL_TIMEOUT") && isNonEmptyString(merged.YCE_RETRIEVAL_TIMEOUT)
-      ? toOptionalPositiveInt(merged.YCE_RETRIEVAL_TIMEOUT, DEFAULTS.yceRetrievalTimeout)
-      : null,
-    noAdaptive: hasOwn(merged, "YCE_NO_ADAPTIVE") && isNonEmptyString(merged.YCE_NO_ADAPTIVE)
-      ? toBoolean(merged.YCE_NO_ADAPTIVE, DEFAULTS.yceNoAdaptive)
-      : false,
-    noWebbrowserEnhancePrompt: hasOwn(merged, "YCE_NO_WEBBROWSER_ENHANCE_PROMPT") && isNonEmptyString(merged.YCE_NO_WEBBROWSER_ENHANCE_PROMPT)
-      ? toBoolean(
-          merged.YCE_NO_WEBBROWSER_ENHANCE_PROMPT,
-          DEFAULTS.yceNoWebbrowserEnhancePrompt
-        )
-      : false,
-  };
+function buildYceEngineEnv(merged) {
+  const childEnv = {};
+  const passthroughKeys = [
+    "YCE_API_KEY",
+    "WINDSURF_API_KEY",
+  ];
+
+  for (const key of passthroughKeys) {
+    if (hasOwn(merged, key) && isNonEmptyString(merged[key])) {
+      childEnv[key] = String(merged[key]).trim();
+    }
+  }
+
+  return childEnv;
 }
 
 function loadRuntimeConfig() {
   const envFile = parseEnvFile(path.join(ROOT_DIR, ".env"));
   const merged = { ...envFile, ...process.env };
-  const yceConfig = ensureYceToolConfigFile(merged.YCE_CONFIG || DEFAULTS.yceConfig);
   return {
     rootDir: ROOT_DIR,
     youwenScript: resolveYouwenScript(merged.YCE_YOUWEN_SCRIPT),
-    yceSearchScript: resolveConfigPath(merged.YCE_SEARCH_SCRIPT || DEFAULTS.yceSearchScript),
-    yceBinary: resolveConfigPath(merged.YCE_BINARY || DEFAULTS.yceBinary),
-    yceConfig,
+    yceEngineScript: resolveConfigPath(merged.YCE_ENGINE_SCRIPT || merged.YCE_FAST_CONTEXT_SCRIPT || DEFAULTS.yceEngineScript),
+    yceEngineMaxResults: toPositiveInt(merged.YCE_ENGINE_MAX_RESULTS || merged.YCE_FAST_CONTEXT_MAX_RESULTS, DEFAULTS.yceEngineMaxResults),
+    yceEngineMaxTurns: toPositiveInt(merged.YCE_ENGINE_MAX_TURNS || merged.YCE_FAST_CONTEXT_MAX_TURNS, DEFAULTS.yceEngineMaxTurns),
     ywEnhanceEnv: buildYwEnhanceEnv(merged),
-    yceCliOptions: buildYceCliOptions(merged),
+    yceEngineEnv: buildYceEngineEnv(merged),
     defaultMode: merged.YCE_DEFAULT_MODE || DEFAULTS.defaultMode,
     timeoutEnhanceMs: toPositiveInt(merged.YCE_TIMEOUT_ENHANCE_MS, DEFAULTS.timeoutEnhanceMs),
     timeoutSearchMs: toPositiveInt(merged.YCE_TIMEOUT_SEARCH_MS, DEFAULTS.timeoutSearchMs),
@@ -469,6 +388,259 @@ function buildError(source, code, message, extra = {}) {
   return { source, code, message, ...extra };
 }
 
+const LOCAL_SEARCH_SKIP_DIRS = new Set([
+  ".git",
+  ".next",
+  ".turbo",
+  ".vercel",
+  "build",
+  "coverage",
+  "dist",
+  "node_modules",
+  "vendor",
+]);
+
+const LOCAL_SEARCH_TEXT_EXTENSIONS = new Set([
+  ".c",
+  ".cc",
+  ".cjs",
+  ".conf",
+  ".config",
+  ".cpp",
+  ".css",
+  ".env",
+  ".example",
+  ".go",
+  ".h",
+  ".hpp",
+  ".html",
+  ".java",
+  ".js",
+  ".json",
+  ".jsx",
+  ".md",
+  ".mjs",
+  ".php",
+  ".ps1",
+  ".py",
+  ".rb",
+  ".rs",
+  ".sh",
+  ".sql",
+  ".svelte",
+  ".toml",
+  ".ts",
+  ".tsx",
+  ".txt",
+  ".vue",
+  ".xml",
+  ".yaml",
+  ".yml",
+]);
+
+const LOCAL_SEARCH_STOP_WORDS = new Set([
+  "and",
+  "the",
+  "for",
+  "with",
+  "where",
+  "what",
+  "how",
+  "this",
+  "that",
+  "在哪里",
+  "哪里",
+  "逻辑",
+  "代码",
+  "文件",
+  "定位",
+  "修复",
+  "当前",
+]);
+
+function localSearchTokens(query) {
+  const normalized = String(query || "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase();
+  const rawTokens = normalized.match(/[a-z0-9_.$/-]{3,}|[\u4e00-\u9fa5]{2,}/g) || [];
+  const tokens = [];
+  for (const token of rawTokens) {
+    const clean = token.replace(/^[-_.$/]+|[-_.$/]+$/g, "");
+    if (!clean || LOCAL_SEARCH_STOP_WORDS.has(clean)) {
+      continue;
+    }
+    tokens.push(clean);
+  }
+  return [...new Set(tokens)];
+}
+
+function isLocalSearchTextFile(filePath) {
+  const base = path.basename(filePath);
+  const ext = path.extname(base).toLowerCase();
+  if (LOCAL_SEARCH_TEXT_EXTENSIONS.has(ext)) {
+    return true;
+  }
+  return /(^|\.)(env|gitignore|dockerignore|npmrc|yarnrc|prettierrc|eslintrc|babelrc)$/i.test(base);
+}
+
+function collectLocalSearchFiles(rootDir, options = {}) {
+  const {
+    maxFiles = 5000,
+    maxDepth = 8,
+  } = options;
+  const files = [];
+
+  function walk(dir, depth) {
+    if (files.length >= maxFiles || depth > maxDepth) {
+      return;
+    }
+
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (files.length >= maxFiles) {
+        break;
+      }
+      if (entry.name === ".env") {
+        continue;
+      }
+      if (entry.name.startsWith(".") && ![".env", ".env.example", ".gitignore"].includes(entry.name)) {
+        continue;
+      }
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!LOCAL_SEARCH_SKIP_DIRS.has(entry.name)) {
+          walk(fullPath, depth + 1);
+        }
+        continue;
+      }
+      if (entry.isFile() && isLocalSearchTextFile(fullPath)) {
+        files.push(fullPath);
+      }
+    }
+  }
+
+  walk(rootDir, 0);
+  return files;
+}
+
+function findLineRanges(lines, tokens) {
+  const ranges = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].toLowerCase();
+    if (!tokens.some((token) => line.includes(token))) {
+      continue;
+    }
+
+    const lineNo = index + 1;
+    const previous = ranges[ranges.length - 1];
+    if (previous && lineNo <= previous.end + 6) {
+      previous.end = lineNo;
+    } else {
+      ranges.push({ start: lineNo, end: lineNo });
+    }
+    if (ranges.length >= 3) {
+      break;
+    }
+  }
+  return ranges.map((range) => (range.start === range.end ? `L${range.start}` : `L${range.start}-${range.end}`));
+}
+
+function runLocalSearch({ query, cwd, maxResults = 10 }) {
+  const result = {
+    executed: true,
+    success: true,
+    query,
+    raw_stdout: null,
+    result_present: false,
+    empty_result: false,
+    exit_code: 0,
+    stderr_summary: ["local fallback search"],
+  };
+
+  const fast = runLocalFastSearch({ query, cwd, maxResults });
+  if (fast.resultPresent) {
+    result.result_present = true;
+    result.raw_stdout = fast.output;
+    result.stderr_summary = fast.diagnostics;
+    return { search: result, error: null };
+  }
+
+  const tokens = localSearchTokens(query);
+  if (tokens.length === 0 || !isDirectory(cwd)) {
+    result.empty_result = true;
+    result.raw_stdout = fast.output || "No relevant files found by local fallback.";
+    result.stderr_summary = fast.diagnostics && fast.diagnostics.length ? fast.diagnostics : result.stderr_summary;
+    return { search: result, error: buildError("local-search", "EMPTY_RESULT", "Local fallback search returned no results.") };
+  }
+
+  const files = collectLocalSearchFiles(cwd);
+  const matches = [];
+  for (const filePath of files) {
+    let content;
+    try {
+      content = fs.readFileSync(filePath, "utf8");
+    } catch {
+      continue;
+    }
+
+    const lowerPath = filePath.toLowerCase();
+    const lowerContent = content.toLowerCase();
+    let score = 0;
+    let hitCount = 0;
+    for (const token of tokens) {
+      const inPath = lowerPath.includes(token);
+      const inContent = lowerContent.includes(token);
+      if (inPath) score += 8;
+      if (inContent) {
+        score += token.length >= 8 ? 6 : 3;
+        hitCount += 1;
+      }
+    }
+
+    if (score <= 0) {
+      continue;
+    }
+
+    const lines = content.split(/\r?\n/);
+    matches.push({
+      filePath,
+      relativePath: path.relative(cwd, filePath),
+      score: score + hitCount,
+      ranges: findLineRanges(lines, tokens),
+    });
+  }
+
+  matches.sort((a, b) => b.score - a.score || a.relativePath.localeCompare(b.relativePath));
+  const picked = matches.slice(0, Math.max(1, maxResults || 10));
+
+  if (picked.length === 0) {
+    result.empty_result = true;
+    result.raw_stdout = fast.output || "No relevant files found by local fallback.";
+    result.stderr_summary = fast.diagnostics && fast.diagnostics.length ? fast.diagnostics : result.stderr_summary;
+    return { search: result, error: buildError("local-search", "EMPTY_RESULT", "Local fallback search returned no results.") };
+  }
+
+  result.result_present = true;
+  result.raw_stdout = [
+    `Found ${picked.length} relevant files by local fallback.`,
+    "",
+    ...picked.map((item, index) => {
+      const rangeText = item.ranges.length > 0 ? ` (${item.ranges.join(", ")})` : "";
+      return `  [${index + 1}/${picked.length}] ${item.filePath}${rangeText}`;
+    }),
+    "",
+    `local fallback tokens: ${tokens.join(", ")}`,
+  ].join("\n");
+
+  return { search: result, error: null };
+}
+
 const QUOTA_PATTERNS = [
   /quota\s*(exceed|exhaust|used\s*up|reach|over|run\s*out)/i,
   /(insufficient|out\s*of)\s*(credit|balance|quota|fund|token)/i,
@@ -662,9 +834,7 @@ function serializeForStdout(payload, pretty = false) {
     if (payload.meta.dependency_paths) {
       pushLine(2, `<dependency-paths>`);
       pushTextTag(3, "yw-enhance-script", payload.meta.dependency_paths.yw_enhance_script, { cdata: true, always: true });
-      pushTextTag(3, "yce-search-script", payload.meta.dependency_paths.yce_search_script, { cdata: true, always: true });
-      pushTextTag(3, "yce-binary", payload.meta.dependency_paths.yce_binary, { cdata: true, always: true });
-      pushTextTag(3, "yce-config", payload.meta.dependency_paths.yce_config, { cdata: true, always: true });
+      pushTextTag(3, "yce-engine-script", payload.meta.dependency_paths.yce_engine_script, { cdata: true, always: true });
       pushLine(2, `</dependency-paths>`);
     }
 
@@ -745,10 +915,6 @@ module.exports = {
   ROOT_DIR,
   buildError,
   detectQuotaError,
-  detectBinaryFilename,
-  detectPlatformDir,
-  detectSearchScript,
-  ensureYceToolConfigFile,
   ensureAbsolutePath,
   expandHomePath,
   extractEnhancedBlock,
@@ -763,6 +929,7 @@ module.exports = {
   parseEnhancedContent,
   resolveConfigPath,
   resolveYouwenScript,
+  runLocalSearch,
   runCommand,
   serializeForStdout,
   summarizeText,

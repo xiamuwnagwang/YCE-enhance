@@ -87,16 +87,6 @@ main() {
 
   # Ensure we don't accidentally ship local env or any tokens.
   rm -f "$pkg_root/.env" 2>/dev/null || true
-  rm -f "$pkg_root/vendor/yce-tool.json" 2>/dev/null || true
-
-  # Force a safe default config (no embedded token) for redistribution.
-  mkdir -p "$pkg_root/vendor"
-  cat > "$pkg_root/vendor/yce-tool.default.json" <<'JSONEOF'
-{
-  "base_url": "https://yce.aigy.de/",
-  "token": ""
-}
-JSONEOF
 
   # Redact any token-like strings from the packaged copy only.
   python3 - "$pkg_root" <<'PY'

@@ -1,6 +1,4 @@
-.ace-tool/
 .env
-vendor/ace-tool.json
 .DS_Store
 dist/
 
