@@ -209,7 +209,7 @@ YCE 的 stdout 固定是 XML，不再输出 JSON。最重要的标签如下：
 | `YCE_ENGINE_MAX_RESULTS` | `10` | 检索返回的最大文件数 |
 | `YCE_ENGINE_MAX_TURNS` | `3` | 检索 agent 的最大轮数 |
 | `YCE_RELAY_URL` | `https://yce.aigy.de` | 检索 relay 地址 |
-| `YCE_RELAY_TOKEN` | 默认同 `YCE_YOUWEN_TOKEN` | relay 鉴权（兑换码来自 a.aigy.de） |
+| `YCE_RELAY_TOKEN` | 空 | YCE 搜索密钥；请求 `/yce/lease-key` 时作为 `Authorization: Bearer <token>` 发送 |
 | `YCE_API_KEY` | 空 | 不走 relay 时的直连 key |
 | `YCE_LOCAL_FALLBACK` | 空 | 设为 `true` 时远端失败才启用本地 fast fallback |
 | `YCE_DEFAULT_MODE` | `auto` | 默认模式 |
@@ -219,6 +219,7 @@ YCE 的 stdout 固定是 XML，不再输出 JSON。最重要的标签如下：
 **关键说明：**
 - 当前仓里的 `./scripts/youwen.js` 就是默认增强入口，不再要求先装外部 `yw-enhance`
 - `YCE_YOUWEN_SCRIPT` 默认写成 `./scripts/youwen.js`，只有在你明确要覆盖时才改成别的路径
+- `YCE_RELAY_URL` 默认固定写入 `https://yce.aigy.de`；`YCE_RELAY_TOKEN` 必须填写 YCE 搜索密钥，不会再从 `YCE_YOUWEN_TOKEN` 自动复制
 - 纯 `search` 只依赖仓内 yce-engine 引擎；`enhance` 与 `auto` 会额外走仓内 `./scripts/youwen.js`
 
 ### YCE 传给 yw-enhance 的固定参数与环境变量
@@ -260,7 +261,7 @@ config.yceEngineScript（默认 ./vendor/yce-engine/yce-engine.mjs）
 - 退出码 0 且输出含 `Found 0 relevant files` 时映射为 `EMPTY_RESULT`（命令成功但无结果）。
 - 若 relay 租 key 失败，返回 `AUTH_ERROR`（优先检查 `YCE_RELAY_URL/YCE_RELAY_TOKEN` 或 `YCE_API_KEY`）。
 - 引擎在本地循环执行 rg/readfile/tree 收集上下文；远端只做推理，**不上传代码、不建服务端索引**。
-- 默认配置 `YCE_RELAY_URL=https://yce.aigy.de`，兑换码从 `a.aigy.de` 获取并写入 `YCE_YOUWEN_TOKEN` / `YCE_RELAY_TOKEN`。
+- 默认配置会写入 `YCE_RELAY_URL=https://yce.aigy.de`；`YCE_RELAY_TOKEN` 是独立的 YCE 搜索密钥，不能和 `YCE_YOUWEN_TOKEN` 混用。
 - 排障时先看 `<meta><dependency-paths>` 里的 `yce-engine-script` 路径是否正确。
 
 ### 当前仓库已实际内置的检索资源
@@ -315,7 +316,7 @@ config.yceEngineScript（默认 ./vendor/yce-engine/yce-engine.mjs）
 ### 7. relay 租 key 失败
 - **症状**：`errors[].code === "AUTH_ERROR"`，`--check-key` 报 relay lease failed
 - **原因**：未配置 `YCE_RELAY_URL/YCE_RELAY_TOKEN`，或 relay 端点不可用
-- **处理**：运行 `install.sh --setup` 写入 a.aigy.de 兑换码；必要时手动设置 `YCE_API_KEY`；再用 `node ./vendor/yce-engine/yce-engine.mjs --check-key` 验证
+- **处理**：运行 `install.sh --setup` 写入 YCE 搜索密钥到 `YCE_RELAY_TOKEN`；必要时手动设置 `YCE_API_KEY`；再用 `node ./vendor/yce-engine/yce-engine.mjs --check-key` 验证
 
 ### 7.5 YCE 远端 `resource_exhausted`
 - **症状**：`errors[].code === "UPSTREAM_ERROR"`，message 包含 `resource_exhausted` / `internal error occurred` / `trace ID`
@@ -357,7 +358,7 @@ bash ./install.sh --uninstall
 .\install.ps1 -Uninstall
 ```
 
-> 检索引擎已切换为内置的 yce-engine（YCE 本地语义搜索链路）；Windows 下推荐通过 `YCE_RELAY_URL/YCE_RELAY_TOKEN` 租借 key。
+> 检索引擎已切换为内置的 yce-engine（YCE 本地语义搜索链路）；Windows 下默认写入 `YCE_RELAY_URL=https://yce.aigy.de`，并通过独立的 `YCE_RELAY_TOKEN` 租借 key。
 
 ## 打包 / 发布
 

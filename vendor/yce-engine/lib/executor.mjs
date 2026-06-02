@@ -1,7 +1,7 @@
 /**
  * Tool executor for YCE semantic search agent commands.
  *
- * Uses @vscode/ripgrep for built-in rg binary — no system install needed.
+ * Prefers the current-platform @vscode/ripgrep binary, with system rg fallback.
  * Matches Python ToolExecutor behavior exactly.
  */
 
@@ -9,10 +9,33 @@ import { execFileSync, execFile as execFileCb } from "node:child_process";
 import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
 import { join, resolve, relative, sep, basename } from "node:path";
 import { promisify } from "node:util";
-import { rgPath } from "@vscode/ripgrep";
+import { createRequire } from "node:module";
 import treeNodeCli from "tree-node-cli";
 
 const execFileAsync = promisify(execFileCb);
+
+const require = createRequire(import.meta.url);
+function resolveRipgrepPath() {
+  const arch = process.env.npm_config_arch || process.arch;
+  const binaryName = process.platform === "win32" ? "rg.exe" : "rg";
+  const platformPkg = `@vscode/ripgrep-${process.platform}-${arch}`;
+
+  try {
+    return require.resolve(`${platformPkg}/bin/${binaryName}`);
+  } catch {
+    // Packaged installs may carry node_modules from another platform. In that
+    // case do not fail during module import; let the command fall back to a
+    // system rg if available, while install scripts can repair node_modules.
+  }
+
+  try {
+    return require.resolve(`@vscode/ripgrep/bin/${binaryName}`);
+  } catch {
+    return "rg";
+  }
+}
+
+const rgPath = resolveRipgrepPath();
 
 /**
  * Parse an integer env var with optional clamping.

@@ -151,12 +151,9 @@ function buildYceEngineEnv(merged) {
       ? String(merged.YCE_RELAY_URL).trim()
       : "") || DEFAULTS.yceRelayUrl;
   const relayToken =
-    (hasOwn(merged, "YCE_RELAY_TOKEN") && isNonEmptyString(merged.YCE_RELAY_TOKEN)
+    hasOwn(merged, "YCE_RELAY_TOKEN") && isNonEmptyString(merged.YCE_RELAY_TOKEN)
       ? String(merged.YCE_RELAY_TOKEN).trim()
-      : "") ||
-    (hasOwn(merged, "YCE_YOUWEN_TOKEN") && isNonEmptyString(merged.YCE_YOUWEN_TOKEN)
-      ? String(merged.YCE_YOUWEN_TOKEN).trim()
-      : "");
+      : "";
 
   if (relayUrl) childEnv.YCE_RELAY_URL = relayUrl;
   if (relayToken) childEnv.YCE_RELAY_TOKEN = relayToken;

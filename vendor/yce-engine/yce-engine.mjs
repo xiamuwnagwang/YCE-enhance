@@ -204,9 +204,6 @@ function loadRuntimeDotEnv() {
   if (!process.env.YCE_RELAY_URL) {
     process.env.YCE_RELAY_URL = "https://yce.aigy.de";
   }
-  if (!process.env.YCE_RELAY_TOKEN && process.env.YCE_YOUWEN_TOKEN) {
-    process.env.YCE_RELAY_TOKEN = process.env.YCE_YOUWEN_TOKEN;
-  }
 }
 
 async function main() {

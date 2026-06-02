@@ -271,6 +271,47 @@ function Test-NodeInstalled {
   exit 1
 }
 
+function Install-YceEngineDependencies {
+  param(
+    [string]$InstallDir,
+    [string]$ToolName
+  )
+
+  $engineDir = Join-Path $InstallDir "vendor\yce-engine"
+  $packageJson = Join-Path $engineDir "package.json"
+  if (-not (Test-Path $packageJson)) {
+    Write-Warn "${ToolName}: 未找到 yce-engine package.json，跳过依赖修复"
+    return
+  }
+
+  $npmPath = Get-Command npm.cmd -ErrorAction SilentlyContinue
+  if (-not $npmPath) { $npmPath = Get-Command npm -ErrorAction SilentlyContinue }
+  if (-not $npmPath) {
+    Write-Warn "${ToolName}: 未安装 npm，无法自动安装当前 Windows 平台的 ripgrep 依赖"
+    Write-Warn "${ToolName}: 请安装 Node.js/npm 后在 $engineDir 执行 npm install --omit=dev --no-audit --fund=false"
+    return
+  }
+
+  if ($DryRun) {
+    Write-DryRun "将修复 ${ToolName} 的 yce-engine 依赖"
+    Write-DryRun "  cd $engineDir; npm install --omit=dev --no-audit --fund=false"
+    return
+  }
+
+  Write-Info "${ToolName}: 安装/修复 yce-engine 依赖（会按当前 Windows 平台补齐 @vscode/ripgrep-*）"
+  Push-Location $engineDir
+  try {
+    & $npmPath.Source install --omit=dev --no-audit --fund=false
+    if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
+    Write-Ok "${ToolName}: yce-engine 依赖已就绪"
+  } catch {
+    Write-Warn "${ToolName}: yce-engine 依赖安装失败：$($_.Exception.Message)"
+    Write-Warn "${ToolName}: 可稍后手动执行：cd `"$engineDir`"; npm install --omit=dev --no-audit --fund=false"
+  } finally {
+    Pop-Location
+  }
+}
+
 function Get-ToolMap {
   $toolMap = @(
     @{ Key="claude";   Label="Claude Code"; Dir=Join-Path $env:USERPROFILE ".claude\skills\$SkillName" }
@@ -333,6 +374,7 @@ function Install-ToDir {
 
   if ($sourceReal -eq $targetReal) {
     Write-Ok "${ToolName}: 已是当前目录"
+    Install-YceEngineDependencies -InstallDir $TargetDir -ToolName $ToolName
     return
   }
 
@@ -369,6 +411,7 @@ function Install-ToDir {
     Copy-Item (Join-Path $TargetDir '.env.example') $envTarget -Force
   }
 
+  Install-YceEngineDependencies -InstallDir $TargetDir -ToolName $ToolName
   Write-Ok "${ToolName}: 已安装/更新"
 }
 
@@ -451,7 +494,6 @@ function Write-RuntimeConfig {
   if (-not (Test-Path $resolvedEngine)) { Write-Warn "yce-engine 入口不存在: $RuntimeYceEngineScript" }
 
   if (-not $RuntimeYceRelayUrl) { $RuntimeYceRelayUrl = $DefaultYceRelayUrl }
-  if (-not $RuntimeYceRelayToken -and $RuntimeYouwenToken) { $RuntimeYceRelayToken = $RuntimeYouwenToken }
   $RuntimeLocalFallback = Normalize-LocalFallback $(if ($RuntimeLocalFallback) { $RuntimeLocalFallback } else { $DefaultLocalFallback })
 
   if ($DryRun) {
@@ -489,7 +531,7 @@ function Write-RuntimeConfig {
     "YCE_YOUWEN_MGREP_API_KEY=$RuntimeYouwenMgrepApiKey"
     ""
     "# yce-engine adapter (远端优先：默认连接 yce.aigy.de relay)"
-    "# 兑换码（YCE_YOUWEN_TOKEN）会同步用作 YCE_RELAY_TOKEN"
+    "# YCE_RELAY_TOKEN 是 YCE 搜索密钥；不要和 YCE_YOUWEN_TOKEN 混用"
     "YCE_ENGINE_SCRIPT=$RuntimeYceEngineScript"
     "YCE_ENGINE_MAX_RESULTS=$RuntimeYceEngineMaxResults"
     "YCE_ENGINE_MAX_TURNS=$RuntimeYceEngineMaxTurns"
@@ -508,7 +550,8 @@ function Write-RuntimeConfig {
   Write-Ok "配置完成"
   Write-Host "  .env: $EnvFile"
   Write-Host "  yce-engine: $RuntimeYceEngineScript"
-  if ($RuntimeYouwenToken) { Write-Host "  兑换码 / Token: $(Get-MaskedValue $RuntimeYouwenToken)" }
+  if ($RuntimeYouwenToken) { Write-Host "  Youwen 增强 Token: $(Get-MaskedValue $RuntimeYouwenToken)" }
+  if ($RuntimeYceRelayToken) { Write-Host "  YCE 搜索密钥: $(Get-MaskedValue $RuntimeYceRelayToken)" }
   Write-Host "  本地检索 fallback: $RuntimeLocalFallback"
 }
 
@@ -534,6 +577,20 @@ function Invoke-Check {
 
   if (Test-Path $EnvFile) { Write-Ok "本地 .env 已存在" } else { Write-Warn "本地 .env 不存在，可运行 .\install.ps1 -Setup" }
   if (Test-Path (Join-Path $ScriptDir "vendor\yce-engine\yce-engine.mjs")) { Write-Ok "本地 yce-engine 引擎已存在" } else { Write-Warn "本地 vendor/yce-engine/yce-engine.mjs 不存在，请重新安装/同步" }
+  $cpu = if ($env:PROCESSOR_ARCHITECTURE) { $env:PROCESSOR_ARCHITECTURE.ToLower() } else { "" }
+  $rgArch = switch ($cpu) {
+    "amd64" { "x64" }
+    "arm64" { "arm64" }
+    "x86" { "ia32" }
+    default { $cpu }
+  }
+  if ($env:OS -eq 'Windows_NT' -and $rgArch) {
+    $rgPackage = "@vscode/ripgrep-win32-$rgArch"
+    $rgPackagePath = Join-Path (Join-Path (Join-Path (Join-Path $ScriptDir "vendor") "yce-engine") "node_modules") $rgPackage
+    if (-not (Test-Path $rgPackagePath)) {
+      Write-Warn "当前 Windows 平台 ripgrep 依赖可能缺失：$rgPackage；请运行 .\install.ps1 -Install 修复"
+    }
+  }
   Write-Host ""
 }
 
@@ -771,7 +828,8 @@ function Invoke-Setup {
   $runtimeYceEngineScript = if ($YceEngineScript) { $YceEngineScript } elseif ($currentVars.ContainsKey('YCE_ENGINE_SCRIPT')) { $currentVars['YCE_ENGINE_SCRIPT'] } else { $DefaultYceEngineScript }
   $runtimeYceEngineMaxResults = if ($YceEngineMaxResults) { $YceEngineMaxResults } elseif ($currentVars.ContainsKey('YCE_ENGINE_MAX_RESULTS')) { $currentVars['YCE_ENGINE_MAX_RESULTS'] } else { $DefaultYceEngineMaxResults }
   $runtimeYceEngineMaxTurns = if ($YceEngineMaxTurns) { $YceEngineMaxTurns } elseif ($currentVars.ContainsKey('YCE_ENGINE_MAX_TURNS')) { $currentVars['YCE_ENGINE_MAX_TURNS'] } else { $DefaultYceEngineMaxTurns }
-  $runtimeYceRelayUrl = if ($YceRelayUrl) { $YceRelayUrl } elseif ($currentVars.ContainsKey('YCE_RELAY_URL')) { $currentVars['YCE_RELAY_URL'] } else { $null }
+  $runtimeYceRelayUrl = if ($YceRelayUrl) { $YceRelayUrl } elseif ($currentVars.ContainsKey('YCE_RELAY_URL')) { $currentVars['YCE_RELAY_URL'] } else { $DefaultYceRelayUrl }
+  if (-not $runtimeYceRelayUrl) { $runtimeYceRelayUrl = $DefaultYceRelayUrl }
   $runtimeYceRelayToken = if ($YceRelayToken) { $YceRelayToken } elseif ($currentVars.ContainsKey('YCE_RELAY_TOKEN')) { $currentVars['YCE_RELAY_TOKEN'] } else { $null }
   $runtimeMode = if ($Mode) { $Mode } elseif ($currentVars.ContainsKey('YCE_DEFAULT_MODE')) { $currentVars['YCE_DEFAULT_MODE'] } else { $DefaultMode }
   $runtimeTimeoutEnhance = if ($TimeoutEnhance) { $TimeoutEnhance } elseif ($currentVars.ContainsKey('YCE_TIMEOUT_ENHANCE_MS')) { $currentVars['YCE_TIMEOUT_ENHANCE_MS'] } else { $DefaultTimeoutEnhance }
@@ -792,8 +850,9 @@ function Invoke-Setup {
   if (-not $hasDirectArgs -or $Edit -or $Reset) {
     Write-Host '--- 交互式配置 ---'
     Write-Host ''
-    Write-Host '提示：检索默认连接远端 https://yce.aigy.de。' -ForegroundColor Cyan
-    Write-Host '      兑换码请前往 https://a.aigy.de 获取，会同时用于增强与检索 relay。' -ForegroundColor Cyan
+    Write-Host '提示：YCE 检索默认连接 https://yce.aigy.de。' -ForegroundColor Cyan
+    Write-Host '      请把 YCE 搜索密钥写入 YCE_RELAY_TOKEN；它会作为 Authorization: Bearer 发送到 /yce/lease-key。' -ForegroundColor Cyan
+    Write-Host '      YCE_YOUWEN_TOKEN 只用于提示词增强，不再自动当作 YCE 搜索密钥。' -ForegroundColor Cyan
     Write-Host ''
 
     Write-Host "yw-enhance 脚本当前: $(if ($runtimeYouwen) { $runtimeYouwen } else { '未检测到仓内脚本' })"
@@ -802,9 +861,9 @@ function Invoke-Setup {
     $newYouwenApiUrl = Read-Host 'yw-enhance API（回车保留）'
     if ($newYouwenApiUrl) { $runtimeYouwenApiUrl = $newYouwenApiUrl }
 
-    Write-Host '提示：兑换码请前往 https://a.aigy.de 获取' -ForegroundColor Cyan
-    Write-Host "兑换码 / Token 当前: $(if ($runtimeYouwenToken) { Get-MaskedValue $runtimeYouwenToken } else { '(空)' })"
-    $newYouwenToken = Read-Host '兑换码 / Token（回车保留）'
+    Write-Host '提示：Youwen Token 仅用于提示词增强；没有增强需求可留空。' -ForegroundColor Cyan
+    Write-Host "Youwen 增强 Token 当前: $(if ($runtimeYouwenToken) { Get-MaskedValue $runtimeYouwenToken } else { '(空)' })"
+    $newYouwenToken = Read-Host 'Youwen 增强 Token（回车保留）'
     if ($newYouwenToken) { $runtimeYouwenToken = $newYouwenToken }
 
     Write-Host "yw-enhance 模式当前: $runtimeYouwenEnhanceMode"
@@ -831,12 +890,12 @@ function Invoke-Setup {
     $newEngineMaxTurns = Read-Host 'yce-engine max turns（回车保留）'
     if ($newEngineMaxTurns) { $runtimeYceEngineMaxTurns = $newEngineMaxTurns }
 
-    Write-Host "YCE Relay URL 当前: $(if ($runtimeYceRelayUrl) { $runtimeYceRelayUrl } else { '(空)' })"
-    $newRelayUrl = Read-Host 'YCE Relay URL（回车保留）'
+    Write-Host "YCE Relay URL 当前: $(if ($runtimeYceRelayUrl) { $runtimeYceRelayUrl } else { $DefaultYceRelayUrl })"
+    $newRelayUrl = Read-Host "YCE Relay URL（回车默认 $DefaultYceRelayUrl）"
     if ($newRelayUrl) { $runtimeYceRelayUrl = $newRelayUrl }
 
-    Write-Host "YCE Relay Token 当前: $(if ($runtimeYceRelayToken) { Get-MaskedValue $runtimeYceRelayToken } else { '(空)' })"
-    $newRelayToken = Read-Host 'YCE Relay Token（回车保留）'
+    Write-Host "YCE 搜索密钥当前: $(if ($runtimeYceRelayToken) { Get-MaskedValue $runtimeYceRelayToken } else { '(空，检索会无法租 key，除非设置 YCE_API_KEY)' })"
+    $newRelayToken = Read-Host 'YCE 搜索密钥 / YCE_RELAY_TOKEN（回车保留）'
     if ($newRelayToken) { $runtimeYceRelayToken = $newRelayToken }
 
     Write-Host "默认模式当前: $runtimeMode"
@@ -935,8 +994,9 @@ if ($Help) {
   Write-Host '  .\install.ps1                            # 交互式菜单（推荐）'
   Write-Host '  .\install.ps1 -Install                   # 安装或更新（必要时自动下载远程最新版本）'
   Write-Host '  .\install.ps1 -Target agents             # 仅安装到指定工具'
-  Write-Host '  .\install.ps1 -Setup                     # 交互式配置 兑换码 / API（默认使用仓内 scripts\youwen.js）'
-  Write-Host '  .\install.ps1 -Setup -YouwenScript <path> -YouwenToken <code> # 直接写入 yw-enhance 路径 + 兑换码 / Token'
+  Write-Host '  .\install.ps1 -Setup                     # 交互式配置 YCE 搜索密钥 / Youwen 增强 Token'
+  Write-Host '  .\install.ps1 -Setup -YceRelayToken <key> # 直接写入 YCE 搜索密钥'
+  Write-Host '  .\install.ps1 -Setup -YouwenToken <token> # 仅写入 Youwen 增强 Token'
   Write-Host '  .\install.ps1 -Sync                      # 同步脚本 + 配置到其他已安装目录'
   Write-Host '  .\install.ps1 -SyncEnv                   # 仅同步 .env'
   Write-Host '  .\install.ps1 -Check                     # 检查安装状态'
@@ -946,7 +1006,8 @@ if ($Help) {
   Write-Host "支持的工具: $($ToolMap.Key -join ', ')"
   Write-Host ''
   Write-Host '说明:'
-  Write-Host '  - 检索默认连接远端 relay（https://yce.aigy.de）；兑换码从 a.aigy.de 获取并写入 YCE_YOUWEN_TOKEN / YCE_RELAY_TOKEN'
+  Write-Host '  - 检索默认连接远端 relay（https://yce.aigy.de），安装时会写入 YCE_RELAY_URL'
+  Write-Host '  - YCE_RELAY_TOKEN 是 YCE 搜索密钥，请用 -YceRelayToken 或交互项填写；不会再从 YCE_YOUWEN_TOKEN 自动复制'
   Write-Host '  - -Setup 可交互选择 YCE_LOCAL_FALLBACK；也可用 -LocalFallback true/false 或 -NoLocalFallback'
   Write-Host '  - -Setup 会优先复用当前 .env，并优先对齐仓内 scripts\youwen.js 对应的 YCE 根目录配置'
   Write-Host "  - YCE_YOUWEN_SCRIPT 默认使用仓内脚本: $DefaultYouwenScript；如需特殊覆盖，仍可通过 -YouwenScript 或 .env 指定"

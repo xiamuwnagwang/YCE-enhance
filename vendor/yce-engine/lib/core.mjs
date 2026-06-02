@@ -656,9 +656,9 @@ async function leaseApiKeyFromRelay() {
 
   _lastRelayError = "";
   const relayUrl = _normalizeRelayUrl(process.env.YCE_RELAY_URL) || "https://yce.aigy.de";
-  const relayToken = String(process.env.YCE_RELAY_TOKEN || process.env.YCE_YOUWEN_TOKEN || "").trim();
+  const relayToken = String(process.env.YCE_RELAY_TOKEN || "").trim();
   if (!relayToken) {
-    _lastRelayError = "missing relay token (set YCE_RELAY_TOKEN or YCE_YOUWEN_TOKEN)";
+    _lastRelayError = "missing relay token (set YCE_RELAY_TOKEN)";
     return null;
   }
 
@@ -766,7 +766,7 @@ async function getApiKey() {
   if (key) return key;
 
   throw new Error(
-    "YCE API key not found. Configure YCE_RELAY_URL/YCE_RELAY_TOKEN (default relay: https://yce.aigy.de; 兑换码可从 https://a.aigy.de 获取) " +
+    "YCE API key not found. Configure YCE_RELAY_URL/YCE_RELAY_TOKEN (default relay: https://yce.aigy.de; YCE_RELAY_TOKEN must be a YCE search key) " +
     "or set YCE_API_KEY. Run yce-engine.mjs --check-key to verify relay connectivity."
   );
 }
@@ -1967,7 +1967,7 @@ export async function searchWithContent({
       if (meta.errorCode === "PAYLOAD_TOO_LARGE" || meta.errorCode === "TIMEOUT") {
         errMsg += `\n[hint] Payload/timeout error. Try: reduce tree_depth, reduce max_turns, add exclude_paths, or narrow project_path to a subdirectory.`;
       } else if (meta.errorCode === "AUTH_ERROR") {
-        errMsg += `\n[hint] Authentication error. Configure YCE_RELAY_URL/YCE_RELAY_TOKEN (兑换码来自 a.aigy.de), or set YCE_API_KEY, then run yce-engine.mjs --check-key.`;
+        errMsg += `\n[hint] Authentication error. Configure YCE_RELAY_URL/YCE_RELAY_TOKEN (YCE_RELAY_TOKEN must be a YCE search key), or set YCE_API_KEY, then run yce-engine.mjs --check-key.`;
       } else if (meta.errorCode === "RATE_LIMITED") {
         errMsg += `\n[hint] Rate limited. Wait a moment and retry.`;
       } else {
@@ -2041,7 +2041,7 @@ export async function extractKeyInfo() {
   return {
     error: "YCE relay key lease failed.",
     hint:
-      "Configure YCE_RELAY_URL/YCE_RELAY_TOKEN (default relay: https://yce.aigy.de; 兑换码可从 https://a.aigy.de 获取) " +
+      "Configure YCE_RELAY_URL/YCE_RELAY_TOKEN (default relay: https://yce.aigy.de; YCE_RELAY_TOKEN must be a YCE search key) " +
       "or set YCE_API_KEY.",
     detail: _lastRelayError || undefined,
     db_path: _normalizeRelayUrl(process.env.YCE_RELAY_URL) || "https://yce.aigy.de",

@@ -78,6 +78,9 @@ main() {
       tar -C "$ROOT" \
         --exclude="$item/.DS_Store" \
         --exclude="$item/**/.DS_Store" \
+        --exclude="vendor/yce-engine/node_modules/@vscode/ripgrep-darwin-*" \
+        --exclude="vendor/yce-engine/node_modules/@vscode/ripgrep-linux-*" \
+        --exclude="vendor/yce-engine/node_modules/@vscode/ripgrep-win32-*" \
         -cf - "$item" \
       | tar -C "$pkg_root" -xf -
     else

@@ -227,6 +227,34 @@ check_node() {
   fi
 }
 
+install_yce_engine_dependencies() {
+  local install_dir="$1"
+  local tool_name="$2"
+  local engine_dir="$install_dir/vendor/yce-engine"
+
+  if [[ ! -f "$engine_dir/package.json" ]]; then
+    warn "${tool_name}: 未找到 yce-engine package.json，跳过依赖修复"
+    return 0
+  fi
+
+  if ! command -v npm >/dev/null 2>&1; then
+    warn "${tool_name}: 未安装 npm，无法自动安装当前平台的 ripgrep 依赖"
+    warn "${tool_name}: 请安装 Node.js/npm 后在 $engine_dir 执行 npm install --omit=dev --no-audit --fund=false"
+    return 0
+  fi
+
+  info "${tool_name}: 安装/修复 yce-engine 依赖（按当前平台补齐 @vscode/ripgrep-*）"
+  (
+    cd "$engine_dir"
+    npm install --omit=dev --no-audit --fund=false
+  ) || {
+    warn "${tool_name}: yce-engine 依赖安装失败"
+    warn "${tool_name}: 可稍后手动执行：cd '$engine_dir' && npm install --omit=dev --no-audit --fund=false"
+    return 0
+  }
+  ok "${tool_name}: yce-engine 依赖已就绪"
+}
+
 get_local_version() {
   local dir="$1"
   [[ -f "$dir/SKILL.md" ]] && grep -m1 '^version:' "$dir/SKILL.md" 2>/dev/null | sed 's/version:[[:space:]]*//' | tr -d '[:space:]'
@@ -327,6 +355,7 @@ install_to_dir() {
 
   if [[ "$source_real" == "$target_real" ]]; then
     ok "${tool_name}: 已是当前目录"
+    install_yce_engine_dependencies "$target_dir" "$tool_name"
     return 0
   fi
 
@@ -356,6 +385,7 @@ install_to_dir() {
     rm -f "$yce_cfg_backup"
   fi
 
+  install_yce_engine_dependencies "$target_dir" "$tool_name"
   ok "${tool_name}: 已安装/更新"
 }
 
@@ -440,7 +470,6 @@ write_runtime_config() {
   [[ ! -f "$yce_engine_abs" ]] && warn "yce-engine entry not found at $yce_engine_script"
 
   [[ -z "$yce_relay_url" ]] && yce_relay_url="$DEFAULT_YCE_RELAY_URL"
-  [[ -z "$yce_relay_token" && -n "$youwen_token" ]] && yce_relay_token="$youwen_token"
 
   echo "Generating .env..."
   cat > "$ENV_FILE" <<ENVEOF
@@ -456,7 +485,7 @@ YCE_YOUWEN_ENABLE_SEARCH=$youwen_enable_search
 YCE_YOUWEN_MGREP_API_KEY=$youwen_mgrep_api_key
 
 # yce-engine adapter (远端优先：默认连接 yce.aigy.de relay)
-# 兑换码（YCE_YOUWEN_TOKEN）会同步用作 YCE_RELAY_TOKEN
+# YCE_RELAY_TOKEN 是 YCE 搜索密钥；不要和 YCE_YOUWEN_TOKEN 混用
 YCE_ENGINE_SCRIPT=$yce_engine_script
 YCE_ENGINE_MAX_RESULTS=$yce_engine_max_results
 YCE_ENGINE_MAX_TURNS=$yce_engine_max_turns
@@ -475,7 +504,8 @@ ENVEOF
   ok "配置完成"
   echo "  .env: $ENV_FILE"
   echo "  yce-engine: $yce_engine_script"
-  [[ -n "$youwen_token" ]] && echo "  兑换码 / Token: $(mask_secret "$youwen_token")"
+  [[ -n "$youwen_token" ]] && echo "  Youwen 增强 Token: $(mask_secret "$youwen_token")"
+  [[ -n "$yce_relay_token" ]] && echo "  YCE 搜索密钥: $(mask_secret "$yce_relay_token")"
   echo "  本地检索 fallback: $local_fallback"
 }
 
@@ -669,6 +699,7 @@ cmd_setup() {
   [[ -z "$yce_engine_max_turns" ]] && yce_engine_max_turns="$DEFAULT_YCE_ENGINE_MAX_TURNS"
 
   yce_relay_url="${yce_relay_url:-$(read_env_file_value "YCE_RELAY_URL")}"
+  [[ -z "$yce_relay_url" ]] && yce_relay_url="$DEFAULT_YCE_RELAY_URL"
   yce_relay_token="${yce_relay_token:-$(read_env_file_value "YCE_RELAY_TOKEN")}"
 
   mode="${mode:-$(read_env_file_value "YCE_DEFAULT_MODE")}"
@@ -689,15 +720,16 @@ cmd_setup() {
   if [[ "$has_direct_args" == false ]]; then
     echo "─── 交互式配置 ───"
     echo ""
-    printf "${CYAN}${BOLD}提示：${NC} 检索默认连接远端 ${BOLD}${DEFAULT_YCE_RELAY_URL}${NC}。\n"
-    printf "      兑换码请前往 ${BOLD}https://a.aigy.de${NC} 获取，会同时用于增强与检索 relay。\n"
+    printf "${CYAN}${BOLD}提示：${NC} YCE 检索默认连接 ${BOLD}${DEFAULT_YCE_RELAY_URL}${NC}。\n"
+    printf "      请把 YCE 搜索密钥写入 ${BOLD}YCE_RELAY_TOKEN${NC}；它会作为 Authorization: Bearer 发送到 /yce/lease-key。\n"
+    printf "      ${BOLD}YCE_YOUWEN_TOKEN${NC} 只用于提示词增强，不再自动当作 YCE 搜索密钥。\n"
     echo ""
 
-    printf "${CYAN}${BOLD}提示：${NC} 兑换码请前往 ${BOLD}https://a.aigy.de${NC} 获取\n"
+    printf "${CYAN}${BOLD}提示：${NC} Youwen Token 仅用于提示词增强；没有增强需求可留空。\n"
     echo ""
-    echo "兑换码 / Token 当前: ${youwen_token:+$(mask_secret "$youwen_token")}"
-    [[ -z "$youwen_token" ]] && echo "兑换码 / Token 当前: (空)"
-    read -rp "兑换码 / Token（回车保留）: " new_val
+    echo "Youwen 增强 Token 当前: ${youwen_token:+$(mask_secret "$youwen_token")}"
+    [[ -z "$youwen_token" ]] && echo "Youwen 增强 Token 当前: (空)"
+    read -rp "Youwen 增强 Token（回车保留）: " new_val
     [[ -n "$new_val" ]] && youwen_token="$new_val"
     echo ""
 
@@ -723,14 +755,14 @@ cmd_setup() {
     [[ -n "$new_val" ]] && timeout_search_ms="$new_val"
     echo ""
 
-    echo "YCE Relay URL 当前: ${yce_relay_url:-（空）}"
-    read -rp "YCE Relay URL（回车保留）: " new_val
+    echo "YCE Relay URL 当前: ${yce_relay_url:-$DEFAULT_YCE_RELAY_URL}"
+    read -rp "YCE Relay URL（回车默认 $DEFAULT_YCE_RELAY_URL）: " new_val
     [[ -n "$new_val" ]] && yce_relay_url="$new_val"
     echo ""
 
-    echo "YCE Relay Token 当前: ${yce_relay_token:+$(mask_secret "$yce_relay_token")}"
-    [[ -z "$yce_relay_token" ]] && echo "YCE Relay Token 当前: (空)"
-    read -rp "YCE Relay Token（回车保留）: " new_val
+    echo "YCE 搜索密钥当前: ${yce_relay_token:+$(mask_secret "$yce_relay_token")}"
+    [[ -z "$yce_relay_token" ]] && echo "YCE 搜索密钥当前: (空，检索会无法租 key，除非设置 YCE_API_KEY)"
+    read -rp "YCE 搜索密钥 / YCE_RELAY_TOKEN（回车保留）: " new_val
     [[ -n "$new_val" ]] && yce_relay_token="$new_val"
     echo ""
 
@@ -882,6 +914,12 @@ cmd_check() {
   else
     warn "本地 vendor/yce-engine/yce-engine.mjs 不存在，请重新安装/同步"
   fi
+
+  local platform_dir
+  platform_dir="$(resolve_platform_dir)"
+  case "$platform_dir" in
+    windows-x64) [[ -d "$SCRIPT_DIR/vendor/yce-engine/node_modules/@vscode/ripgrep-win32-x64" ]] || warn "当前 Windows x64 ripgrep 依赖可能缺失：@vscode/ripgrep-win32-x64；请运行 bash install.sh --install 修复" ;;
+  esac
   echo ""
 }
 
@@ -953,8 +991,9 @@ print_help() {
   echo "  bash install.sh                            # 交互式菜单（推荐）"
   echo "  bash install.sh --install                  # 安装或更新（必要时自动下载远程最新版本）"
   echo "  bash install.sh --target agents            # 仅安装到指定工具"
-  echo "  bash install.sh --setup                    # 交互式配置 兑换码 / API（默认使用仓内 scripts/youwen.js）"
-  echo "  bash install.sh --setup --youwen-script <path> --youwen-token <code>  # 直接写入 yw-enhance 路径 + 兑换码 / Token"
+  echo "  bash install.sh --setup                    # 交互式配置 YCE 搜索密钥 / Youwen 增强 Token"
+  echo "  bash install.sh --setup --yce-relay-token <key>  # 直接写入 YCE 搜索密钥"
+  echo "  bash install.sh --setup --youwen-token <token>   # 仅写入 Youwen 增强 Token"
   echo "  bash install.sh --setup --local-fallback true       # 远端失败时启用本地 fast fallback"
   echo "  bash install.sh --setup --no-local-fallback         # 禁用本地 fast fallback"
   echo "  bash install.sh --sync                     # 同步脚本 + 配置到其他已安装目录"
@@ -965,7 +1004,8 @@ print_help() {
   echo "支持的工具: ${TOOL_KEYS[*]}"
   echo ""
   echo "说明:"
-  echo "  - 检索默认连接远端 relay（${DEFAULT_YCE_RELAY_URL}）；兑换码从 a.aigy.de 获取并写入 YCE_YOUWEN_TOKEN / YCE_RELAY_TOKEN"
+  echo "  - 检索默认连接远端 relay（${DEFAULT_YCE_RELAY_URL}），安装时会写入 YCE_RELAY_URL"
+  echo "  - YCE_RELAY_TOKEN 是 YCE 搜索密钥，请用 --yce-relay-token 或交互项填写；不会再从 YCE_YOUWEN_TOKEN 自动复制"
   echo "  - --setup 可交互选择是否启用 YCE_LOCAL_FALLBACK（远端失败时的本机 rg/heuristic 检索）"
   echo "  - --setup 会优先复用当前 .env，并优先对齐仓内 scripts/youwen.js 对应的 YCE 根目录配置"
   echo "  - YCE_YOUWEN_SCRIPT 默认使用仓内脚本: $DEFAULT_YOUWEN_SCRIPT；如需特殊覆盖，仍可通过 --youwen-script 或 .env 指定"
