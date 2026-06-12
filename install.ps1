@@ -188,6 +188,128 @@ function Get-YouwenEnvFile {
   return $null
 }
 
+function Read-EnvMapFromFile {
+  param([string]$FilePath)
+  $map = @{}
+  if (-not $FilePath -or -not (Test-Path $FilePath)) { return $map }
+  foreach ($line in Get-Content $FilePath -Encoding UTF8) {
+    $trimmed = $line.Trim()
+    if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
+    if ($trimmed -match '^([^=]+)=(.*)$') {
+      $map[$Matches[1].Trim()] = $Matches[2].Trim().Trim('"').Trim("'")
+    }
+  }
+  return $map
+}
+
+function Merge-EnvMissingKeys {
+  param(
+    [string]$SourceEnv,
+    [string]$TargetEnv
+  )
+  if (-not $SourceEnv -or -not $TargetEnv) { return }
+  if (-not (Test-Path $SourceEnv) -or -not (Test-Path $TargetEnv)) { return }
+
+  $mergeKeys = @(
+    'YCE_RELAY_TOKEN', 'YCE_RELAY_URL', 'YCE_API_KEY',
+    'YCE_ENGINE_SCRIPT', 'YCE_ENGINE_MAX_RESULTS', 'YCE_ENGINE_MAX_TURNS', 'YCE_LOCAL_FALLBACK',
+    'YCE_YOUWEN_TOKEN', 'YCE_YOUWEN_API_URL', 'YCE_YOUWEN_SCRIPT',
+    'YCE_YOUWEN_ENHANCE_MODE', 'YCE_YOUWEN_ENABLE_SEARCH', 'YCE_YOUWEN_MGREP_API_KEY',
+    'YCE_DEFAULT_MODE', 'YCE_TIMEOUT_ENHANCE_MS', 'YCE_TIMEOUT_SEARCH_MS'
+  )
+
+  $sourceVals = Read-EnvMapFromFile $SourceEnv
+  $targetVals = Read-EnvMapFromFile $TargetEnv
+  $updates = @{}
+  foreach ($key in $mergeKeys) {
+    if ($sourceVals.ContainsKey($key) -and $sourceVals[$key] -and (-not $targetVals.ContainsKey($key) -or -not $targetVals[$key])) {
+      $updates[$key] = $sourceVals[$key]
+    }
+  }
+  if ($updates.Count -eq 0) { return }
+
+  $lines = Get-Content $TargetEnv -Encoding UTF8
+  $seen = @{}
+  $newLines = @()
+  foreach ($line in $lines) {
+    $trimmed = $line.Trim()
+    if ($trimmed -and -not $trimmed.StartsWith('#') -and $trimmed -match '^([^=]+)=') {
+      $key = $Matches[1].Trim()
+      if ($updates.ContainsKey($key)) {
+        $newLines += "$key=$($updates[$key])"
+        $seen[$key] = $true
+        continue
+      }
+    }
+    $newLines += $line
+  }
+  foreach ($entry in $updates.GetEnumerator()) {
+    if (-not $seen.ContainsKey($entry.Key)) {
+      $newLines += "$($entry.Key)=$($entry.Value)"
+    }
+  }
+
+  $mergedVals = @{}
+  foreach ($entry in $targetVals.GetEnumerator()) { $mergedVals[$entry.Key] = $entry.Value }
+  foreach ($entry in $updates.GetEnumerator()) { $mergedVals[$entry.Key] = $entry.Value }
+  if ($mergedVals.ContainsKey('YCE_ENGINE_SCRIPT') -or $mergedVals.ContainsKey('YCE_RELAY_TOKEN')) {
+    $newLines = @(
+      foreach ($line in $newLines) {
+        $trimmed = $line.Trim()
+        if ($trimmed -and -not $trimmed.StartsWith('#') -and $trimmed -match '^([^=]+)=') {
+          $key = $Matches[1].Trim()
+          if ($key.StartsWith('YCE_ACE_')) { continue }
+        }
+        $line
+      }
+    )
+  }
+
+  Write-Utf8NoBomLines -FilePath $TargetEnv -Lines $newLines
+}
+
+function Test-EnvHasRelayCredentials {
+  param([string]$EnvPath = $EnvFile)
+  if (-not $EnvPath -or -not (Test-Path $EnvPath)) { return $false }
+  $relay = Read-EnvValueFromFile -FilePath $EnvPath -Key 'YCE_RELAY_TOKEN'
+  $apiKey = Read-EnvValueFromFile -FilePath $EnvPath -Key 'YCE_API_KEY'
+  return [bool]($relay -or $apiKey)
+}
+
+function Get-EnvSeedFile {
+  param([string]$SourceDir)
+  $sourceEnv = Join-Path $SourceDir '.env'
+  if ((Test-Path $sourceEnv) -and (Test-EnvHasRelayCredentials -EnvPath $sourceEnv)) { return $sourceEnv }
+  if ((Test-Path $EnvFile) -and (Test-EnvHasRelayCredentials -EnvPath $EnvFile)) { return $EnvFile }
+  if (Test-Path $sourceEnv) { return $sourceEnv }
+  if (Test-Path $EnvFile) { return $EnvFile }
+  return $null
+}
+
+function Sync-EnvToOtherInstallsAuto {
+  if (-not (Test-Path $EnvFile)) { return }
+  $detected = Find-OtherInstalls
+  if ($detected.Count -eq 0) { return }
+  Write-Host ''
+  Write-Info '同步 .env 到其他已安装目录...'
+  foreach ($tool in $detected) {
+    Sync-EnvToDir -TargetDir $tool.Dir -ToolName $tool.Label
+  }
+}
+
+function Warn-IfMissingRelayToken {
+  param(
+    [string]$Dir,
+    [string]$Label
+  )
+  $envTarget = Join-Path $Dir '.env'
+  $relayToken = Read-EnvValueFromFile $envTarget 'YCE_RELAY_TOKEN'
+  $apiKey = Read-EnvValueFromFile $envTarget 'YCE_API_KEY'
+  if ($relayToken -or $apiKey) { return }
+  Write-Warn "${Label}: 未配置 YCE_RELAY_TOKEN / YCE_API_KEY，代码检索将无法租 key"
+  Write-Warn "${Label}: 在本目录执行 .\install.ps1 -Setup -YceRelayToken `"<密钥>`"，或 .\install.ps1 -SyncEnv"
+}
+
 function Get-MaskedValue {
   param([string]$Val)
   if (-not $Val -or $Val.Length -le 4) { return "****" }
@@ -375,6 +497,7 @@ function Install-ToDir {
   if ($sourceReal -eq $targetReal) {
     Write-Ok "${ToolName}: 已是当前目录"
     Install-YceEngineDependencies -InstallDir $TargetDir -ToolName $ToolName
+    Warn-IfMissingRelayToken -Dir $TargetDir -Label $ToolName
     return
   }
 
@@ -404,15 +527,27 @@ function Install-ToDir {
     }
   }
 
+  $envSeed = Get-EnvSeedFile -SourceDir $SourceDir
+
   if ($envBackup -and (Test-Path $envBackup)) {
     Copy-Item $envBackup $envTarget -Force
     Remove-Item $envBackup -Force
+  } elseif ($envSeed -and -not (Test-Path $envTarget)) {
+    Copy-Item $envSeed $envTarget -Force
   } elseif ((Test-Path (Join-Path $TargetDir '.env.example')) -and -not (Test-Path $envTarget)) {
     Copy-Item (Join-Path $TargetDir '.env.example') $envTarget -Force
   }
 
+  $sourceEnv = Join-Path $SourceDir '.env'
+  if ((Test-Path $sourceEnv) -and (Test-Path $envTarget)) {
+    Merge-EnvMissingKeys -SourceEnv $sourceEnv -TargetEnv $envTarget
+  } elseif ((Test-Path $EnvFile) -and (Test-Path $envTarget) -and ($sourceEnv -ne $EnvFile)) {
+    Merge-EnvMissingKeys -SourceEnv $EnvFile -TargetEnv $envTarget
+  }
+
   Install-YceEngineDependencies -InstallDir $TargetDir -ToolName $ToolName
   Write-Ok "${ToolName}: 已安装/更新"
+  Warn-IfMissingRelayToken -Dir $TargetDir -Label $ToolName
 }
 
 function Sync-EnvToDir {
@@ -688,12 +823,23 @@ function Invoke-Install {
     Remove-Item (Split-Path $sourceDir -Parent) -Recurse -Force -ErrorAction SilentlyContinue
   }
 
+  if (Test-EnvHasRelayCredentials) {
+    Sync-EnvToOtherInstallsAuto
+  }
+
   Write-Host ""
   Write-Ok "完成"
   Write-Host ""
-  Write-Host "  配置: .\install.ps1 -Setup" -ForegroundColor Cyan
-  Write-Host "  直写: .\install.ps1 -Setup -YouwenToken \"your-redemption-code\"" -ForegroundColor Cyan
+  Write-Host "  配置检索密钥: .\install.ps1 -Setup -YceRelayToken `"yce_...`"" -ForegroundColor Cyan
+  Write-Host "  配置增强 Token: .\install.ps1 -Setup -YouwenToken `"YW-...`"（可选）" -ForegroundColor Cyan
+  Write-Host "  同步到其他目录: .\install.ps1 -SyncEnv" -ForegroundColor Cyan
   Write-Host "  测试: node scripts\yce.js \"定位 provider 列表获取逻辑\" --mode search" -ForegroundColor Cyan
+  Write-Host ""
+  $localRelay = Read-EnvValueFromFile $EnvFile 'YCE_RELAY_TOKEN'
+  $localApiKey = Read-EnvValueFromFile $EnvFile 'YCE_API_KEY'
+  if (-not $localRelay -and -not $localApiKey) {
+    Write-Warn "当前目录尚未配置 YCE 搜索密钥（YCE_RELAY_TOKEN）；-Install 不会自动写入密钥，需再执行 -Setup"
+  }
   Write-Host ""
 }
 
@@ -855,16 +1001,24 @@ function Invoke-Setup {
     Write-Host '      YCE_YOUWEN_TOKEN 只用于提示词增强，不再自动当作 YCE 搜索密钥。' -ForegroundColor Cyan
     Write-Host ''
 
-    Write-Host "yw-enhance 脚本当前: $(if ($runtimeYouwen) { $runtimeYouwen } else { '未检测到仓内脚本' })"
+    Write-Host "YCE Relay URL 当前: $(if ($runtimeYceRelayUrl) { $runtimeYceRelayUrl } else { $DefaultYceRelayUrl })"
+    $newRelayUrl = Read-Host "YCE Relay URL（回车默认 $DefaultYceRelayUrl）"
+    if ($newRelayUrl) { $runtimeYceRelayUrl = $newRelayUrl }
 
-    Write-Host "yw-enhance API 当前: $runtimeYouwenApiUrl"
-    $newYouwenApiUrl = Read-Host 'yw-enhance API（回车保留）'
-    if ($newYouwenApiUrl) { $runtimeYouwenApiUrl = $newYouwenApiUrl }
+    Write-Host "YCE 搜索密钥当前: $(if ($runtimeYceRelayToken) { Get-MaskedValue $runtimeYceRelayToken } else { '(空，检索会无法租 key，除非设置 YCE_API_KEY)' })"
+    $newRelayToken = Read-Host 'YCE 搜索密钥 / YCE_RELAY_TOKEN（必填，格式 yce_...）'
+    if ($newRelayToken) { $runtimeYceRelayToken = $newRelayToken }
 
     Write-Host '提示：Youwen Token 仅用于提示词增强；没有增强需求可留空。' -ForegroundColor Cyan
     Write-Host "Youwen 增强 Token 当前: $(if ($runtimeYouwenToken) { Get-MaskedValue $runtimeYouwenToken } else { '(空)' })"
     $newYouwenToken = Read-Host 'Youwen 增强 Token（回车保留）'
     if ($newYouwenToken) { $runtimeYouwenToken = $newYouwenToken }
+
+    Write-Host "yw-enhance 脚本当前: $(if ($runtimeYouwen) { $runtimeYouwen } else { '未检测到仓内脚本' })"
+
+    Write-Host "yw-enhance API 当前: $runtimeYouwenApiUrl"
+    $newYouwenApiUrl = Read-Host 'yw-enhance API（回车保留）'
+    if ($newYouwenApiUrl) { $runtimeYouwenApiUrl = $newYouwenApiUrl }
 
     Write-Host "yw-enhance 模式当前: $runtimeYouwenEnhanceMode"
     $newEnhanceMode = Read-Host 'yw-enhance 模式（agent/disabled，回车保留）'
@@ -889,14 +1043,6 @@ function Invoke-Setup {
     Write-Host "yce-engine 最大轮次当前: $runtimeYceEngineMaxTurns"
     $newEngineMaxTurns = Read-Host 'yce-engine max turns（回车保留）'
     if ($newEngineMaxTurns) { $runtimeYceEngineMaxTurns = $newEngineMaxTurns }
-
-    Write-Host "YCE Relay URL 当前: $(if ($runtimeYceRelayUrl) { $runtimeYceRelayUrl } else { $DefaultYceRelayUrl })"
-    $newRelayUrl = Read-Host "YCE Relay URL（回车默认 $DefaultYceRelayUrl）"
-    if ($newRelayUrl) { $runtimeYceRelayUrl = $newRelayUrl }
-
-    Write-Host "YCE 搜索密钥当前: $(if ($runtimeYceRelayToken) { Get-MaskedValue $runtimeYceRelayToken } else { '(空，检索会无法租 key，除非设置 YCE_API_KEY)' })"
-    $newRelayToken = Read-Host 'YCE 搜索密钥 / YCE_RELAY_TOKEN（回车保留）'
-    if ($newRelayToken) { $runtimeYceRelayToken = $newRelayToken }
 
     Write-Host "默认模式当前: $runtimeMode"
     $newMode = Read-Host '默认模式（回车保留）'
@@ -924,9 +1070,20 @@ function Invoke-Setup {
 
   Write-RuntimeConfig -RuntimeYouwenScript $runtimeYouwen -RuntimeYouwenApiUrl $runtimeYouwenApiUrl -RuntimeYouwenToken $runtimeYouwenToken -RuntimeYouwenEnhanceMode $runtimeYouwenEnhanceMode -RuntimeYouwenEnableSearch $runtimeYouwenEnableSearch -RuntimeYouwenMgrepApiKey $runtimeYouwenMgrepApiKey -RuntimeYceEngineScript $runtimeYceEngineScript -RuntimeYceEngineMaxResults $runtimeYceEngineMaxResults -RuntimeYceEngineMaxTurns $runtimeYceEngineMaxTurns -RuntimeYceRelayUrl $runtimeYceRelayUrl -RuntimeYceRelayToken $runtimeYceRelayToken -RuntimeMode $runtimeMode -RuntimeTimeoutEnhance $runtimeTimeoutEnhance -RuntimeTimeoutSearch $runtimeTimeoutSearch -RuntimeLocalFallback $runtimeLocalFallback
 
+  Sync-EnvToOtherInstallsAuto
+
+  Write-Host ''
+  Write-Ok "配置已写入 $EnvFile"
+  if (Test-EnvHasRelayCredentials) {
+    Write-Ok '检索密钥校验: node .\vendor\yce-engine\yce-engine.mjs --check-key'
+  } else {
+    Write-Warn '尚未配置 YCE_RELAY_TOKEN；代码检索需要 yce_... 格式的搜索密钥'
+  }
+  Write-Host ''
+
   $detected = Find-OtherInstalls
-  if ($detected.Count -gt 0) {
-    $syncAnswer = Read-Host '是否同步脚本 + 配置到其他工具？(y/N)'
+  if ($detected.Count -gt 0 -and -not $hasDirectArgs) {
+    $syncAnswer = Read-Host '是否同时同步脚本到其他工具？(y/N)'
     if ($syncAnswer -match '^[Yy]') { Invoke-Sync }
   }
 }
