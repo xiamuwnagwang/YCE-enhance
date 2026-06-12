@@ -198,6 +198,144 @@ if env_path.exists():
 PY
 }
 
+# 目标目录已有 .env 时 install 会整份保留旧配置；这里把源目录里已填写的关键项补进目标。
+merge_env_missing_keys() {
+  local source_env="$1"
+  local target_env="$2"
+  [[ ! -f "$source_env" || ! -f "$target_env" ]] && return 0
+  python3 - "$source_env" "$target_env" <<'PY'
+import sys
+from pathlib import Path
+
+source_path = Path(sys.argv[1])
+target_path = Path(sys.argv[2])
+MERGE_KEYS = (
+    "YCE_RELAY_TOKEN",
+    "YCE_RELAY_URL",
+    "YCE_API_KEY",
+    "YCE_ENGINE_SCRIPT",
+    "YCE_ENGINE_MAX_RESULTS",
+    "YCE_ENGINE_MAX_TURNS",
+    "YCE_LOCAL_FALLBACK",
+    "YCE_YOUWEN_TOKEN",
+    "YCE_YOUWEN_API_URL",
+    "YCE_YOUWEN_SCRIPT",
+    "YCE_YOUWEN_ENHANCE_MODE",
+    "YCE_YOUWEN_ENABLE_SEARCH",
+    "YCE_YOUWEN_MGREP_API_KEY",
+    "YCE_DEFAULT_MODE",
+    "YCE_TIMEOUT_ENHANCE_MS",
+    "YCE_TIMEOUT_SEARCH_MS",
+)
+
+def parse_env(path: Path) -> dict[str, str]:
+    data: dict[str, str] = {}
+    if not path.exists():
+        return data
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        data[key.strip()] = value.strip().strip('"').strip("'")
+    return data
+
+source_vals = parse_env(source_path)
+target_vals = parse_env(target_path)
+updates = {
+    key: source_vals[key]
+    for key in MERGE_KEYS
+    if source_vals.get(key) and not target_vals.get(key)
+}
+if not updates:
+    sys.exit(0)
+
+lines = target_path.read_text(encoding="utf-8").splitlines()
+seen = set()
+new_lines = []
+for line in lines:
+    stripped = line.strip()
+    if stripped and not stripped.startswith("#") and "=" in stripped:
+        key = stripped.split("=", 1)[0].strip()
+        if key in updates:
+            new_lines.append(f"{key}={updates[key]}")
+            seen.add(key)
+            continue
+    new_lines.append(line)
+
+for key, value in updates.items():
+    if key not in seen:
+        new_lines.append(f"{key}={value}")
+
+LEGACY_ENV_PREFIXES = ("YCE_ACE_",)
+merged_vals = {**target_vals, **updates}
+if merged_vals.get("YCE_ENGINE_SCRIPT") or merged_vals.get("YCE_RELAY_TOKEN"):
+    new_lines = [
+        line
+        for line in new_lines
+        if not (
+            (stripped := line.strip())
+            and not stripped.startswith("#")
+            and "=" in stripped
+            and stripped.split("=", 1)[0].strip().startswith(LEGACY_ENV_PREFIXES)
+        )
+    ]
+
+target_path.write_text("\n".join(new_lines).rstrip() + "\n", encoding="utf-8")
+PY
+}
+
+env_has_relay_credentials() {
+  local env_path="${1:-$ENV_FILE}"
+  [[ -n "$(read_env_file_value "YCE_RELAY_TOKEN" "$env_path")" ]] && return 0
+  [[ -n "$(read_env_file_value "YCE_API_KEY" "$env_path")" ]] && return 0
+  return 1
+}
+
+pick_env_seed_file() {
+  local source_dir="$1"
+  if [[ -f "$source_dir/.env" ]] && env_has_relay_credentials "$source_dir/.env"; then
+    echo "$source_dir/.env"
+    return 0
+  fi
+  if [[ -f "$ENV_FILE" ]] && env_has_relay_credentials "$ENV_FILE"; then
+    echo "$ENV_FILE"
+    return 0
+  fi
+  if [[ -f "$source_dir/.env" ]]; then
+    echo "$source_dir/.env"
+    return 0
+  fi
+  if [[ -f "$ENV_FILE" ]]; then
+    echo "$ENV_FILE"
+    return 0
+  fi
+  echo ""
+}
+
+auto_sync_env_to_other_installs() {
+  [[ ! -f "$ENV_FILE" ]] && return 0
+  detect_other_installs
+  [[ ${#DETECTED_DIRS[@]} -eq 0 ]] && return 0
+  echo ""
+  info "同步 .env 到其他已安装目录..."
+  for i in "${!DETECTED_DIRS[@]}"; do
+    sync_env_to_dir "${DETECTED_DIRS[$i]}" "${DETECTED_NAMES[$i]}"
+  done
+}
+
+warn_if_missing_relay_token() {
+  local dir="$1"
+  local label="$2"
+  local token
+  token="$(read_env_file_value "YCE_RELAY_TOKEN" "$dir/.env")"
+  [[ -n "$token" ]] && return 0
+  token="$(read_env_file_value "YCE_API_KEY" "$dir/.env")"
+  [[ -n "$token" ]] && return 0
+  warn "${label}: 未配置 YCE_RELAY_TOKEN / YCE_API_KEY，代码检索将无法租 key"
+  warn "${label}: 在本目录执行 bash install.sh --setup --yce-relay-token \"<密钥>\"，或 bash install.sh --sync-env"
+}
+
 tool_index() {
   local key="$1"
   for i in "${!TOOL_KEYS[@]}"; do
@@ -356,6 +494,7 @@ install_to_dir() {
   if [[ "$source_real" == "$target_real" ]]; then
     ok "${tool_name}: 已是当前目录"
     install_yce_engine_dependencies "$target_dir" "$tool_name"
+    warn_if_missing_relay_token "$target_dir" "$tool_name"
     return 0
   fi
 
@@ -374,11 +513,22 @@ install_to_dir() {
     fi
   done
 
+  local env_seed=""
+  env_seed="$(pick_env_seed_file "$source_dir")"
+
   if [[ -n "$env_backup" && -f "$env_backup" ]]; then
     cp "$env_backup" "$target_dir/.env"
     rm -f "$env_backup"
+  elif [[ -n "$env_seed" && ! -f "$target_dir/.env" ]]; then
+    cp "$env_seed" "$target_dir/.env"
   elif [[ -f "$target_dir/.env.example" && ! -f "$target_dir/.env" ]]; then
     cp "$target_dir/.env.example" "$target_dir/.env"
+  fi
+
+  if [[ -f "$source_dir/.env" && -f "$target_dir/.env" ]]; then
+    merge_env_missing_keys "$source_dir/.env" "$target_dir/.env"
+  elif [[ -f "$ENV_FILE" && -f "$target_dir/.env" && "$source_dir/.env" != "$ENV_FILE" ]]; then
+    merge_env_missing_keys "$ENV_FILE" "$target_dir/.env"
   fi
 
   if [[ -n "$yce_cfg_backup" && -f "$yce_cfg_backup" ]]; then
@@ -387,6 +537,7 @@ install_to_dir() {
 
   install_yce_engine_dependencies "$target_dir" "$tool_name"
   ok "${tool_name}: 已安装/更新"
+  warn_if_missing_relay_token "$target_dir" "$tool_name"
 }
 
 sync_env_to_dir() {
@@ -601,12 +752,21 @@ cmd_install() {
 
   [[ "$need_cleanup" == true && -n "$source_dir" ]] && rm -rf "$(dirname "$source_dir")"
 
+  if env_has_relay_credentials "$ENV_FILE"; then
+    auto_sync_env_to_other_installs
+  fi
+
   echo ""
   ok "完成"
   echo ""
-  printf "  配置: ${CYAN}bash install.sh --setup${NC}\n"
-  printf "  直写: ${CYAN}bash install.sh --setup --youwen-token \"your-redemption-code\"${NC}\n"
+  printf "  配置检索密钥: ${CYAN}bash install.sh --setup --yce-relay-token \"yce_...\"${NC}\n"
+  printf "  配置增强 Token: ${CYAN}bash install.sh --setup --youwen-token \"YW-...\"${NC}（可选）\n"
+  printf "  同步到其他目录: ${CYAN}bash install.sh --sync-env${NC}\n"
   printf "  测试: ${CYAN}node scripts/yce.js \"定位 provider 列表获取逻辑\" --mode search${NC}\n"
+  echo ""
+  if [[ ! -f "$ENV_FILE" ]] || [[ -z "$(read_env_file_value "YCE_RELAY_TOKEN" "$ENV_FILE")" && -z "$(read_env_file_value "YCE_API_KEY" "$ENV_FILE")" ]]; then
+    warn "当前目录尚未配置 YCE 搜索密钥（YCE_RELAY_TOKEN）；--install 不会自动写入密钥，需再执行 --setup"
+  fi
   echo ""
 }
 
@@ -725,6 +885,17 @@ cmd_setup() {
     printf "      ${BOLD}YCE_YOUWEN_TOKEN${NC} 只用于提示词增强，不再自动当作 YCE 搜索密钥。\n"
     echo ""
 
+    echo "YCE Relay URL 当前: ${yce_relay_url:-$DEFAULT_YCE_RELAY_URL}"
+    read -rp "YCE Relay URL（回车默认 $DEFAULT_YCE_RELAY_URL）: " new_val
+    [[ -n "$new_val" ]] && yce_relay_url="$new_val"
+    echo ""
+
+    echo "YCE 搜索密钥当前: ${yce_relay_token:+$(mask_secret "$yce_relay_token")}"
+    [[ -z "$yce_relay_token" ]] && echo "YCE 搜索密钥当前: (空，检索会无法租 key，除非设置 YCE_API_KEY)"
+    read -rp "YCE 搜索密钥 / YCE_RELAY_TOKEN（必填，格式 yce_...）: " new_val
+    [[ -n "$new_val" ]] && yce_relay_token="$new_val"
+    echo ""
+
     printf "${CYAN}${BOLD}提示：${NC} Youwen Token 仅用于提示词增强；没有增强需求可留空。\n"
     echo ""
     echo "Youwen 增强 Token 当前: ${youwen_token:+$(mask_secret "$youwen_token")}"
@@ -753,17 +924,6 @@ cmd_setup() {
     echo "检索超时当前: $timeout_search_ms"
     read -rp "检索超时 ms（回车保留）: " new_val
     [[ -n "$new_val" ]] && timeout_search_ms="$new_val"
-    echo ""
-
-    echo "YCE Relay URL 当前: ${yce_relay_url:-$DEFAULT_YCE_RELAY_URL}"
-    read -rp "YCE Relay URL（回车默认 $DEFAULT_YCE_RELAY_URL）: " new_val
-    [[ -n "$new_val" ]] && yce_relay_url="$new_val"
-    echo ""
-
-    echo "YCE 搜索密钥当前: ${yce_relay_token:+$(mask_secret "$yce_relay_token")}"
-    [[ -z "$yce_relay_token" ]] && echo "YCE 搜索密钥当前: (空，检索会无法租 key，除非设置 YCE_API_KEY)"
-    read -rp "YCE 搜索密钥 / YCE_RELAY_TOKEN（回车保留）: " new_val
-    [[ -n "$new_val" ]] && yce_relay_token="$new_val"
     echo ""
 
     printf "${CYAN}${BOLD}提示：${NC} 本地检索 fallback 会在远端 relay 失败时，用本机 rg/heuristic 继续定位代码。\n"
@@ -796,6 +956,16 @@ cmd_setup() {
     "$timeout_enhance_ms" \
     "$timeout_search_ms" \
     "$local_fallback"
+
+  auto_sync_env_to_other_installs
+  echo ""
+  ok "配置已写入 $ENV_FILE"
+  if env_has_relay_credentials "$ENV_FILE"; then
+    ok "检索密钥校验: node ./vendor/yce-engine/yce-engine.mjs --check-key"
+  else
+    warn "尚未配置 YCE_RELAY_TOKEN；代码检索需要 yce_... 格式的搜索密钥"
+  fi
+  echo ""
 }
 
 cmd_sync() {
