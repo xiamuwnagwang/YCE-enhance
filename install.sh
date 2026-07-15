@@ -918,7 +918,7 @@ cmd_setup() {
     echo "─── 交互式配置 ───"
     echo ""
     printf "${CYAN}${BOLD}提示：${NC} YCE 检索默认连接 ${BOLD}${DEFAULT_YCE_RELAY_URL}${NC}。\n"
-    printf "      请把 YCE 搜索密钥写入 ${BOLD}YCE_RELAY_TOKEN${NC}；它会作为 Authorization: Bearer 发送到 /yce/lease-key。\n"
+    printf "      请把 YCE 搜索密钥写入 ${BOLD}YCE_RELAY_TOKEN${NC}（请求 YCE 服务时使用）。\n"
     printf "      ${BOLD}YCE_YOUWEN_TOKEN${NC} 只用于提示词增强，不再自动当作 YCE 搜索密钥。\n"
     echo ""
 

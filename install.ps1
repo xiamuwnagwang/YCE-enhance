@@ -1025,7 +1025,7 @@ function Invoke-Setup {
     Write-Host '--- 交互式配置 ---'
     Write-Host ''
     Write-Host '提示：YCE 检索默认连接 https://yce.aigy.de。' -ForegroundColor Cyan
-    Write-Host '      请把 YCE 搜索密钥写入 YCE_RELAY_TOKEN；它会作为 Authorization: Bearer 发送到 /yce/lease-key。' -ForegroundColor Cyan
+    Write-Host '      请把 YCE 搜索密钥写入 YCE_RELAY_TOKEN（请求 YCE 服务时使用）。' -ForegroundColor Cyan
     Write-Host '      YCE_YOUWEN_TOKEN 只用于提示词增强，不再自动当作 YCE 搜索密钥。' -ForegroundColor Cyan
     Write-Host ''
 

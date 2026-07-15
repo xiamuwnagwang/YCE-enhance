@@ -256,11 +256,9 @@ YCE 的 stdout 固定是 XML，不再输出 JSON。最重要的标签如下：
 | `YCE_ENGINE_EXCLUDE_PATHS` | 空 | 逗号分隔的项目排除规则 |
 | `YCE_ENGINE_REPO_MAP_MODE` | `bootstrap_hotspot` | repo map 策略 |
 | `YCE_ENGINE_BOOTSTRAP_ENABLED` | `true` | 是否启用 bootstrap |
-| `YCE_RELAY_URL` | `https://yce.aigy.de` | 检索 relay 地址 |
-| `YCE_RELAY_TOKEN` | 空 | YCE 搜索密钥；请求 `/yce/lease-key` 与协议反代时作为 `Authorization: Bearer <token>` 发送 |
-| `YCE_API_BASE` | `https://yce.aigy.de/yce/api` | 语义检索协议 API（`GetDevstralStream` / `CheckUserMessageRateLimit`） |
-| `YCE_AUTH_BASE` | `https://yce.aigy.de/yce/auth` | 鉴权协议 API（`GetUserJwt`） |
-| `YCE_API_KEY` | 空 | 不走 relay 时的直连 key（若仍用默认 aigy 协议路径，仍需 `YCE_RELAY_TOKEN` + 有效 lease） |
+| `YCE_RELAY_URL` | `https://yce.aigy.de` | YCE 服务根地址 |
+| `YCE_RELAY_TOKEN` | 空 | YCE 搜索密钥（`Authorization: Bearer`） |
+| `YCE_API_KEY` | 空 | 高级项：不走租约池时的直连 key；一般用户只需配置 `YCE_RELAY_TOKEN` |
 | `YCE_LOCAL_FALLBACK` | 空 | 设为 `true` 时远端失败才启用本地 fast fallback |
 | `YCE_DEFAULT_MODE` | `auto` | 默认模式 |
 | `YCE_TIMEOUT_ENHANCE_MS` | `300000` | 默认增强超时 |
@@ -305,13 +303,12 @@ config.yceEngineScript（默认 ./vendor/yce-engine/yce-engine.mjs）
 ```
 
 **关键细节：**
-- 检索 key 只来自 relay 租约或 `YCE_API_KEY`。
-- **默认协议链路全部经 aigy**：`/yce/lease-key` → `/yce/auth/GetUserJwt` → `/yce/api/*` → `/yce/usage`。客户端不直连第三方域名。
-- **方案 B 鉴权**：协议反代要求 `Authorization: Bearer <YCE_RELAY_TOKEN>`，并携带租约头 `X-YCE-Lease-Id`（来自 lease-key 响应）；可选 `X-YCE-Key-Id`。
+- 检索凭证默认来自 YCE 服务租约；一般只需配置 `YCE_RELAY_TOKEN`。
+- 默认全部经 `YCE_RELAY_URL`（`https://yce.aigy.de`）完成鉴权与语义检索；客户端不直连第三方域名。具体内部路径不对外暴露。
 - local fast fallback 仅在 `YCE_LOCAL_FALLBACK=true` 时启用，纯本机 rg/heuristic，不依赖任何桌面 IDE key。
 - fallback 会跳过 `.git`、`node_modules`、`dist`、`build`、`coverage`、`vendor`、真实 `.env` 等噪声/敏感路径。
 - 退出码 0 且输出含 `Found 0 relevant files` 时映射为 `EMPTY_RESULT`（命令成功但无结果）。
-- 若 relay 租 key 失败，返回 `AUTH_ERROR`（优先检查 `YCE_RELAY_URL/YCE_RELAY_TOKEN` 或 `YCE_API_KEY`）。
+- 若租约/鉴权失败，返回 `AUTH_ERROR`（优先检查 `YCE_RELAY_URL` / `YCE_RELAY_TOKEN`）。
 - 引擎在本地循环执行 rg/readfile/tree 收集上下文；远端只做推理，**不上传代码、不建服务端索引**。
 - 默认配置会写入 `YCE_RELAY_URL=https://yce.aigy.de`；`YCE_RELAY_TOKEN` 是独立的 YCE 搜索密钥，不能和 `YCE_YOUWEN_TOKEN` 混用。
 - 排障时先看 `<meta><dependency-paths>` 里的 `yce-engine-script` 路径是否正确。

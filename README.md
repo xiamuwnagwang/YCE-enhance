@@ -39,14 +39,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 - **search**：在本地项目内做语义代码定位（远端只做推理，不上传源码建索引）
 - **auto**：增强后在同一次调用内强制收口到 search
 
-默认检索链路经公共 YCE 服务：
-
-```text
-https://yce.aigy.de/yce/lease-key
-https://yce.aigy.de/yce/auth/*
-https://yce.aigy.de/yce/api/*
-https://yce.aigy.de/yce/usage
-```
+默认经公共 **YCE 服务**（`https://yce.aigy.de`）完成鉴权与语义检索；具体请求路径由 skill 内部处理，使用时只需配置 `YCE_RELAY_TOKEN` 即可。
 
 ## 快速开始
 
