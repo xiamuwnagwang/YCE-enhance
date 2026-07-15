@@ -1,0 +1,1046 @@
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { spawn } = require("child_process");
+const { runLocalFastSearch } = require("./localFastSearch");
+
+const ROOT_DIR = path.resolve(__dirname, "..", "..");
+function expandHomePath(inputPath) {
+  if (typeof inputPath !== "string") {
+    return inputPath;
+  }
+  if (inputPath === "~") {
+    return os.homedir();
+  }
+  if (inputPath.startsWith("~/")) {
+    return path.join(os.homedir(), inputPath.slice(2));
+  }
+  return inputPath;
+}
+
+function resolveConfigPath(inputPath) {
+  const expanded = expandHomePath(inputPath);
+  if (typeof expanded !== "string" || expanded.trim().length === 0) {
+    return expanded;
+  }
+  if (path.isAbsolute(expanded)) {
+    return path.normalize(expanded);
+  }
+  return path.resolve(ROOT_DIR, expanded);
+}
+
+function resolveYouwenScript(configuredValue) {
+  const configuredPath = resolveConfigPath(configuredValue || DEFAULTS.youwenScript);
+  return configuredPath;
+}
+
+const DEFAULTS = {
+  youwenScript: "./scripts/youwen.js",
+  youwenApiUrl: "https://a.aigy.de",
+  youwenEnhanceMode: "agent",
+  youwenEnableSearch: true,
+  yceEngineScript: "./vendor/yce-engine/yce-engine.mjs",
+  yceEngineMaxResults: 10,
+  yceEngineMaxTurns: 3,
+  yceEngineMaxCommands: 8,
+  yceEngineTreeDepth: 0,
+  yceEngineExcludePaths: [],
+  yceEngineRepoMapMode: "bootstrap_hotspot",
+  yceEngineBootstrapEnabled: true,
+  yceEngineBootstrapTreeDepth: 1,
+  yceEngineHotspotTopK: 4,
+  yceEngineHotspotTreeDepth: 2,
+  yceEngineHotspotMaxBytes: 120 * 1024,
+  yceEngineBootstrapMaxTurns: 2,
+  yceEngineBootstrapMaxCommands: 6,
+  yceRelayUrl: "https://yce.aigy.de",
+  defaultMode: "auto",
+  timeoutEnhanceMs: 300000,
+  timeoutSearchMs: 180000,
+};
+
+function parseEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return {};
+  }
+
+  const content = fs.readFileSync(filePath, "utf8");
+  const result = {};
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    const match = trimmed.match(/^([A-Z0-9_]+)\s*=\s*(.*)$/i);
+    if (!match) {
+      continue;
+    }
+    const [, key, rawValue] = match;
+    result[key] = rawValue.replace(/^['"]|['"]$/g, "").trim();
+  }
+  return result;
+}
+
+function toPositiveInt(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed;
+  }
+  return fallback;
+}
+
+function toOptionalPositiveInt(value, fallback = null) {
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return fallback;
+  }
+  return toPositiveInt(value, fallback);
+}
+
+function toBoundedInt(value, { name, min, max, fallback }) {
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return fallback;
+  }
+  const normalized = String(value).trim();
+  const parsed = Number(normalized);
+  if (!/^\d+$/.test(normalized) || !Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new RangeError(`${name} must be an integer between ${min} and ${max}.`);
+  }
+  return parsed;
+}
+
+function toBoundedIntOrFallback(value, fallback, min, max) {
+  try {
+    return toBoundedInt(value, { name: "value", min, max, fallback });
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeExcludePaths(value) {
+  const values = Array.isArray(value) ? value : value === undefined || value === null ? [] : [value];
+  return [...new Set(values.flatMap((item) => String(item).split(","))
+    .map((item) => item.trim())
+    .filter(Boolean))];
+}
+
+function toBoolean(value, fallback = false) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(normalized)) {
+      return true;
+    }
+    if (["0", "false", "no", "off"].includes(normalized)) {
+      return false;
+    }
+  }
+
+  return fallback;
+}
+
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
+
+function buildYwEnhanceEnv(merged) {
+  const childEnv = {};
+
+  if (hasOwn(merged, "YCE_YOUWEN_API_URL") && isNonEmptyString(merged.YCE_YOUWEN_API_URL)) {
+    const apiUrl = String(merged.YCE_YOUWEN_API_URL).trim();
+    if (apiUrl) {
+      childEnv.YOUWEN_API_URL = apiUrl;
+    }
+  }
+
+  if (hasOwn(merged, "YCE_YOUWEN_ENHANCE_MODE") && isNonEmptyString(merged.YCE_YOUWEN_ENHANCE_MODE)) {
+    const enhanceMode = String(merged.YCE_YOUWEN_ENHANCE_MODE).trim();
+    if (enhanceMode) {
+      childEnv.YOUWEN_ENHANCE_MODE = enhanceMode;
+    }
+  }
+
+  if (hasOwn(merged, "YCE_YOUWEN_ENABLE_SEARCH") && isNonEmptyString(merged.YCE_YOUWEN_ENABLE_SEARCH)) {
+    childEnv.YOUWEN_ENABLE_SEARCH = toBoolean(
+      merged.YCE_YOUWEN_ENABLE_SEARCH,
+      DEFAULTS.youwenEnableSearch
+    )
+      ? "true"
+      : "false";
+  }
+
+  if (hasOwn(merged, "YCE_YOUWEN_TOKEN") && isNonEmptyString(merged.YCE_YOUWEN_TOKEN)) {
+    childEnv.YOUWEN_TOKEN = String(merged.YCE_YOUWEN_TOKEN).trim();
+  }
+
+  if (hasOwn(merged, "YCE_YOUWEN_MGREP_API_KEY") && isNonEmptyString(merged.YCE_YOUWEN_MGREP_API_KEY)) {
+    childEnv.YOUWEN_MGREP_API_KEY = String(merged.YCE_YOUWEN_MGREP_API_KEY).trim();
+  }
+
+  return childEnv;
+}
+
+function buildYceEngineEnv(merged) {
+  const childEnv = {};
+  const relayUrl =
+    (hasOwn(merged, "YCE_RELAY_URL") && isNonEmptyString(merged.YCE_RELAY_URL)
+      ? String(merged.YCE_RELAY_URL).trim()
+      : "") || DEFAULTS.yceRelayUrl;
+  const relayToken =
+    hasOwn(merged, "YCE_RELAY_TOKEN") && isNonEmptyString(merged.YCE_RELAY_TOKEN)
+      ? String(merged.YCE_RELAY_TOKEN).trim()
+      : "";
+
+  if (relayUrl) childEnv.YCE_RELAY_URL = relayUrl;
+  if (relayToken) childEnv.YCE_RELAY_TOKEN = relayToken;
+
+  const passthroughKeys = ["YCE_API_KEY", "YCE_LOCAL_FALLBACK"];
+
+  for (const key of passthroughKeys) {
+    if (hasOwn(merged, key) && isNonEmptyString(merged[key])) {
+      childEnv[key] = String(merged[key]).trim();
+    }
+  }
+
+  return childEnv;
+}
+
+function loadRuntimeConfig() {
+  const envFile = parseEnvFile(path.join(ROOT_DIR, ".env"));
+  const merged = { ...envFile, ...process.env };
+  const youwenToken = isNonEmptyString(merged.YCE_YOUWEN_TOKEN)
+    ? String(merged.YCE_YOUWEN_TOKEN).trim()
+    : isNonEmptyString(merged.YOUWEN_TOKEN)
+      ? String(merged.YOUWEN_TOKEN).trim()
+      : "";
+  return {
+    rootDir: ROOT_DIR,
+    youwenScript: resolveYouwenScript(merged.YCE_YOUWEN_SCRIPT),
+    yceEngineScript: resolveConfigPath(merged.YCE_ENGINE_SCRIPT || merged.YCE_FAST_CONTEXT_SCRIPT || DEFAULTS.yceEngineScript),
+    yceEngineMaxResults: toPositiveInt(merged.YCE_ENGINE_MAX_RESULTS || merged.YCE_FAST_CONTEXT_MAX_RESULTS, DEFAULTS.yceEngineMaxResults),
+    yceEngineMaxTurns: toPositiveInt(merged.YCE_ENGINE_MAX_TURNS || merged.YCE_FAST_CONTEXT_MAX_TURNS, DEFAULTS.yceEngineMaxTurns),
+    yceEngineMaxCommands: toBoundedIntOrFallback(merged.YCE_ENGINE_MAX_COMMANDS, DEFAULTS.yceEngineMaxCommands, 1, 20),
+    yceEngineTreeDepth: toBoundedIntOrFallback(merged.YCE_ENGINE_TREE_DEPTH, DEFAULTS.yceEngineTreeDepth, 0, 6),
+    yceEngineExcludePaths: normalizeExcludePaths(merged.YCE_ENGINE_EXCLUDE_PATHS || DEFAULTS.yceEngineExcludePaths),
+    yceEngineRepoMapMode: ["classic", "bootstrap_hotspot"].includes(merged.YCE_ENGINE_REPO_MAP_MODE)
+      ? merged.YCE_ENGINE_REPO_MAP_MODE
+      : DEFAULTS.yceEngineRepoMapMode,
+    yceEngineBootstrapEnabled: toBoolean(merged.YCE_ENGINE_BOOTSTRAP_ENABLED, DEFAULTS.yceEngineBootstrapEnabled),
+    yceEngineBootstrapTreeDepth: toBoundedIntOrFallback(merged.YCE_ENGINE_BOOTSTRAP_TREE_DEPTH, DEFAULTS.yceEngineBootstrapTreeDepth, 1, 3),
+    yceEngineHotspotTopK: toBoundedIntOrFallback(merged.YCE_ENGINE_HOTSPOT_TOP_K, DEFAULTS.yceEngineHotspotTopK, 0, 8),
+    yceEngineHotspotTreeDepth: toBoundedIntOrFallback(merged.YCE_ENGINE_HOTSPOT_TREE_DEPTH, DEFAULTS.yceEngineHotspotTreeDepth, 1, 4),
+    yceEngineHotspotMaxBytes: toBoundedIntOrFallback(merged.YCE_ENGINE_HOTSPOT_MAX_BYTES, DEFAULTS.yceEngineHotspotMaxBytes, 16 * 1024, 250 * 1024),
+    yceEngineBootstrapMaxTurns: toBoundedIntOrFallback(merged.YCE_ENGINE_BOOTSTRAP_MAX_TURNS, DEFAULTS.yceEngineBootstrapMaxTurns, 1, 5),
+    yceEngineBootstrapMaxCommands: toBoundedIntOrFallback(merged.YCE_ENGINE_BOOTSTRAP_MAX_COMMANDS, DEFAULTS.yceEngineBootstrapMaxCommands, 1, 20),
+    ywEnhanceEnv: buildYwEnhanceEnv(merged),
+    yceEngineEnv: buildYceEngineEnv(merged),
+    hasYouwenToken: Boolean(youwenToken),
+    defaultMode: merged.YCE_DEFAULT_MODE || DEFAULTS.defaultMode,
+    timeoutEnhanceMs: toPositiveInt(merged.YCE_TIMEOUT_ENHANCE_MS, DEFAULTS.timeoutEnhanceMs),
+    timeoutSearchMs: toPositiveInt(merged.YCE_TIMEOUT_SEARCH_MS, DEFAULTS.timeoutSearchMs),
+  };
+}
+
+function parseArgs(argv) {
+  const result = { _: [] };
+  let index = 0;
+
+  while (index < argv.length) {
+    const arg = argv[index];
+    if (!arg.startsWith("--")) {
+      result._.push(arg);
+      index += 1;
+      continue;
+    }
+
+    const key = arg.slice(2);
+    const next = argv[index + 1];
+    if (next && !next.startsWith("--")) {
+      if (key === "exclude") {
+        result[key] = [...(Array.isArray(result[key]) ? result[key] : []), next];
+      } else {
+        result[key] = next;
+      }
+      index += 2;
+    } else {
+      result[key] = true;
+      index += 1;
+    }
+  }
+
+  return result;
+}
+
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function normalizeQuery(args) {
+  return args._.join(" ").trim();
+}
+
+function ensureAbsolutePath(inputPath) {
+  if (!isNonEmptyString(inputPath)) {
+    return inputPath;
+  }
+  if (path.isAbsolute(inputPath)) {
+    return path.normalize(inputPath);
+  }
+  return path.resolve(process.cwd(), inputPath);
+}
+
+function fileExists(targetPath) {
+  return isNonEmptyString(targetPath) && fs.existsSync(targetPath);
+}
+
+function isDirectory(targetPath) {
+  try {
+    return fs.statSync(targetPath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function summarizeText(text, limit = 20) {
+  if (!isNonEmptyString(text)) {
+    return [];
+  }
+  return text
+    .replace(/\u001b\[[0-9;]*m/g, "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+function extractEnhancedBlock(rawStdout) {
+  if (!isNonEmptyString(rawStdout)) {
+    return null;
+  }
+  const match = rawStdout.match(/<enhanced>\s*([\s\S]*?)\s*<\/enhanced>/i);
+  return match ? match[1].trim() : null;
+}
+
+function parseEnhancedContent(content) {
+  const text = isNonEmptyString(content) ? content.trim() : "";
+  if (!text) {
+    return { recommendedSkills: [], prompt: null };
+  }
+
+  const recommendedSkills = [];
+  let prompt = text;
+
+  const promptMarker = /增强提示词正文[：:]/;
+  const promptMatch = text.match(promptMarker);
+  if (promptMatch) {
+    const markerIndex = promptMatch.index;
+    const before = text.slice(0, markerIndex).trim();
+    const after = text.slice(markerIndex + promptMatch[0].length).trim();
+    prompt = after || null;
+
+    for (const line of before.split(/\r?\n/)) {
+      const skillMatch = line.trim().match(/^\-\s*([^：:]+)[：:]/);
+      if (skillMatch) {
+        recommendedSkills.push(skillMatch[1].trim());
+      }
+    }
+  } else {
+    const lines = text.split(/\r?\n/);
+    const promptLines = [];
+    let inRecommendation = false;
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) {
+        if (!inRecommendation) {
+          promptLines.push(rawLine);
+        }
+        continue;
+      }
+      if (/^推荐技能[：:]?/.test(line)) {
+        inRecommendation = true;
+        continue;
+      }
+      if (inRecommendation) {
+        const skillMatch = line.match(/^\-\s*([^：:]+)[：:]/);
+        if (skillMatch) {
+          recommendedSkills.push(skillMatch[1].trim());
+          continue;
+        }
+        inRecommendation = false;
+      }
+      promptLines.push(rawLine);
+    }
+    prompt = promptLines.join("\n").trim() || null;
+  }
+
+  return {
+    recommendedSkills: [...new Set(recommendedSkills)],
+    prompt,
+  };
+}
+
+const SEARCH_QUERY_STOP_PATTERNS = [
+  /^#{1,6}\s+/,
+  /^(期望输出规范|格式要求|结构约束|负向约束|必选字段|可选字段)\s*[：:]?$/i,
+  /^(输出格式|语言|长度约束)\s*[：:].*$/i,
+];
+
+function normalizeSearchQuery(query, options = {}) {
+  const text = isNonEmptyString(query) ? String(query).replace(/\r\n?/g, "\n").trim() : "";
+  if (!text) {
+    return "";
+  }
+
+  const {
+    maxLength = 360,
+    preserveSimpleQuery = true,
+  } = options;
+
+  if (preserveSimpleQuery && text.length <= maxLength && !text.includes("\n") && !/^\s*-/.test(text)) {
+    return text;
+  }
+
+  const collected = [];
+  for (const rawLine of text.split("\n")) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) {
+      continue;
+    }
+    if (/^```/.test(trimmed) || /^[-*_]{3,}$/.test(trimmed)) {
+      continue;
+    }
+    if (SEARCH_QUERY_STOP_PATTERNS.some((pattern) => pattern.test(trimmed))) {
+      if (collected.length > 0) {
+        break;
+      }
+      continue;
+    }
+
+    let normalized = trimmed
+      .replace(/^\d+[.)、]\s+/, "")
+      .replace(/^[-*+]\s+/, "")
+      .replace(/\*\*(.*?)\*\*/g, "$1")
+      .replace(/`([^`]+)`/g, "$1")
+      .trim();
+
+    if (!normalized) {
+      continue;
+    }
+
+    collected.push(normalized);
+    if (collected.join(" ").length >= maxLength) {
+      break;
+    }
+  }
+
+  const candidate = (collected.length > 0 ? collected.join(" ") : text)
+    .replace(/\s+/g, " ")
+    .replace(/^[-–—_\s]+/, "")
+    .trim();
+
+  if (!candidate) {
+    return text;
+  }
+
+  if (candidate.length <= maxLength) {
+    return candidate;
+  }
+
+  return candidate.slice(0, maxLength).trim();
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function buildError(source, code, message, extra = {}) {
+  return { source, code, message, ...extra };
+}
+
+const LOCAL_SEARCH_SKIP_DIRS = new Set([
+  ".git",
+  ".next",
+  ".turbo",
+  ".vercel",
+  "build",
+  "coverage",
+  "dist",
+  "node_modules",
+  "vendor",
+]);
+
+const LOCAL_SEARCH_TEXT_EXTENSIONS = new Set([
+  ".c",
+  ".cc",
+  ".cjs",
+  ".conf",
+  ".config",
+  ".cpp",
+  ".css",
+  ".env",
+  ".example",
+  ".go",
+  ".h",
+  ".hpp",
+  ".html",
+  ".java",
+  ".js",
+  ".json",
+  ".jsx",
+  ".md",
+  ".mjs",
+  ".php",
+  ".ps1",
+  ".py",
+  ".rb",
+  ".rs",
+  ".sh",
+  ".sql",
+  ".svelte",
+  ".toml",
+  ".ts",
+  ".tsx",
+  ".txt",
+  ".vue",
+  ".xml",
+  ".yaml",
+  ".yml",
+]);
+
+const LOCAL_SEARCH_STOP_WORDS = new Set([
+  "and",
+  "the",
+  "for",
+  "with",
+  "where",
+  "what",
+  "how",
+  "this",
+  "that",
+  "在哪里",
+  "哪里",
+  "逻辑",
+  "代码",
+  "文件",
+  "定位",
+  "修复",
+  "当前",
+]);
+
+function localSearchTokens(query) {
+  const normalized = String(query || "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase();
+  const rawTokens = normalized.match(/[a-z0-9_.$/-]{3,}|[\u4e00-\u9fa5]{2,}/g) || [];
+  const tokens = [];
+  for (const token of rawTokens) {
+    const clean = token.replace(/^[-_.$/]+|[-_.$/]+$/g, "");
+    if (!clean || LOCAL_SEARCH_STOP_WORDS.has(clean)) {
+      continue;
+    }
+    tokens.push(clean);
+  }
+  return [...new Set(tokens)];
+}
+
+function isLocalSearchTextFile(filePath) {
+  const base = path.basename(filePath);
+  const ext = path.extname(base).toLowerCase();
+  if (LOCAL_SEARCH_TEXT_EXTENSIONS.has(ext)) {
+    return true;
+  }
+  return /(^|\.)(env|gitignore|dockerignore|npmrc|yarnrc|prettierrc|eslintrc|babelrc)$/i.test(base);
+}
+
+function collectLocalSearchFiles(rootDir, options = {}) {
+  const {
+    maxFiles = 5000,
+    maxDepth = 8,
+  } = options;
+  const files = [];
+
+  function walk(dir, depth) {
+    if (files.length >= maxFiles || depth > maxDepth) {
+      return;
+    }
+
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (files.length >= maxFiles) {
+        break;
+      }
+      if (entry.name === ".env") {
+        continue;
+      }
+      if (entry.name.startsWith(".") && ![".env", ".env.example", ".gitignore"].includes(entry.name)) {
+        continue;
+      }
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!LOCAL_SEARCH_SKIP_DIRS.has(entry.name)) {
+          walk(fullPath, depth + 1);
+        }
+        continue;
+      }
+      if (entry.isFile() && isLocalSearchTextFile(fullPath)) {
+        files.push(fullPath);
+      }
+    }
+  }
+
+  walk(rootDir, 0);
+  return files;
+}
+
+function findLineRanges(lines, tokens) {
+  const ranges = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].toLowerCase();
+    if (!tokens.some((token) => line.includes(token))) {
+      continue;
+    }
+
+    const lineNo = index + 1;
+    const previous = ranges[ranges.length - 1];
+    if (previous && lineNo <= previous.end + 6) {
+      previous.end = lineNo;
+    } else {
+      ranges.push({ start: lineNo, end: lineNo });
+    }
+    if (ranges.length >= 3) {
+      break;
+    }
+  }
+  return ranges.map((range) => (range.start === range.end ? `L${range.start}` : `L${range.start}-${range.end}`));
+}
+
+function runLocalSearch({ query, cwd, maxResults = 10 }) {
+  const result = {
+    executed: true,
+    success: true,
+    query,
+    raw_stdout: null,
+    result_present: false,
+    empty_result: false,
+    exit_code: 0,
+    stderr_summary: ["local fallback search"],
+  };
+
+  const fast = runLocalFastSearch({ query, cwd, maxResults });
+  if (fast.resultPresent) {
+    result.result_present = true;
+    result.raw_stdout = fast.output;
+    result.stderr_summary = fast.diagnostics;
+    return { search: result, error: null };
+  }
+
+  const tokens = localSearchTokens(query);
+  if (tokens.length === 0 || !isDirectory(cwd)) {
+    result.empty_result = true;
+    result.raw_stdout = fast.output || "No relevant files found by local fallback.";
+    result.stderr_summary = fast.diagnostics && fast.diagnostics.length ? fast.diagnostics : result.stderr_summary;
+    return { search: result, error: buildError("local-search", "EMPTY_RESULT", "Local fallback search returned no results.") };
+  }
+
+  const files = collectLocalSearchFiles(cwd);
+  const matches = [];
+  for (const filePath of files) {
+    let content;
+    try {
+      content = fs.readFileSync(filePath, "utf8");
+    } catch {
+      continue;
+    }
+
+    const lowerPath = filePath.toLowerCase();
+    const lowerContent = content.toLowerCase();
+    let score = 0;
+    let hitCount = 0;
+    for (const token of tokens) {
+      const inPath = lowerPath.includes(token);
+      const inContent = lowerContent.includes(token);
+      if (inPath) score += 8;
+      if (inContent) {
+        score += token.length >= 8 ? 6 : 3;
+        hitCount += 1;
+      }
+    }
+
+    if (score <= 0) {
+      continue;
+    }
+
+    const lines = content.split(/\r?\n/);
+    matches.push({
+      filePath,
+      relativePath: path.relative(cwd, filePath),
+      score: score + hitCount,
+      ranges: findLineRanges(lines, tokens),
+    });
+  }
+
+  matches.sort((a, b) => b.score - a.score || a.relativePath.localeCompare(b.relativePath));
+  const picked = matches.slice(0, Math.max(1, maxResults || 10));
+
+  if (picked.length === 0) {
+    result.empty_result = true;
+    result.raw_stdout = fast.output || "No relevant files found by local fallback.";
+    result.stderr_summary = fast.diagnostics && fast.diagnostics.length ? fast.diagnostics : result.stderr_summary;
+    return { search: result, error: buildError("local-search", "EMPTY_RESULT", "Local fallback search returned no results.") };
+  }
+
+  result.result_present = true;
+  result.raw_stdout = [
+    `Found ${picked.length} relevant files by local fallback.`,
+    "",
+    ...picked.map((item, index) => {
+      const rangeText = item.ranges.length > 0 ? ` (${item.ranges.join(", ")})` : "";
+      return `  [${index + 1}/${picked.length}] ${item.filePath}${rangeText}`;
+    }),
+    "",
+    `local fallback tokens: ${tokens.join(", ")}`,
+  ].join("\n");
+
+  return { search: result, error: null };
+}
+
+const QUOTA_PATTERNS = [
+  /quota\s*(exceed|exhaust|used\s*up|reach|over|run\s*out)/i,
+  /(insufficient|out\s*of)\s*(credit|balance|quota|fund|token)/i,
+  /no\s*(remaining\s*)?(credit|balance|quota|fund)/i,
+  /rate\s*limit\s*exceed/i,
+  /payment\s*required/i,
+  /billing/i,
+  /subscription\s*(expired|required)/i,
+  /(余额|额度|配额|计费)\s*(不足|耗尽|用尽|用完|超(出|限)|已满)/,
+  /(无|没有)(剩余)?(余额|额度|配额)/,
+  /欠费/,
+  /(请)?充值/,
+  /\b40[23]\b.*(quota|credit|balance|payment|billing)/i,
+  /\b429\b.*(quota|credit|rate)/i,
+];
+
+function detectQuotaError(text) {
+  if (!text) return false;
+  const s = String(text);
+  return QUOTA_PATTERNS.some((re) => re.test(s));
+}
+
+function xmlEscapeText(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function xmlEscapeAttr(value) {
+  return xmlEscapeText(value).replace(/"/g, "&quot;");
+}
+
+function xmlCdata(value) {
+  return `<![CDATA[${String(value).replace(/]]>/g, "]]]]><![CDATA[>")}]]>`;
+}
+
+function serializeForStdout(payload, pretty = false) {
+  const lines = [];
+  const indent = (level) => (pretty ? "  ".repeat(level) : "");
+
+  const pushLine = (level, text) => {
+    lines.push(`${indent(level)}${text}`);
+  };
+
+  const pushTextTag = (level, tagName, value, options = {}) => {
+    const { cdata = false, always = false } = options;
+    if (value === null || value === undefined || value === "") {
+      if (always) {
+        pushLine(level, `<${tagName}/>`);
+      }
+      return;
+    }
+    const serialized = cdata ? xmlCdata(value) : xmlEscapeText(value);
+    pushLine(level, `<${tagName}>${serialized}</${tagName}>`);
+  };
+
+  const pushStringList = (level, wrapperTag, itemTag, items) => {
+    if (!Array.isArray(items) || items.length === 0) {
+      return;
+    }
+    pushLine(level, `<${wrapperTag}>`);
+    for (const item of items) {
+      pushTextTag(level + 1, itemTag, item, { cdata: true });
+    }
+    pushLine(level, `</${wrapperTag}>`);
+  };
+
+  pushLine(0, `<?xml version="1.0" encoding="UTF-8"?>`);
+  pushLine(0, `<yce>`);
+  pushTextTag(1, "success", payload.success === true ? "true" : "false");
+  pushTextTag(1, "mode", payload.mode, { always: true });
+  pushTextTag(1, "resolved-action", payload.resolved_action, { always: true });
+  pushTextTag(1, "original-query", payload.original_query, { cdata: true, always: true });
+  pushTextTag(1, "cwd", payload.cwd, { cdata: true, always: true });
+
+  const degradation = payload.meta && payload.meta.degradation ? payload.meta.degradation : null;
+  if (degradation && degradation.active === true) {
+    pushLine(1, `<degraded active="true">`);
+    pushTextTag(2, "summary", degradation.summary, { cdata: true, always: true });
+    pushTextTag(2, "failed-stage", degradation.failed_stage, { always: true });
+    pushTextTag(2, "search-query-source", degradation.search_query_source, { always: true });
+    pushTextTag(2, "fallback-query", degradation.fallback_query, { cdata: true, always: true });
+    if (degradation.error) {
+      const attrs = [];
+      if (degradation.error.source) {
+        attrs.push(`source="${xmlEscapeAttr(degradation.error.source)}"`);
+      }
+      if (degradation.error.code) {
+        attrs.push(`code="${xmlEscapeAttr(degradation.error.code)}"`);
+      }
+      pushLine(
+        2,
+        `<error${attrs.length > 0 ? ` ${attrs.join(" ")}` : ""}>${xmlCdata(degradation.error.message || "")}</error>`
+      );
+    }
+    pushLine(1, `</degraded>`);
+  } else {
+    pushLine(1, `<degraded active="false"/>`);
+  }
+
+  if (payload.enhance) {
+    const attrs = [
+      `executed="${xmlEscapeAttr(payload.enhance.executed === true ? "true" : "false")}"`,
+      `success="${xmlEscapeAttr(payload.enhance.success === true ? "true" : "false")}"`,
+      `used-history="${xmlEscapeAttr(payload.enhance.used_history === true ? "true" : "false")}"`,
+    ].join(" ");
+    pushLine(1, `<enhanced ${attrs}>`);
+    pushTextTag(2, "prompt", payload.enhance.prompt, { cdata: true, always: true });
+    pushStringList(2, "recommended-skills", "skill", payload.enhance.recommended_skills);
+    pushTextTag(2, "raw-stdout", payload.enhance.raw_stdout, { cdata: true });
+    pushStringList(2, "stderr-summary", "line", payload.enhance.stderr_summary);
+
+    if (payload.enhance.raw_events_summary) {
+      const rawEvents = payload.enhance.raw_events_summary;
+      const rawAttrs = [
+        `captured="${xmlEscapeAttr(rawEvents.captured === true ? "true" : "false")}"`,
+      ];
+      if (rawEvents.event_count !== undefined) {
+        rawAttrs.push(`event-count="${xmlEscapeAttr(String(rawEvents.event_count))}"`);
+      }
+      pushLine(2, `<raw-events ${rawAttrs.join(" ")}>`); 
+      pushTextTag(3, "error", rawEvents.error, { cdata: true });
+      pushStringList(3, "event-types", "event-type", rawEvents.event_types);
+      if (Array.isArray(rawEvents.preview) && rawEvents.preview.length > 0) {
+        pushLine(3, `<preview>`);
+        for (const previewItem of rawEvents.preview) {
+          const previewAttrs = previewItem && previewItem.event
+            ? ` event="${xmlEscapeAttr(previewItem.event)}"`
+            : "";
+          pushLine(4, `<event${previewAttrs}>`);
+          pushStringList(5, "keys", "key", previewItem && Array.isArray(previewItem.keys) ? previewItem.keys : []);
+          pushLine(4, `</event>`);
+        }
+        pushLine(3, `</preview>`);
+      }
+      pushLine(2, `</raw-events>`);
+    }
+
+    pushLine(1, `</enhanced>`);
+  } else {
+    pushLine(1, `<enhanced/>`);
+  }
+
+  if (payload.search) {
+    const attrs = [
+      `executed="${xmlEscapeAttr(payload.search.executed === true ? "true" : "false")}"`,
+      `success="${xmlEscapeAttr(payload.search.success === true ? "true" : "false")}"`,
+      `result-present="${xmlEscapeAttr(payload.search.result_present === true ? "true" : "false")}"`,
+      `empty-result="${xmlEscapeAttr(payload.search.empty_result === true ? "true" : "false")}"`,
+    ];
+    if (payload.search.exit_code !== null && payload.search.exit_code !== undefined) {
+      attrs.push(`exit-code="${xmlEscapeAttr(String(payload.search.exit_code))}"`);
+    }
+    pushLine(1, `<search ${attrs.join(" ")}>`);
+    pushTextTag(2, "query", payload.search.query, { cdata: true, always: true });
+    pushTextTag(2, "result", payload.search.raw_stdout, { cdata: true, always: true });
+    if (payload.search.diagnostics && typeof payload.search.diagnostics === "object") {
+      const diagnostics = payload.search.diagnostics;
+      const scalarFields = [
+        ["tree-depth", "tree_depth"],
+        ["requested-tree-depth", "requested_tree_depth"],
+        ["tree-size-kb", "tree_size_kb"],
+        ["fell-back", "fell_back"],
+        ["auto-depth", "auto_depth"],
+        ["context-trimmed", "context_trimmed"],
+        ["repo-map-strategy", "repo_map_strategy"],
+        ["max-turns", "max_turns"],
+        ["max-commands", "max_commands"],
+        ["max-results", "max_results"],
+        ["timeout-ms", "timeout_ms"],
+        ["bootstrap-enabled", "bootstrap_enabled"],
+        ["bootstrap-tree-depth", "bootstrap_tree_depth"],
+        ["hotspot-top-k", "hotspot_top_k"],
+        ["hotspot-tree-depth", "hotspot_tree_depth"],
+        ["hotspot-max-bytes", "hotspot_max_bytes"],
+        ["bootstrap-max-turns", "bootstrap_max_turns"],
+        ["bootstrap-max-commands", "bootstrap_max_commands"],
+        ["turns-used", "turns_used"],
+        ["error-type", "error_type"],
+        ["project-path", "project_path"],
+        ["ignore-file", "ignore_file"],
+      ];
+      pushLine(2, `<diagnostics>`);
+      for (const [tagName, key] of scalarFields) {
+        pushTextTag(3, tagName, diagnostics[key]);
+      }
+      pushStringList(3, "hot-dirs", "hot-dir", diagnostics.hot_dirs);
+      pushStringList(3, "exclude-paths", "exclude-path", diagnostics.exclude_paths);
+      pushStringList(3, "ignore-patterns", "ignore-pattern", diagnostics.ignore_patterns);
+      pushLine(2, `</diagnostics>`);
+    }
+    pushStringList(2, "stderr-summary", "line", payload.search.stderr_summary);
+    pushLine(1, `</search>`);
+  } else {
+    pushLine(1, `<search/>`);
+  }
+
+  if (Array.isArray(payload.errors) && payload.errors.length > 0) {
+    pushLine(1, `<errors>`);
+    for (const error of payload.errors) {
+      const attrs = [];
+      if (error.source) {
+        attrs.push(`source="${xmlEscapeAttr(error.source)}"`);
+      }
+      if (error.code) {
+        attrs.push(`code="${xmlEscapeAttr(error.code)}"`);
+      }
+      pushLine(2, `<error${attrs.length > 0 ? ` ${attrs.join(" ")}` : ""}>${xmlCdata(error.message || "")}</error>`);
+    }
+    pushLine(1, `</errors>`);
+  } else {
+    pushLine(1, `<errors/>`);
+  }
+
+  if (payload.meta) {
+    pushLine(1, `<meta>`);
+    if (payload.meta.durations_ms) {
+      pushLine(2, `<durations-ms>`);
+      pushTextTag(3, "enhance", payload.meta.durations_ms.enhance ?? 0);
+      pushTextTag(3, "search", payload.meta.durations_ms.search ?? 0);
+      pushTextTag(3, "total", payload.meta.durations_ms.total ?? 0);
+      pushLine(2, `</durations-ms>`);
+    }
+
+    if (payload.meta.dependency_paths) {
+      pushLine(2, `<dependency-paths>`);
+      pushTextTag(3, "yw-enhance-script", payload.meta.dependency_paths.yw_enhance_script, { cdata: true, always: true });
+      pushTextTag(3, "yce-engine-script", payload.meta.dependency_paths.yce_engine_script, { cdata: true, always: true });
+      pushLine(2, `</dependency-paths>`);
+    }
+
+    pushTextTag(2, "timestamp", payload.meta.timestamp, { always: true });
+    pushLine(1, `</meta>`);
+  } else {
+    pushLine(1, `<meta/>`);
+  }
+
+  pushLine(0, `</yce>`);
+  return pretty ? lines.join("\n") : lines.join("");
+}
+
+function runCommand(command, args, options = {}) {
+  const { cwd, timeoutMs, env } = options;
+
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      cwd,
+      env: env ? { ...process.env, ...env } : process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timedOut = false;
+
+    const timer = timeoutMs
+      ? setTimeout(() => {
+          timedOut = true;
+          child.kill("SIGTERM");
+          setTimeout(() => child.kill("SIGKILL"), 2000).unref();
+        }, timeoutMs)
+      : null;
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve({
+        ok: false,
+        stdout,
+        stderr: stderr || error.message,
+        exitCode: null,
+        timedOut,
+        signal: null,
+        spawnError: error,
+      });
+    });
+
+    child.on("close", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve({
+        ok: code === 0,
+        stdout,
+        stderr,
+        exitCode: code,
+        timedOut,
+        signal,
+        spawnError: null,
+      });
+    });
+  });
+}
+
+module.exports = {
+  ROOT_DIR,
+  buildError,
+  detectQuotaError,
+  ensureAbsolutePath,
+  expandHomePath,
+  extractEnhancedBlock,
+  fileExists,
+  isDirectory,
+  isNonEmptyString,
+  loadRuntimeConfig,
+  normalizeSearchQuery,
+  normalizeQuery,
+  nowIso,
+  parseArgs,
+  parseEnhancedContent,
+  resolveConfigPath,
+  resolveYouwenScript,
+  runLocalSearch,
+  runCommand,
+  serializeForStdout,
+  summarizeText,
+  toBoolean,
+  toBoundedInt,
+  normalizeExcludePaths,
+  toPositiveInt,
+};
