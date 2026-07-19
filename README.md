@@ -1,7 +1,7 @@
 # YCE Skill
 
 YCE（Youwen Code Enhance）是面向 AI Agent 的 **提示词增强 + 语义代码检索** skill。  
-当前版本：**2.0.0**。
+当前版本：**2.1.0**。
 
 ## License
 

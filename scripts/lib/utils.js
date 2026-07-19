@@ -57,6 +57,7 @@ const DEFAULTS = {
   defaultMode: "auto",
   timeoutEnhanceMs: 300000,
   timeoutSearchMs: 180000,
+  timeoutNetworkMs: 120000,
 };
 
 function parseEnvFile(filePath) {
@@ -236,10 +237,21 @@ function loadRuntimeConfig() {
     yceEngineBootstrapMaxCommands: toBoundedIntOrFallback(merged.YCE_ENGINE_BOOTSTRAP_MAX_COMMANDS, DEFAULTS.yceEngineBootstrapMaxCommands, 1, 20),
     ywEnhanceEnv: buildYwEnhanceEnv(merged),
     yceEngineEnv: buildYceEngineEnv(merged),
+    yceRelayUrl:
+      (isNonEmptyString(merged.YCE_RELAY_URL)
+        ? String(merged.YCE_RELAY_URL).trim()
+        : "") || DEFAULTS.yceRelayUrl,
+    yceRelayToken: isNonEmptyString(merged.YCE_RELAY_TOKEN)
+      ? String(merged.YCE_RELAY_TOKEN).trim()
+      : "",
     hasYouwenToken: Boolean(youwenToken),
     defaultMode: merged.YCE_DEFAULT_MODE || DEFAULTS.defaultMode,
     timeoutEnhanceMs: toPositiveInt(merged.YCE_TIMEOUT_ENHANCE_MS, DEFAULTS.timeoutEnhanceMs),
     timeoutSearchMs: toPositiveInt(merged.YCE_TIMEOUT_SEARCH_MS, DEFAULTS.timeoutSearchMs),
+    timeoutNetworkMs: toPositiveInt(
+      merged.YCE_TIMEOUT_NETWORK_MS,
+      DEFAULTS.timeoutNetworkMs,
+    ),
   };
 }
 
@@ -910,6 +922,51 @@ function serializeForStdout(payload, pretty = false) {
     pushLine(1, `<search/>`);
   }
 
+  if (payload.network_search) {
+    const network = payload.network_search;
+    const attrs = [
+      `executed="${xmlEscapeAttr(network.executed === true ? "true" : "false")}"`,
+      `success="${xmlEscapeAttr(network.success === true ? "true" : "false")}"`,
+      `result-present="${xmlEscapeAttr(network.result_present === true ? "true" : "false")}"`,
+    ];
+    pushLine(1, `<network-search ${attrs.join(" ")}>`);
+    pushTextTag(2, "request-id", network.request_id, { always: true });
+    pushTextTag(2, "query", network.query, { cdata: true, always: true });
+    pushTextTag(2, "profile", network.profile, { always: true });
+    pushTextTag(2, "status", network.status, { always: true });
+    pushTextTag(
+      2,
+      "classification",
+      network.classification == null
+        ? null
+        : JSON.stringify(network.classification),
+      { cdata: true },
+    );
+    const pushObjectList = (level, wrapperTag, itemTag, items) => {
+      if (!Array.isArray(items) || items.length === 0) return;
+      pushLine(level, `<${wrapperTag}>`);
+      for (const item of items) {
+        pushTextTag(level + 1, itemTag, JSON.stringify(item), { cdata: true });
+      }
+      pushLine(level, `</${wrapperTag}>`);
+    };
+    pushObjectList(2, "evidence", "source", network.evidence);
+    pushObjectList(2, "summaries", "summary", network.summaries);
+    pushObjectList(2, "provider-runs", "provider-run", network.provider_runs);
+    pushObjectList(2, "failures", "failure", network.failures);
+    if (network.usage && typeof network.usage === "object") {
+      pushLine(2, `<usage>`);
+      for (const [key, value] of Object.entries(network.usage)) {
+        const tagName = String(key).replace(/_/g, "-");
+        pushTextTag(3, tagName, value);
+      }
+      pushLine(2, `</usage>`);
+    }
+    pushLine(1, `</network-search>`);
+  } else {
+    pushLine(1, `<network-search/>`);
+  }
+
   if (Array.isArray(payload.errors) && payload.errors.length > 0) {
     pushLine(1, `<errors>`);
     for (const error of payload.errors) {
@@ -933,6 +990,7 @@ function serializeForStdout(payload, pretty = false) {
       pushLine(2, `<durations-ms>`);
       pushTextTag(3, "enhance", payload.meta.durations_ms.enhance ?? 0);
       pushTextTag(3, "search", payload.meta.durations_ms.search ?? 0);
+      pushTextTag(3, "network", payload.meta.durations_ms.network ?? 0);
       pushTextTag(3, "total", payload.meta.durations_ms.total ?? 0);
       pushLine(2, `</durations-ms>`);
     }

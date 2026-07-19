@@ -1,5 +1,6 @@
 const { runYwEnhance } = require("./adapters/ywEnhance");
 const { runYceEngineSearch } = require("./adapters/yceEngineSearch");
+const { runNetworkSearch } = require("./adapters/networkSearch");
 const { buildError, normalizeSearchQuery, nowIso } = require("./utils");
 
 const SEARCH_KEYWORDS = [
@@ -27,6 +28,9 @@ function resolveAction(mode, query) {
   }
   if (mode === "search") {
     return "search";
+  }
+  if (mode === "network") {
+    return "network_search";
   }
 
   const hasSearchIntent = containsAny(query, SEARCH_KEYWORDS);
@@ -97,6 +101,8 @@ async function orchestrate(input) {
     history,
     noSearch,
     rawEvents,
+    withNetwork,
+    networkOptions,
     config,
   } = input;
 
@@ -105,9 +111,11 @@ async function orchestrate(input) {
   const errors = [];
   let enhance = null;
   let search = null;
+  let networkSearch = null;
   const durations = {
     enhance: 0,
     search: 0,
+    network: 0,
     total: 0,
   };
 
@@ -125,30 +133,33 @@ async function orchestrate(input) {
         used_history: Boolean(history && String(history).trim()),
       };
       errors.push(buildError("yw-enhance", "AUTH_ERROR", MISSING_YOUWEN_TOKEN_MESSAGE));
-      durations.total = Date.now() - startedAt;
-      return {
-        success: false,
-        mode,
-        resolved_action: "enhance",
-        original_query: query,
-        cwd,
-        enhance,
-        search: null,
-        errors,
-        meta: {
-          durations_ms: durations,
-          dependency_paths: {
-            yw_enhance_script: config.youwenScript,
-            yce_engine_script: config.yceEngineScript,
+      if (withNetwork !== true) {
+        durations.total = Date.now() - startedAt;
+        return {
+          success: false,
+          mode,
+          resolved_action: "enhance",
+          original_query: query,
+          cwd,
+          enhance,
+          search: null,
+          network_search: null,
+          errors,
+          meta: {
+            durations_ms: durations,
+            dependency_paths: {
+              yw_enhance_script: config.youwenScript,
+              yce_engine_script: config.yceEngineScript,
+            },
+            degradation: { active: false },
+            timestamp: nowIso(),
           },
-          degradation: { active: false },
-          timestamp: nowIso(),
-        },
-      };
+        };
+      }
+    } else {
+      // auto / enhance_then_search without token: skip enhance and search with original query.
+      resolvedAction = "search";
     }
-
-    // auto / enhance_then_search without token: skip enhance and search with original query.
-    resolvedAction = "search";
   }
 
   if (canEnhance && (resolvedAction === "enhance" || resolvedAction === "enhance_then_search")) {
@@ -195,16 +206,49 @@ async function orchestrate(input) {
     }
   }
 
+  const shouldRunNetwork = mode === "network" || withNetwork === true;
+  if (shouldRunNetwork) {
+    const networkQuery =
+      enhance && enhance.success && enhance.prompt ? enhance.prompt : query;
+    const networkResult = await runNetworkSearch({
+      query: networkQuery,
+      relayUrl: config.yceRelayUrl,
+      relayToken: config.yceRelayToken,
+      timeoutMs: input.timeoutNetworkMs,
+      ...(networkOptions || {}),
+    });
+    networkSearch = networkResult.networkSearch;
+    durations.network = networkResult.durationMs;
+    if (networkResult.error) {
+      errors.push(networkResult.error);
+    }
+    if (mode === "network") {
+      resolvedAction = "network_search";
+    } else if (resolvedAction === "enhance_then_search") {
+      resolvedAction = "enhance_then_search_with_network";
+    } else if (resolvedAction === "search") {
+      resolvedAction = "search_with_network";
+    } else {
+      resolvedAction = "enhance_with_network";
+    }
+  }
+
   durations.total = Date.now() - startedAt;
 
   const hasUsableEnhance = Boolean(enhance && enhance.success && enhance.prompt);
   const hasUsableSearch = Boolean(search && search.success === true && search.result_present);
-  const success = hasUsableEnhance || hasUsableSearch;
+  const hasUsableNetwork = Boolean(
+    networkSearch &&
+      networkSearch.success === true &&
+      networkSearch.result_present === true,
+  );
+  const success = hasUsableEnhance || hasUsableSearch || hasUsableNetwork;
   const degradation = buildDegradationMeta({
     resolvedAction,
     query,
     enhance,
     search,
+    network_search: networkSearch,
     errors,
   });
 
@@ -220,6 +264,7 @@ async function orchestrate(input) {
     cwd,
     enhance,
     search,
+    network_search: networkSearch,
     errors,
     meta: {
       durations_ms: durations,

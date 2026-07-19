@@ -4,6 +4,9 @@ const { mkdtempSync, rmSync, writeFileSync } = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const { join, resolve } = require("node:path");
 const { tmpdir } = require("node:os");
+const { runNetworkSearch } = require("../scripts/lib/adapters/networkSearch");
+const { orchestrate } = require("../scripts/lib/orchestrator");
+const { serializeForStdout } = require("../scripts/lib/utils");
 
 const repoRoot = resolve(__dirname, "..");
 const fixtureDir = mkdtempSync(join(tmpdir(), "yce-auto-enhance-search-"));
@@ -240,4 +243,130 @@ test("search 参数超出硬上限时返回 INVALID_ARGS", () => {
   assert.notEqual(result.status, 0);
   assert.match(result.stdout, /code="INVALID_ARGS"/);
   assert.match(result.stdout, /max-turns/);
+});
+
+test("network adapter 使用 Bearer token 并返回独立用量", async () => {
+  const originalFetch = global.fetch;
+  let captured = null;
+  global.fetch = async (url, options) => {
+    captured = { url, options };
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          status: "succeeded",
+          classification: { kind: "fact" },
+          evidence: [{ title: "官方文档", url: "https://example.com/doc" }],
+          summaries: [{ text: "已验证事实" }],
+          providerRuns: [{ provider: "fixture", status: "succeeded" }],
+          failures: [],
+          usage: {
+            network_daily_count: 2,
+            network_daily_limit: 10,
+            code_monthly_count: 5,
+            network_monthly_count: 3,
+            shared_monthly_count: 8,
+            shared_monthly_limit: 100,
+          },
+        };
+      },
+    };
+  };
+  try {
+    const result = await runNetworkSearch({
+      query: "验证联网事实",
+      relayUrl: "https://relay.example/",
+      relayToken: "fixture-relay-token",
+      timeoutMs: 5000,
+      profile: "balanced",
+    });
+    assert.equal(result.error, null);
+    assert.equal(result.networkSearch.result_present, true);
+    assert.equal(captured.url, "https://relay.example/yce/network-search");
+    assert.equal(
+      captured.options.headers.Authorization,
+      "Bearer fixture-relay-token",
+    );
+    const xml = serializeForStdout(
+      {
+        success: true,
+        mode: "network",
+        resolved_action: "network_search",
+        original_query: "验证联网事实",
+        cwd: repoRoot,
+        enhance: null,
+        search: null,
+        network_search: result.networkSearch,
+        errors: [],
+        meta: {
+          durations_ms: { enhance: 0, search: 0, network: 1, total: 1 },
+          dependency_paths: {},
+          timestamp: new Date().toISOString(),
+        },
+      },
+      true,
+    );
+    assert.match(xml, /<network-search executed="true" success="true" result-present="true">/);
+    assert.match(xml, /<network-daily-count>2<\/network-daily-count>/);
+    assert.match(xml, /<code-monthly-count>5<\/code-monthly-count>/);
+    assert.match(xml, /<network-monthly-count>3<\/network-monthly-count>/);
+    assert.match(xml, /<source><!\[CDATA\[/);
+    assert.match(xml, /<provider-run><!\[CDATA\[/);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("enhance 显式附加联网时即使缺少 Youwen token 也继续联网", async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        status: "succeeded",
+        evidence: [{ title: "联网证据", url: "https://example.com/fact" }],
+        summaries: [],
+        providerRuns: [{ provider: "fixture", status: "succeeded" }],
+        failures: [],
+        usage: {},
+      };
+    },
+  });
+  try {
+    const result = await orchestrate({
+      mode: "enhance",
+      query: "缺少增强密钥时继续联网",
+      cwd: repoRoot,
+      history: "",
+      noSearch: false,
+      rawEvents: false,
+      withNetwork: true,
+      timeoutEnhanceMs: 5000,
+      timeoutSearchMs: 5000,
+      timeoutNetworkMs: 5000,
+      networkOptions: { profile: "balanced", library: "", repo: "" },
+      config: {
+        hasYouwenToken: false,
+        ywEnhanceEnv: {},
+        yceRelayUrl: "https://relay.example",
+        yceRelayToken: "fixture-relay-token",
+        youwenScript: forbiddenEnhancer,
+        yceEngineScript: engineScript,
+      },
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.resolved_action, "enhance_with_network");
+    assert.equal(result.network_search.result_present, true);
+    assert.equal(
+      result.errors.some(
+        (error) => error.source === "yw-enhance" && error.code === "AUTH_ERROR",
+      ),
+      true,
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
 });

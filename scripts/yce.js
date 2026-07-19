@@ -24,6 +24,7 @@ function buildInvalidArgsResponse(message, config, cwd) {
     cwd,
     enhance: null,
     search: null,
+    network_search: null,
     errors: [
       {
         source: "cli",
@@ -35,6 +36,7 @@ function buildInvalidArgsResponse(message, config, cwd) {
       durations_ms: {
         enhance: 0,
         search: 0,
+        network: 0,
         total: 0,
       },
       dependency_paths: {
@@ -90,7 +92,7 @@ async function main() {
 
   if (args.help === true || args.h === true) {
     const payload = buildInvalidArgsResponse(
-      "Usage: node scripts/yce.js \"<query>\" [--mode auto|enhance|search] [--history <text>] [--cwd <path>] [--xml-pretty] [--timeout-enhance-ms <n>] [--timeout-search-ms <n>] [--max-turns 1-5] [--max-commands 1-20] [--max-results 1-30] [--tree-depth 0-6] [--exclude <glob[,glob]>] [--repo-map-mode classic|bootstrap_hotspot] [--bootstrap-enabled true|false|--no-bootstrap] [--bootstrap-tree-depth 1-3] [--hotspot-top-k 0-8] [--hotspot-tree-depth 1-4] [--hotspot-max-bytes 16384-256000] [--bootstrap-max-turns 1-5] [--bootstrap-max-commands 1-20] [--no-search] [--raw-events] [--json-pretty (legacy alias)]",
+      "Usage: node scripts/yce.js \"<query>\" [--mode auto|enhance|search|network] [--with-network] [--network-profile quick|balanced|exhaustive] [--library <name>] [--repo <owner/name>] [--history <text>] [--cwd <path>] [--xml-pretty] [--timeout-enhance-ms <n>] [--timeout-search-ms <n>] [--timeout-network-ms <n>] [--max-turns 1-5] [--max-commands 1-20] [--max-results 1-30] [--tree-depth 0-6] [--exclude <glob[,glob]>] [--repo-map-mode classic|bootstrap_hotspot] [--bootstrap-enabled true|false|--no-bootstrap] [--bootstrap-tree-depth 1-3] [--hotspot-top-k 0-8] [--hotspot-tree-depth 1-4] [--hotspot-max-bytes 16384-256000] [--bootstrap-max-turns 1-5] [--bootstrap-max-commands 1-20] [--no-search] [--raw-events] [--json-pretty (legacy alias)]",
       config,
       cwd
     );
@@ -98,7 +100,7 @@ async function main() {
     process.exit(0);
   }
 
-  if (!["auto", "enhance", "search"].includes(mode)) {
+  if (!["auto", "enhance", "search", "network"].includes(mode)) {
     const payload = buildInvalidArgsResponse(`Unsupported mode: ${mode}`, config, cwd);
     console.log(serializeForStdout(payload, pretty));
     process.exit(1);
@@ -118,6 +120,20 @@ async function main() {
 
   const timeoutEnhanceMs = toPositiveInt(args["timeout-enhance-ms"], config.timeoutEnhanceMs);
   const timeoutSearchMs = toPositiveInt(args["timeout-search-ms"], config.timeoutSearchMs);
+  const timeoutNetworkMs = toPositiveInt(
+    args["timeout-network-ms"],
+    config.timeoutNetworkMs,
+  );
+  const networkProfile = String(args["network-profile"] || "balanced").toLowerCase();
+  if (!["quick", "balanced", "exhaustive"].includes(networkProfile)) {
+    const payload = buildInvalidArgsResponse(
+      "network-profile must be quick, balanced, or exhaustive.",
+      config,
+      cwd,
+    );
+    console.log(serializeForStdout(payload, pretty));
+    process.exit(1);
+  }
   let searchOptions;
   try {
     searchOptions = buildSearchOptions(args, config);
@@ -154,6 +170,14 @@ async function main() {
       rawEvents: args["raw-events"] === true,
       timeoutEnhanceMs,
       timeoutSearchMs,
+      timeoutNetworkMs,
+      withNetwork: args["with-network"] === true,
+      networkOptions: {
+        profile: networkProfile,
+        library:
+          typeof args.library === "string" ? args.library.trim() : "",
+        repo: typeof args.repo === "string" ? args.repo.trim() : "",
+      },
       searchOptions,
       config,
     });
@@ -203,6 +227,7 @@ async function main() {
       cwd,
       enhance: null,
       search: null,
+      network_search: null,
       errors: [
         {
           source: "cli",
@@ -214,6 +239,7 @@ async function main() {
         durations_ms: {
           enhance: 0,
           search: 0,
+          network: 0,
           total: 0,
         },
         dependency_paths: {
