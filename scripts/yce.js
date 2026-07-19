@@ -92,7 +92,7 @@ async function main() {
 
   if (args.help === true || args.h === true) {
     const payload = buildInvalidArgsResponse(
-      "Usage: node scripts/yce.js \"<query>\" [--mode auto|enhance|search|network] [--with-network] [--no-network] [--network-profile quick|balanced|exhaustive] [--library <name>] [--repo <owner/name>] [--history <text>] [--cwd <path>] [--xml-pretty] [--timeout-enhance-ms <n>] [--timeout-search-ms <n>] [--timeout-network-ms <n>] [--max-turns 1-5] [--max-commands 1-20] [--max-results 1-30] [--tree-depth 0-6] [--exclude <glob[,glob]>] [--repo-map-mode classic|bootstrap_hotspot] [--bootstrap-enabled true|false|--no-bootstrap] [--bootstrap-tree-depth 1-3] [--hotspot-top-k 0-8] [--hotspot-tree-depth 1-4] [--hotspot-max-bytes 16384-256000] [--bootstrap-max-turns 1-5] [--bootstrap-max-commands 1-20] [--no-search] [--raw-events] [--json-pretty (legacy alias)]",
+      "Usage: node scripts/yce.js \"<query>\" [--mode auto|enhance|search|network] [--with-network] [--network-profile quick|balanced|exhaustive] [--library <name>] [--repo <owner/name>] [--history <text>] [--cwd <path>] [--xml-pretty] [--timeout-enhance-ms <n>] [--timeout-search-ms <n>] [--timeout-network-ms <n>] [--max-turns 1-5] [--max-commands 1-20] [--max-results 1-30] [--tree-depth 0-6] [--exclude <glob[,glob]>] [--repo-map-mode classic|bootstrap_hotspot] [--bootstrap-enabled true|false|--no-bootstrap] [--bootstrap-tree-depth 1-3] [--hotspot-top-k 0-8] [--hotspot-tree-depth 1-4] [--hotspot-max-bytes 16384-256000] [--bootstrap-max-turns 1-5] [--bootstrap-max-commands 1-20] [--no-search] [--raw-events] [--json-pretty (legacy alias)]",
       config,
       cwd
     );
@@ -172,7 +172,6 @@ async function main() {
       timeoutSearchMs,
       timeoutNetworkMs,
       withNetwork: args["with-network"] === true,
-      noNetwork: args["no-network"] === true,
       networkOptions: {
         profile: networkProfile,
         library:
