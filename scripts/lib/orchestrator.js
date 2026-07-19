@@ -14,12 +14,31 @@ const ENHANCE_KEYWORDS = [
 
 const AMBIGUOUS_MARKERS = ["这个", "这里", "那块", "相关逻辑", "对应地方", "这块", "那个", "它", "帮我看看"];
 
+// External-fact / live-web intent. Used by auto to optionally attach network search.
+// Keep this list specific: do not add bare "文档" / "docs" (often means in-repo docs).
+const NETWORK_KEYWORDS = [
+  "联网", "联网搜索", "联网检索", "网上搜", "网上查", "搜一下最新", "查最新", "查一下最新",
+  "最新", "实时", "热点", "官网", "官方文档", "外部资料", "外部事实", "竞品", "最佳实践",
+  "发布说明", "版本说明", "有没有新版本", "上游版本", "联网调研",
+  "latest", "up to date", "up-to-date", "current version", "official docs", "official documentation",
+  "web search", "internet", "online", "news", "changelog", "release notes", "best practices",
+  "compare with", "external source", "external fact",
+];
+
 const MISSING_YOUWEN_TOKEN_MESSAGE =
   "缺少 Youwen 增强密钥：请在 vendor/yce/.env 设置 YCE_YOUWEN_TOKEN（或环境变量 YOUWEN_TOKEN）。未配置时不会调用 enhance。";
 
 function containsAny(text, keywords) {
   const lowerText = String(text || "").toLowerCase();
   return keywords.some((keyword) => lowerText.includes(String(keyword).toLowerCase()));
+}
+
+function hasSearchIntent(query) {
+  return containsAny(query, SEARCH_KEYWORDS);
+}
+
+function hasNetworkIntent(query) {
+  return containsAny(query, NETWORK_KEYWORDS);
 }
 
 function resolveAction(mode, query) {
@@ -33,19 +52,25 @@ function resolveAction(mode, query) {
     return "network_search";
   }
 
-  const hasSearchIntent = containsAny(query, SEARCH_KEYWORDS);
+  const searchIntent = hasSearchIntent(query);
   const hasEnhanceIntent = containsAny(query, ENHANCE_KEYWORDS);
   const hasAmbiguity = containsAny(query, AMBIGUOUS_MARKERS);
+  const networkIntent = hasNetworkIntent(query);
 
-  if (hasSearchIntent && hasAmbiguity) {
+  // Pure external-fact auto: do not force a local code search path.
+  if (networkIntent && !searchIntent) {
+    return "network_search";
+  }
+
+  if (searchIntent && hasAmbiguity) {
     return "enhance_then_search";
   }
 
-  if (hasSearchIntent && hasEnhanceIntent) {
+  if (searchIntent && hasEnhanceIntent) {
     return "enhance_then_search";
   }
 
-  if (hasSearchIntent) {
+  if (searchIntent) {
     return "search";
   }
 
@@ -102,6 +127,7 @@ async function orchestrate(input) {
     noSearch,
     rawEvents,
     withNetwork,
+    noNetwork,
     networkOptions,
     config,
   } = input;
@@ -119,6 +145,15 @@ async function orchestrate(input) {
     total: 0,
   };
 
+  const networkIntent = hasNetworkIntent(query);
+  const searchIntent = hasSearchIntent(query);
+  // Explicit --with-network always on; auto attaches network when external-fact intent is present.
+  // --no-network disables auto attachment (does not block explicit mode=network).
+  const shouldRunNetwork =
+    mode === "network" ||
+    withNetwork === true ||
+    (mode === "auto" && networkIntent && noNetwork !== true);
+
   const canEnhance = hasYouwenToken(config);
   if (!canEnhance && (resolvedAction === "enhance" || resolvedAction === "enhance_then_search")) {
     if (mode === "enhance") {
@@ -133,7 +168,7 @@ async function orchestrate(input) {
         used_history: Boolean(history && String(history).trim()),
       };
       errors.push(buildError("yw-enhance", "AUTH_ERROR", MISSING_YOUWEN_TOKEN_MESSAGE));
-      if (withNetwork !== true) {
+      if (withNetwork !== true && !(mode === "auto" && shouldRunNetwork)) {
         durations.total = Date.now() - startedAt;
         return {
           success: false,
@@ -156,9 +191,16 @@ async function orchestrate(input) {
           },
         };
       }
-    } else {
-      // auto / enhance_then_search without token: skip enhance and search with original query.
+    } else if (resolvedAction === "enhance_then_search") {
+      // auto without token + code-search path: skip enhance and search with original query.
       resolvedAction = "search";
+    } else if (resolvedAction === "enhance") {
+      // auto without token + pure enhance (no code intent): keep enhance failed state unless network can save.
+      if (shouldRunNetwork) {
+        resolvedAction = "network_search";
+      } else {
+        resolvedAction = "search";
+      }
     }
   }
 
@@ -178,14 +220,24 @@ async function orchestrate(input) {
       errors.push(enhanceResult.error);
     }
 
-    // auto must always finish with a grounded code search after it attempted enhancement.
-    // A failed enhancement falls back to the original query in the shared search logic below.
+    // auto must always finish with a grounded code search after it attempted enhancement,
+    // except pure external-fact auto (network-only, no local code intent).
     if (mode === "auto" && enhance && enhance.executed) {
-      resolvedAction = "enhance_then_search";
+      if (searchIntent || !networkIntent) {
+        resolvedAction = "enhance_then_search";
+      } else if (shouldRunNetwork) {
+        resolvedAction = "enhance_with_network";
+      }
     }
   }
 
-  if (resolvedAction === "search" || resolvedAction === "enhance_then_search") {
+  const shouldRunCodeSearch =
+    resolvedAction === "search" ||
+    resolvedAction === "enhance_then_search" ||
+    resolvedAction === "search_with_network" ||
+    resolvedAction === "enhance_then_search_with_network";
+
+  if (shouldRunCodeSearch) {
     const rawSearchQuery = enhance && enhance.success && enhance.prompt ? enhance.prompt : query;
     const searchQuery = normalizeSearchQuery(rawSearchQuery);
     const searchResult = await runYceEngineSearch({
@@ -206,7 +258,6 @@ async function orchestrate(input) {
     }
   }
 
-  const shouldRunNetwork = mode === "network" || withNetwork === true;
   if (shouldRunNetwork) {
     const networkQuery =
       enhance && enhance.success && enhance.prompt ? enhance.prompt : query;
@@ -222,13 +273,16 @@ async function orchestrate(input) {
     if (networkResult.error) {
       errors.push(networkResult.error);
     }
-    if (mode === "network") {
+    if (mode === "network" || resolvedAction === "network_search") {
       resolvedAction = "network_search";
     } else if (resolvedAction === "enhance_then_search") {
       resolvedAction = "enhance_then_search_with_network";
     } else if (resolvedAction === "search") {
       resolvedAction = "search_with_network";
-    } else {
+    } else if (
+      resolvedAction === "enhance" ||
+      resolvedAction === "enhance_with_network"
+    ) {
       resolvedAction = "enhance_with_network";
     }
   }
@@ -282,4 +336,6 @@ module.exports = {
   orchestrate,
   resolveAction,
   hasYouwenToken,
+  hasNetworkIntent,
+  hasSearchIntent,
 };

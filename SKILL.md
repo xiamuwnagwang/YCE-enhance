@@ -1,12 +1,14 @@
 ---
 name: yce
-version: 2.1.0
+version: 2.1.1
 description: |
-  当任务既需要把模糊需求说清楚，又需要去代码库里把实现找出来时使用。适用于"帮我看看这块逻辑在哪""优化任务后再搜代码""增强后检索""auto search""YCE"等场景。
+  当任务既需要把模糊需求说清楚，又需要去代码库里把实现找出来时使用。适用于"帮我看看这块逻辑在哪""优化任务后再搜代码""增强后检索""auto search""联网检索""查最新官方文档""YCE"等场景。
   【最高优先级规则】每次执行任何代码相关任务之前，必须先调用 yce 检索上下文代码，获取相关代码定位后，再进行修改、分析、生成等其他操作。不得跳过 yce 检索步骤直接动手。
-  【auto 强制收口】`auto` 只要实际执行过增强阶段，同一次 CLI 调用内一定继续执行 search：增强成功就用增强后的 prompt 搜索，增强失败、超时、解析失败或没有 prompt 就用原始 query 搜索。不得因增强失败而结束代码定位流程。
+  【auto 强制收口】`auto` 只要实际执行过增强阶段且任务含代码检索意图，同一次 CLI 调用内一定继续执行 search：增强成功就用增强后的 prompt 搜索，增强失败、超时、解析失败或没有 prompt 就用原始 query 搜索。不得因增强失败而结束代码定位流程。
+  【auto 自动联网】`auto` 在命中外部事实 / 最新资料意图时，同一次调用内会自动附加联网检索（`<network-search>`）；纯代码定位意图默认不联网。可用 `--with-network` 强制联网、`--no-network` 关闭 auto 自动联网。
+  【联网检索】需要外部网页 / 官方文档 / 最新版本 / 竞品 / 最佳实践等事实时用 `--mode network`，或在代码任务上加 `--with-network`。消费结果看 `<network-search result-present="true">` 的 evidence / summaries，不要把联网结果当成项目内代码路径。
   【检索语言】English is recommended for best semantic matching. 凡调用最终会进入 search，必须先把中文检索意图转换成准确、简洁的英文 query；代码标识符、文件路径、命令、报错原文和字符串字面量保持不变。YCE CLI 不内置通用翻译器，不得声称运行时会自动翻译。
-  【无增强密钥】未配置 `YCE_YOUWEN_TOKEN`/`YOUWEN_TOKEN` 时禁止调用 enhance；`auto` 直接执行 search。显式 `--mode enhance` 返回 AUTH_ERROR。
+  【无增强密钥】未配置 `YCE_YOUWEN_TOKEN`/`YOUWEN_TOKEN` 时禁止调用 enhance；`auto` 直接执行 search（或纯联网意图时执行 network）。显式 `--mode enhance` 返回 AUTH_ERROR。
   【强制规则】做代码检索时必须在目标项目目录运行；如果当前 shell 不在目标项目目录，必须显式传 --cwd。
   【强制规则】需要增强时优先传 --history；外层调用建议一次阻塞等待，timeout ≥ 120s，禁止短 timeout 轮询。
   【输出契约】stdout 固定输出 XML；`--json-pretty` 只是 XML 美化别名，不会输出 JSON。
@@ -42,31 +44,50 @@ node ./scripts/yce.js "Locate the provider list retrieval logic" \
   --exclude "generated,coverage" \
   --xml-pretty
 
-# 4) 手工直调仓内增强脚本（仅用于调试 enhance，本身不会返回 YCE XML）
+# 4) network：只做外部联网检索（官方文档 / 最新事实 / 竞品等）
+node ./scripts/yce.js "What is the latest official React useEffect guidance" \
+  --mode network \
+  --network-profile balanced \
+  --xml-pretty
+
+# 4b) 代码任务上强制附加联网（任意 mode 可用）
+node ./scripts/yce.js "Locate provider list logic and compare with latest official docs" \
+  --mode search \
+  --with-network \
+  --cwd "/absolute/path/to/project" \
+  --xml-pretty
+
+# 4c) auto 命中联网意图时默认会联网；可用 --no-network 关闭
+node ./scripts/yce.js "查一下最新官方文档与 release notes" \
+  --mode auto \
+  --xml-pretty
+
+# 5) 手工直调仓内增强脚本（仅用于调试 enhance，本身不会返回 YCE XML）
 node ./scripts/youwen.js enhance "优化这个任务描述" \
   --history "User: ...\nAI: ..." \
   --auto-confirm --auto-skills
 
-# 5) 手工直调 yce-engine 引擎（仅用于调试 search，本身不会返回 YCE XML）
+# 6) 手工直调 yce-engine 引擎（仅用于调试 search，本身不会返回 YCE XML）
 node ./vendor/yce-engine/yce-engine.mjs --project "/absolute/path/to/project" --query "Locate the provider list retrieval logic"
 
-# 5b) 校验 relay / YCE_API_KEY 是否可用
+# 6b) 校验 relay / YCE_API_KEY 是否可用
 node ./vendor/yce-engine/yce-engine.mjs --check-key
 
-# 6) 查看帮助（返回 XML 帮助载荷；强制 pretty；exit code 0）
+# 7) 查看帮助（返回 XML 帮助载荷；强制 pretty；exit code 0）
 node ./scripts/yce.js --help
 ```
 
 **调用约束：**
 - **English is recommended for best semantic matching.** 只要本次调用最终要进入语义检索（`search`、用于找代码的 `auto`、或手工直调 yce-engine），agent 必须先把中文检索意图转换成英文 query，再执行命令。
 - 翻译时保留代码标识符、类名、函数名、文件路径、命令、报错原文和字符串字面量；只翻译自然语言意图。英文 query 应准确、简洁，不能为了翻译补造用户没有提供的事实。
-- 这是调用方 / agent 的输入规范，不是 CLI 的自动翻译能力。YCE 当前会原样消费传入的 query；不得把中文原样传入后声称已经转换。纯 `enhance` 且不需要代码检索时不受此规则约束。
-- `auto` 模式最稳，适合“问题不够具体，但最终要落到代码位置”的场景。
-- **`auto` 不能停在增强阶段**：若其 XML 中 `<enhanced executed="true">`，无论 `<enhanced success>` 或整体 `<success>` 是什么，同一次 YCE 调用都会继续输出实际的 `<search>` 结果。
+- 这是调用方 / agent 的输入规范，不是 CLI 的自动翻译能力。YCE 当前会原样消费传入的 query；不得把中文原样传入后声称已经转换。纯 `enhance` / 纯 `network` 且不需要代码检索时不受此规则约束。
+- `auto` 模式最稳，适合“问题不够具体，但最终要落到代码位置”的场景；若同时带外部事实意图，会在同一次调用内附加联网。
+- **`auto` 不能停在增强阶段（代码任务）**：若任务含代码检索意图且 XML 中 `<enhanced executed="true">`，无论 `<enhanced success>` 或整体 `<success>` 是什么，同一次 YCE 调用都会继续输出实际的 `<search>` 结果。
 - 该 search 的 query 选择固定为：增强成功且 `<enhanced><prompt>` 非空 → 使用该 prompt；其他所有情况 → 使用 `<original-query>`。search 的 `cwd` 与本次 `auto` 调用相同。
+- **联网 query**：增强成功且有 prompt 时优先用增强后的 prompt，否则用原始 query；联网结果在 `<network-search>`，**不是**项目内代码路径。
 - `search` 模式如果不传 `--cwd`，会默认用当前 shell 目录；调用前先确认自己已经在目标项目目录里。
 - 进入增强链路时，优先传 `--history`；YCE 内部调用 `yw-enhance` 时会固定追加 `--auto-confirm --auto-skills`。
-- 外层等待建议 `>= 120s`；仓内默认 `YCE_TIMEOUT_ENHANCE_MS=300000`、`YCE_TIMEOUT_SEARCH_MS=180000`。
+- 外层等待建议 `>= 120s`；仓内默认 `YCE_TIMEOUT_ENHANCE_MS=300000`、`YCE_TIMEOUT_SEARCH_MS=180000`、`YCE_TIMEOUT_NETWORK_MS=120000`。
 - `--json-pretty` 只是 `--xml-pretty` 的旧别名，**永远不会让 YCE 输出 JSON**。
 - `--help` 也返回 XML，但它是帮助载荷，不是实际增强 / 检索结果。
 - 不要在 home 目录或超大目录里做检索。
@@ -79,18 +100,31 @@ node ./scripts/yce.js --help
 ```text
 mode=enhance                         → enhance
 mode=search                          → search
+mode=network                         → network_search
+命中“联网意图” + 未命中“检索意图”  → network_search
 命中“检索意图” + 命中“模糊标记”     → enhance_then_search
 命中“检索意图” + 命中“增强意图”     → enhance_then_search
 只命中“检索意图”                    → search
 其他情况                            → enhance
 ```
 
+**联网是否执行（独立于上面初始动作）：**
+
+```text
+mode=network                         → 一定联网
+--with-network                       → 一定联网（叠加在 enhance/search/auto 上）
+mode=auto 且命中联网意图             → 自动联网（可用 --no-network 关闭）
+其余                                 → 不联网
+```
+
 **关键点：**
 - 同一句话如果同时命中“检索意图 + 模糊标记”，会优先进入 `enhance_then_search`，不会落到纯 `search`。
 - 同一句话如果同时命中“检索意图 + 增强意图”，也会优先进入 `enhance_then_search`。
-- 只有显式 `--mode enhance` / `--mode search` 才能跳过上面的自动分流。
-- 当 `mode=auto` 且初始动作实际执行了增强时，编排器会把最终动作提升为 `enhance_then_search`，在**同一次 CLI 调用**内继续 search；即使增强失败，也会以原始 query 搜索。显式 `--mode enhance` 不会触发该补偿 search。
-- 未配置 Youwen 增强密钥时：`auto` 不会进入 enhance，直接 `search`；显式 `--mode enhance` 立即失败（`AUTH_ERROR`），不会调用 youwen 脚本。
+- 同一句话如果同时命中“检索意图 + 联网意图”，初始动作仍走代码 search 路径，**并**在同一次调用内附加联网（`search_with_network` 或 `enhance_then_search_with_network`）。
+- 只有“联网意图、没有检索意图”时，`auto` 才会变成纯 `network_search`，不强制本地代码检索。
+- 只有显式 `--mode enhance` / `--mode search` / `--mode network` 才能跳过上面的自动分流。
+- 当 `mode=auto` 且初始动作实际执行了增强、且任务含代码检索意图时，编排器会把最终动作提升为 `enhance_then_search`，在**同一次 CLI 调用**内继续 search；即使增强失败，也会以原始 query 搜索。显式 `--mode enhance` 不会触发该补偿 search。
+- 未配置 Youwen 增强密钥时：`auto` 不会进入 enhance，直接 `search`（纯联网意图则 `network_search`）；显式 `--mode enhance` 立即失败（`AUTH_ERROR`），不会调用 youwen 脚本（除非同时 `--with-network`，此时会继续联网）。
 
 ### 1. 检索意图关键词（会倾向进入 search）
 - `搜索代码`
@@ -126,25 +160,35 @@ mode=search                          → search
 - `它`
 - `帮我看看`
 
+### 4. 联网意图关键词（auto 自动附加联网 / 纯联网路径）
+- 中文：`联网`、`联网搜索`、`联网检索`、`网上搜`、`查最新`、`最新`、`实时`、`热点`、`官网`、`官方文档`、`外部资料`、`外部事实`、`竞品`、`最佳实践`、`发布说明`、`版本说明`、`上游版本`、`联网调研`
+- 英文：`latest`、`up to date`、`current version`、`official docs`、`web search`、`internet`、`online`、`news`、`changelog`、`release notes`、`best practices`、`external fact`
+- **故意不把** 裸词 `文档` / `docs` 算作联网意图（仓库内文档很常见，避免误触发配额消耗）
+
 **怎么选：**
 - 用户话很模糊，但明确是“找代码” → 先把检索意图转换成英文 query，再调用 `auto`；若它执行增强，YCE 会在同一次调用内按下面的“auto 增强后的强制收口”继续 search
 - 用户只想把任务说清楚，不需要搜代码 → `enhance`
 - 用户已经给出了明确技术目标，只差定位代码 → 转换成英文 query 后调用 `search`
+- 用户要查外部最新事实 / 官方文档 / 竞品 / 最佳实践 → `network`，或在代码任务上加 `--with-network`；`auto` 命中联网意图时也会自动联网
+- 只想本地定位、明确不要联网 → `search`，或 `auto` 加 `--no-network`
 
 ### auto 增强后的强制收口（代码任务不可跳过）
 
-当一次 `--mode auto` 的返回包含 `<enhanced executed="true">` 时，不管增强是否成功、`auto` 的进程 exit code 是否为 0、或初始动作是 `enhance` 还是 `enhance_then_search`，编排器都会在同一次 CLI 调用内执行检索：
+当一次 `--mode auto` 的返回包含 `<enhanced executed="true">` **且任务含代码检索意图**时，不管增强是否成功、`auto` 的进程 exit code 是否为 0、或初始动作是 `enhance` 还是 `enhance_then_search`，编排器都会在同一次 CLI 调用内执行检索：
 
 ```text
 增强成功且 enhanced.prompt 非空  → yce-engine 以 <enhanced.prompt> 作为 search query
 增强失败 / 超时 / 解析失败 / 无 prompt → yce-engine 以 <original-query> 作为 search query
 ```
 
+**纯联网 auto 例外**：若只命中联网意图、未命中检索意图，则不会强制本地 search，只跑 `<network-search>`。
+
 要求：
-- 传给 `auto` 的 `<original-query>` 应在调用前完成英文转换。因为增强失败时会回退到该 query，所以不能依赖增强阶段代替翻译。
+- 传给 `auto` 的 `<original-query>` 应在调用前完成英文转换（当需要代码 search 时）。因为增强失败时会回退到该 query，所以不能依赖增强阶段代替翻译。
 - 最终用于定位代码、分析、修改或生成的依据，必须来自本次 `auto` 返回的 `<search result-present="true"><result>`。
-- 增强失败只影响 search 的 query 来源，**不能**取消、跳过或替代同一次调用内的 search。
-- `auto` 未执行增强但已返回实际 search 时，可以直接消费其 search 结果；显式 `--mode enhance` 则仅做增强，除非调用者另有代码定位需求。
+- 外部事实依据来自 `<network-search result-present="true">` 的 evidence / summaries。
+- 增强失败只影响 search 的 query 来源，**不能**取消、跳过或替代同一次调用内的 search（纯联网 auto 除外）。
+- `auto` 未执行增强但已返回实际 search 时，可以直接消费其 search 结果；显式 `--mode enhance` 则仅做增强，除非调用者另有代码定位需求或加了 `--with-network`。
 
 ## 输出契约（必须按真实标签消费）
 
@@ -152,27 +196,33 @@ YCE 的 stdout 固定是 XML，不再输出 JSON。最重要的标签如下：
 
 | 标签 / 属性 | 含义 | 怎么用 |
 |------------|------|--------|
-| `<success>` | 整体是否产出了可用结果 | 只要增强或检索任一侧产出可用结果，就会是 `true` |
-| `<mode>` | 你传入的模式 | `auto / enhance / search` |
-| `<resolved-action>` | 实际执行动作 | `enhance / search / enhance_then_search` |
+| `<success>` | 整体是否产出了可用结果 | 增强 / 代码检索 / 联网任一侧产出可用结果，就会是 `true` |
+| `<mode>` | 你传入的模式 | `auto / enhance / search / network` |
+| `<resolved-action>` | 实际执行动作 | `enhance / search / enhance_then_search / network_search / search_with_network / enhance_with_network / enhance_then_search_with_network` |
 | `<enhanced success="...">` | 增强结果块 | 读 `<prompt>`、`<recommended-skills>`、`<raw-stdout>` |
 | `<enhanced><prompt>` | 给人 / agent 看的增强提示词 | 需要继续调别的 agent / 工具时优先用这个 |
 | `<enhanced><recommended-skills><skill>` | yw-enhance 推荐技能列表 | 按需继续调 skill |
-| `<search result-present="...">` | 检索结果块 | 读 `<query>` 和 `<result>` |
+| `<search result-present="...">` | 代码检索结果块 | 读 `<query>` 和 `<result>` |
 | `<search><query>` | 实际送给 yce 的检索词 | 这是排障时最该看的搜索输入 |
-| `<search><result>` | yce 原始检索结果 | 代码定位主结果看这里 |
+| `<search><result>` | yce 原始检索结果 | **项目内代码定位**主结果看这里 |
 | `<search><diagnostics>` | 本次检索的结构化诊断 | 核对实际 tree depth、repo-map 策略、排除规则、轮数和是否裁剪上下文 |
-| `<errors><error code="..." source="...">` | 错误列表 | 即使 `<success>true</success>` 也要检查 |
+| `<network-search result-present="...">` | 联网检索结果块 | 读 evidence / summaries；**不是**本地代码路径 |
+| `<network-search><query>` | 实际送给联网接口的 query | 增强成功时可能是增强后的 prompt |
+| `<network-search><evidence><source>` | 证据条目（JSON CDATA） | 外部事实主依据 |
+| `<network-search><summaries><summary>` | 摘要条目 | 辅助阅读 |
+| `<network-search><usage>` | 配额用量 | 如 `network-daily-count` 等 |
+| `<errors><error code="..." source="...">` | 错误列表 | 即使 `<success>true</success>` 也要检查；联网错误 source 多为 `network-search` |
 | `<meta><dependency-paths>` | 解析后的依赖路径 | 排障先看这里是不是走到了对的脚本 / binary |
 
 ### AI Agent 处理顺序
 
-1. 先看 `<resolved-action>` 与 `<enhanced executed="...">`，确认本次 `auto` 是否执行了增强。
-2. 若 `auto` 执行过增强，等待同一次调用内的 `<search>` 完成；不要因 `<success>false</success>`、增强错误或空 prompt 提前结束。
+1. 先看 `<resolved-action>` 与 `<enhanced executed="...">`，确认本次是否执行了增强 / 代码检索 / 联网。
+2. 若 `auto` 执行过增强且含代码意图，等待同一次调用内的 `<search>` 完成；不要因 `<success>false</success>`、增强错误或空 prompt 提前结束。
 3. 若增强成功且 `<enhanced><prompt>` 非空，确认 `<search><query>` 使用了该 prompt；否则确认它使用已在调用前转换为英文的 `<original-query>`。
-4. 读取同一次结果中的 `<search><result>` 作为代码定位依据。
-5. 不要只看 `<search success="true">`，还要看 `result-present="true"`。
-6. 始终检查 `<errors>`；增强错误需要保留，但不阻止后续 search。
+4. 读取同一次结果中的 `<search><result>` 作为**代码定位**依据。
+5. 若存在 `<network-search executed="true">`，读 `result-present="true"` 的 evidence / summaries 作为**外部事实**依据；不要把 evidence URL 当成仓库路径去改代码。
+6. 不要只看 `success="true"`，还要看对应块的 `result-present="true"`。
+7. 始终检查 `<errors>`；增强 / 联网错误需要保留，但不自动取消另一侧已成功的结果。
 
 ### 常见返回特征
 
@@ -193,8 +243,29 @@ YCE 的 stdout 固定是 XML，不再输出 JSON。最重要的标签如下：
     <query><![CDATA[送给 yce 的检索词]]></query>
     <result><![CDATA[Path: src/...]]></result>
   </search>
+  <network-search/>
   <errors/>
 </yce>
+```
+
+联网成功时 `network-search` 形如：
+
+```xml
+<network-search executed="true" success="true" result-present="true">
+  <request-id>...</request-id>
+  <query><![CDATA[...]]></query>
+  <profile>balanced</profile>
+  <status>succeeded</status>
+  <evidence>
+    <source><![CDATA[{"title":"...","url":"https://..."}]]></source>
+  </evidence>
+  <summaries>
+    <summary><![CDATA[{"text":"..."}]]></summary>
+  </summaries>
+  <usage>
+    <network-daily-count>2</network-daily-count>
+  </usage>
+</network-search>
 ```
 
 ### 帮助载荷是特殊例外（仍然是 XML）
@@ -215,11 +286,17 @@ YCE 的 stdout 固定是 XML，不再输出 JSON。最重要的标签如下：
 | 参数 | 必须 | 说明 |
 |------|:---:|------|
 | `<query>` | ✅ | 用户原始问题或检索问题 |
-| `--mode <auto\|enhance\|search>` | 可选 | 默认读 `YCE_DEFAULT_MODE`，仓内默认是 `auto` |
+| `--mode <auto\|enhance\|search\|network>` | 可选 | 默认读 `YCE_DEFAULT_MODE`，仓内默认是 `auto` |
+| `--with-network` | 可选 | 在 enhance/search/auto 上**强制**附加联网检索 |
+| `--no-network` | 可选 | 关闭 `auto` 的自动联网；**不能**取消显式 `--mode network` |
+| `--network-profile <quick\|balanced\|exhaustive>` | 可选 | 联网深度，默认 `balanced` |
+| `--library <name>` | 可选 | 联网时可选的库名约束 |
+| `--repo <owner/name>` | 可选 | 联网时可选的 GitHub 仓库约束 |
 | `--history <text>` | 建议 | 进入增强链路时强烈建议传；格式示例：`User: ...\nAI: ...\nUser: ...` |
 | `--cwd <path>` | 强烈建议 | 不在目标项目目录执行时必须传；否则默认取当前 shell 目录 |
 | `--timeout-enhance-ms <n>` | 可选 | 覆盖增强超时 |
-| `--timeout-search-ms <n>` | 可选 | 覆盖检索超时 |
+| `--timeout-search-ms <n>` | 可选 | 覆盖代码检索超时 |
+| `--timeout-network-ms <n>` | 可选 | 覆盖联网超时，默认 `120000` |
 | `--max-turns <1-5>` | 可选 | 语义检索最大轮数，默认 `3` |
 | `--max-commands <1-20>` | 可选 | 每轮最多执行的本地命令数，默认 `8` |
 | `--max-results <1-30>` | 可选 | 最大结果文件数，默认 `10` |
@@ -233,7 +310,7 @@ YCE 的 stdout 固定是 XML，不再输出 JSON。最重要的标签如下：
 | `--hotspot-max-bytes <16384-256000>` | 可选 | 热点 repo map 字节预算，默认 `122880` |
 | `--bootstrap-max-turns <1-5>` | 可选 | bootstrap 最大轮数，默认 `2` |
 | `--bootstrap-max-commands <1-20>` | 可选 | bootstrap 每轮最大命令数，默认 `6` |
-| `--no-search` | 可选 | **只会传给 yw-enhance，表示增强阶段不做外部搜索；不会阻止 YCE 后续跑 yce 检索** |
+| `--no-search` | 可选 | **只会传给 yw-enhance，表示增强阶段不做外部搜索；不会阻止 YCE 后续跑 yce 代码检索或联网** |
 | `--raw-events` | 可选 | 仅在走增强链路时抓 yw-enhance 原始事件摘要，用于排障 |
 | `--xml-pretty` | 可选 | 美化 XML 输出 |
 | `--json-pretty` | 可选 | **旧参数别名，当前只等同于 `--xml-pretty`，不会输出 JSON** |
@@ -262,13 +339,15 @@ YCE 的 stdout 固定是 XML，不再输出 JSON。最重要的标签如下：
 | `YCE_LOCAL_FALLBACK` | 空 | 设为 `true` 时远端失败才启用本地 fast fallback |
 | `YCE_DEFAULT_MODE` | `auto` | 默认模式 |
 | `YCE_TIMEOUT_ENHANCE_MS` | `300000` | 默认增强超时 |
-| `YCE_TIMEOUT_SEARCH_MS` | `180000` | 默认检索超时 |
+| `YCE_TIMEOUT_SEARCH_MS` | `180000` | 默认代码检索超时 |
+| `YCE_TIMEOUT_NETWORK_MS` | `120000` | 默认联网检索超时 |
 
 **关键说明：**
 - 当前仓里的 `./scripts/youwen.js` 就是默认增强入口，不再要求先装外部 `yw-enhance`
 - `YCE_YOUWEN_SCRIPT` 默认写成 `./scripts/youwen.js`，只有在你明确要覆盖时才改成别的路径
 - `YCE_RELAY_URL` 默认固定写入 `https://yce.aigy.de`；`YCE_RELAY_TOKEN` 必须填写 YCE 搜索密钥，不会再从 `YCE_YOUWEN_TOKEN` 自动复制
 - 纯 `search` 只依赖仓内 yce-engine 引擎；`enhance` 与 `auto` 会额外走仓内 `./scripts/youwen.js`
+- 联网检索走 `POST {YCE_RELAY_URL}/yce/network-search`，复用 `YCE_RELAY_TOKEN`；缺 token 返回 `AUTH_ERROR`（source=`network-search`）
 
 ### YCE 传给 yw-enhance 的固定参数与环境变量
 
@@ -290,7 +369,7 @@ YCE 调 `yw-enhance` 不是裸调用，而是固定这样拼：
 | `YCE_YOUWEN_TOKEN` | `YOUWEN_TOKEN` |
 | `YCE_YOUWEN_MGREP_API_KEY` | `YOUWEN_MGREP_API_KEY` |
 
-### 检索链路真实逻辑
+### 代码检索链路真实逻辑
 
 `search` / `enhance_then_search` 统一调用仓内 yce-engine 引擎；auto 增强后的同次调用 search 也走同一引擎：
 
@@ -301,6 +380,22 @@ config.yceEngineScript（默认 ./vendor/yce-engine/yce-engine.mjs）
   → 返回文件路径 + 行号范围 + 建议 grep 关键词
   → 若 yce-engine 返回 resource_exhausted / 上游错误 / 空结果，且 `YCE_LOCAL_FALLBACK=true`，才启用 local fast fallback
 ```
+
+### 联网检索链路真实逻辑
+
+```text
+mode=network 或 --with-network 或 (mode=auto 且联网意图且未 --no-network)
+  → POST {YCE_RELAY_URL}/yce/network-search
+  → Authorization: Bearer {YCE_RELAY_TOKEN}
+  → body: { request_id, query, profile, library?, repo? }
+  → 返回 evidence / summaries / providerRuns / failures / usage
+  → 写入 XML <network-search>
+```
+
+**关键细节：**
+- 联网与代码检索**可并行叠加**在同一次 CLI 调用里，互不替代。
+- 联网失败不会抹掉已成功的代码 search 结果；代码 search 失败也不会抹掉已成功的联网结果。
+- 常见错误码：`AUTH_ERROR`、`QUOTA_EXCEEDED`、`DISABLED`、`TIMEOUT`、`EMPTY_RESULT`、`EXEC_ERROR`（source 多为 `network-search`）。
 
 **关键细节：**
 - 检索凭证默认来自 YCE 服务租约；一般只需配置 `YCE_RELAY_TOKEN`。
@@ -431,6 +526,7 @@ bash ./scripts/build-release.sh
   - `./scripts/lib/utils.js`
   - `./scripts/lib/adapters/yceEngineSearch.js`
   - `./scripts/lib/adapters/ywEnhance.js`
+  - `./scripts/lib/adapters/networkSearch.js`
   - `./vendor/yce-engine/`（vendored YCE 语义检索引擎）
 
 规则：
@@ -441,10 +537,13 @@ bash ./scripts/build-release.sh
 ## 最后记住
 
 - **每次执行任何代码相关任务，第一步永远是先调用 yce 检索上下文代码**，拿到代码定位之后再做修改 / 分析 / 生成，不得绕过
-- yce 检索成功（`result-present="true"`）后，才进入下一步操作；如果检索返回空，先排障再继续，不要盲目直接动手
-- 只要任务里同时包含"把问题说清楚"和"去代码库里找实现"，执行 `YCE auto`；只要它执行了增强，**同一次调用内必定以 YCE search 收口**，增强失败时使用原始 query，绝不停止在增强结果或增强错误上
+- yce 代码检索成功（`<search result-present="true">`）后，才进入改代码；如果检索返回空，先排障再继续，不要盲目直接动手
+- 外部事实看 `<network-search result-present="true">`，不要把网页证据当成仓库路径
+- 只要任务里同时包含"把问题说清楚"和"去代码库里找实现"，执行 `YCE auto`；只要它执行了增强且含代码意图，**同一次调用内必定以 YCE search 收口**，增强失败时使用原始 query，绝不停止在增强结果或增强错误上
+- `auto` 命中联网意图会自动联网；纯代码任务默认不联网；强制联网用 `--with-network`，关闭 auto 联网用 `--no-network`
 - 只增强就 `enhance`
 - 只定位就 `search`
+- 只查外部事实就 `network`
 - 想提高成功率，最关键的不是多写参数，而是 **传对 `--cwd`、在增强场景传 `--history`、并给足超时**
-- 真要排障时，优先看 `<resolved-action>`、`<search><query>`、`<meta><dependency-paths>`，不要先凭感觉猜链路
+- 真要排障时，优先看 `<resolved-action>`、`<search><query>`、`<network-search>`、`<meta><dependency-paths>`，不要先凭感觉猜链路
 - 调用顺序口诀：**先 yce 检索 → 看结果 → 再动手**，此顺序不可颠倒

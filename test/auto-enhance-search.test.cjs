@@ -370,3 +370,200 @@ test("enhance 显式附加联网时即使缺少 Youwen token 也继续联网", a
     global.fetch = originalFetch;
   }
 });
+
+test("auto 命中联网意图时只做联网，不强制代码检索", async () => {
+  const originalFetch = global.fetch;
+  let fetchCalled = 0;
+  global.fetch = async () => {
+    fetchCalled += 1;
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          status: "succeeded",
+          evidence: [{ title: "最新官方文档", url: "https://example.com/latest" }],
+          summaries: [{ text: "已验证最新事实" }],
+          providerRuns: [{ provider: "fixture", status: "succeeded" }],
+          failures: [],
+          usage: {},
+        };
+      },
+    };
+  };
+  try {
+    const result = await orchestrate({
+      mode: "auto",
+      // Avoid SEARCH_KEYWORDS (api/代码/实现/...) so this stays pure network intent.
+      query: "查一下最新的官方文档与 release notes",
+      cwd: repoRoot,
+      history: "",
+      noSearch: false,
+      rawEvents: false,
+      withNetwork: false,
+      timeoutEnhanceMs: 5000,
+      timeoutSearchMs: 5000,
+      timeoutNetworkMs: 5000,
+      networkOptions: { profile: "balanced", library: "", repo: "" },
+      config: {
+        hasYouwenToken: false,
+        ywEnhanceEnv: {},
+        yceRelayUrl: "https://relay.example",
+        yceRelayToken: "fixture-relay-token",
+        youwenScript: forbiddenEnhancer,
+        yceEngineScript: engineScript,
+      },
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.resolved_action, "network_search");
+    assert.equal(result.search, null);
+    assert.equal(result.network_search.result_present, true);
+    assert.equal(fetchCalled, 1);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("auto 代码意图叠加联网意图时会代码检索+联网", async () => {
+  const originalFetch = global.fetch;
+  let fetchCalled = 0;
+  global.fetch = async () => {
+    fetchCalled += 1;
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          status: "succeeded",
+          evidence: [{ title: "官方文档", url: "https://example.com/doc" }],
+          summaries: [],
+          providerRuns: [{ provider: "fixture", status: "succeeded" }],
+          failures: [],
+          usage: {},
+        };
+      },
+    };
+  };
+  try {
+    const result = await orchestrate({
+      mode: "auto",
+      query: "定位代码里 provider 实现，并对照最新官方文档",
+      cwd: repoRoot,
+      history: "",
+      noSearch: false,
+      rawEvents: false,
+      withNetwork: false,
+      timeoutEnhanceMs: 5000,
+      timeoutSearchMs: 5000,
+      timeoutNetworkMs: 5000,
+      networkOptions: { profile: "balanced", library: "", repo: "" },
+      searchOptions: { maxResults: 3, maxTurns: 1, maxCommands: 2 },
+      config: {
+        hasYouwenToken: false,
+        ywEnhanceEnv: {},
+        yceRelayUrl: "https://relay.example",
+        yceRelayToken: "fixture-relay-token",
+        youwenScript: forbiddenEnhancer,
+        yceEngineScript: engineScript,
+        yceEngineEnv: {},
+      },
+    });
+
+    assert.equal(result.resolved_action, "search_with_network");
+    assert.equal(result.search && result.search.result_present, true);
+    assert.equal(result.network_search.result_present, true);
+    assert.equal(fetchCalled, 1);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("auto 纯代码意图默认不联网", async () => {
+  const originalFetch = global.fetch;
+  let fetchCalled = 0;
+  global.fetch = async () => {
+    fetchCalled += 1;
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+  try {
+    const result = await orchestrate({
+      mode: "auto",
+      query: "Locate the provider list retrieval logic",
+      cwd: repoRoot,
+      history: "",
+      noSearch: false,
+      rawEvents: false,
+      withNetwork: false,
+      timeoutEnhanceMs: 5000,
+      timeoutSearchMs: 5000,
+      timeoutNetworkMs: 5000,
+      networkOptions: { profile: "balanced", library: "", repo: "" },
+      searchOptions: { maxResults: 3, maxTurns: 1, maxCommands: 2 },
+      config: {
+        hasYouwenToken: false,
+        ywEnhanceEnv: {},
+        yceRelayUrl: "https://relay.example",
+        yceRelayToken: "fixture-relay-token",
+        youwenScript: forbiddenEnhancer,
+        yceEngineScript: engineScript,
+        yceEngineEnv: {},
+      },
+    });
+
+    assert.equal(result.resolved_action, "search");
+    assert.equal(fetchCalled, 0);
+    assert.equal(result.network_search, null);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("auto 联网意图可用 --no-network 关闭", async () => {
+  const originalFetch = global.fetch;
+  let fetchCalled = 0;
+  global.fetch = async () => {
+    fetchCalled += 1;
+    return { ok: true, status: 200, async json() { return {}; } };
+  };
+  try {
+    const result = await orchestrate({
+      mode: "auto",
+      query: "查最新官方文档",
+      cwd: repoRoot,
+      history: "",
+      noSearch: false,
+      rawEvents: false,
+      withNetwork: false,
+      noNetwork: true,
+      timeoutEnhanceMs: 5000,
+      timeoutSearchMs: 5000,
+      timeoutNetworkMs: 5000,
+      networkOptions: { profile: "balanced", library: "", repo: "" },
+      config: {
+        hasYouwenToken: false,
+        ywEnhanceEnv: {},
+        yceRelayUrl: "https://relay.example",
+        yceRelayToken: "fixture-relay-token",
+        youwenScript: forbiddenEnhancer,
+        yceEngineScript: engineScript,
+      },
+    });
+
+    assert.equal(fetchCalled, 0);
+    assert.equal(result.network_search, null);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("resolveAction：纯联网意图 → network_search；代码+联网仍走 search 路径", () => {
+  const { resolveAction, hasNetworkIntent } = require("../scripts/lib/orchestrator");
+  assert.equal(resolveAction("auto", "查一下最新的官方文档"), "network_search");
+  assert.equal(hasNetworkIntent("查一下最新的官方文档"), true);
+  assert.equal(
+    resolveAction("auto", "定位代码里 provider 列表实现"),
+    "search",
+  );
+  assert.equal(hasNetworkIntent("定位代码里 provider 列表实现"), false);
+});

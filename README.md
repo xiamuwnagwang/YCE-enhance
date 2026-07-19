@@ -1,7 +1,7 @@
 # YCE Skill
 
-YCE（Youwen Code Enhance）是面向 AI Agent 的 **提示词增强 + 语义代码检索** skill。  
-当前版本：**2.1.0**。
+YCE（Youwen Code Enhance）是面向 AI Agent 的 **提示词增强 + 语义代码检索 + 联网检索** skill。  
+当前版本：**2.1.1**。
 
 ## License
 
@@ -37,9 +37,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 - **enhance**：把模糊任务整理成可执行提示词
 - **search**：在本地项目内做语义代码定位（远端只做推理，不上传源码建索引）
-- **auto**：增强后在同一次调用内强制收口到 search
+- **network**：外部联网检索（官方文档 / 最新事实 / 竞品等），结果在 XML `<network-search>`
+- **auto**：增强后在同一次调用内强制收口到 search；若命中联网意图会自动附加联网（可用 `--no-network` 关闭）
+- **`--with-network`**：任意模式上强制附加联网
 
-默认经公共 **YCE 服务**（`https://yce.aigy.de`）完成鉴权与语义检索；具体请求路径由 skill 内部处理，使用时只需配置 `YCE_RELAY_TOKEN` 即可。
+默认经公共 **YCE 服务**（`https://yce.aigy.de`）完成鉴权、代码语义检索与联网检索；具体请求路径由 skill 内部处理，使用时只需配置 `YCE_RELAY_TOKEN` 即可。
 
 ## 快速开始
 
