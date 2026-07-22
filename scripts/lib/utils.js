@@ -56,6 +56,7 @@ const DEFAULTS = {
   yceRelayUrl: "https://yce.aigy.de",
   defaultMode: "auto",
   timeoutEnhanceMs: 300000,
+  timeoutAutoEnhanceMs: 60000,
   timeoutSearchMs: 180000,
   timeoutNetworkMs: 120000,
 };
@@ -247,6 +248,7 @@ function loadRuntimeConfig() {
     hasYouwenToken: Boolean(youwenToken),
     defaultMode: merged.YCE_DEFAULT_MODE || DEFAULTS.defaultMode,
     timeoutEnhanceMs: toPositiveInt(merged.YCE_TIMEOUT_ENHANCE_MS, DEFAULTS.timeoutEnhanceMs),
+    timeoutAutoEnhanceMs: toPositiveInt(merged.YCE_TIMEOUT_AUTO_ENHANCE_MS, DEFAULTS.timeoutAutoEnhanceMs),
     timeoutSearchMs: toPositiveInt(merged.YCE_TIMEOUT_SEARCH_MS, DEFAULTS.timeoutSearchMs),
     timeoutNetworkMs: toPositiveInt(
       merged.YCE_TIMEOUT_NETWORK_MS,

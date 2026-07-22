@@ -33,23 +33,17 @@ function resolveAction(mode, query) {
     return "network_search";
   }
 
-  const hasSearchIntent = containsAny(query, SEARCH_KEYWORDS);
-  const hasEnhanceIntent = containsAny(query, ENHANCE_KEYWORDS);
+  // auto: only enhance when the prompt is genuinely vague (ambiguity markers)
+  // or the user explicitly used enhance-related keywords.
+  // Otherwise default to search — do not auto-enhance clear/specific prompts.
   const hasAmbiguity = containsAny(query, AMBIGUOUS_MARKERS);
+  const hasEnhanceIntent = containsAny(query, ENHANCE_KEYWORDS);
 
-  if (hasSearchIntent && hasAmbiguity) {
+  if (hasAmbiguity || hasEnhanceIntent) {
     return "enhance_then_search";
   }
 
-  if (hasSearchIntent && hasEnhanceIntent) {
-    return "enhance_then_search";
-  }
-
-  if (hasSearchIntent) {
-    return "search";
-  }
-
-  return "enhance";
+  return "search";
 }
 
 function hasYouwenToken(config) {

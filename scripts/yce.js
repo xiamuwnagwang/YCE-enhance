@@ -118,7 +118,10 @@ async function main() {
     process.exit(1);
   }
 
-  const timeoutEnhanceMs = toPositiveInt(args["timeout-enhance-ms"], config.timeoutEnhanceMs);
+  const timeoutEnhanceMs = toPositiveInt(
+    args["timeout-enhance-ms"],
+    mode === "enhance" ? config.timeoutEnhanceMs : config.timeoutAutoEnhanceMs,
+  );
   const timeoutSearchMs = toPositiveInt(args["timeout-search-ms"], config.timeoutSearchMs);
   const timeoutNetworkMs = toPositiveInt(
     args["timeout-network-ms"],

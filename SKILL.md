@@ -1,11 +1,12 @@
 ---
 name: yce
-version: 2.1.0
+version: 2.2.0
 description: |
   当任务既需要把模糊需求说清楚，又需要去代码库里把实现找出来时使用。适用于"帮我看看这块逻辑在哪""优化任务后再搜代码""增强后检索""auto search""YCE"等场景。
   也在需要当前外部信息、多源事实核对、官方库文档、竞品/行业调研、公开仓库架构资料时使用联网能力（`--mode network` 或 `--with-network`）。
   【最高优先级规则】每次执行任何代码相关任务之前，必须先调用 yce 检索上下文代码，获取相关代码定位后，再进行修改、分析、生成等其他操作。不得跳过 yce 检索步骤直接动手。
   【auto 强制收口】`auto` 只要实际执行过增强阶段，同一次 CLI 调用内一定继续执行 search：增强成功就用增强后的 prompt 搜索，增强失败、超时、解析失败或没有 prompt 就用原始 query 搜索。不得因增强失败而结束代码定位流程。
+  【auto 默认不增强】`auto` 模式只在提示词确实模糊（命中模糊标记）或用户显式表达增强意图（命中增强关键词）时才触发增强；其余情况直接走 `search`。auto 模式增强默认 1 分钟超时（`YCE_TIMEOUT_AUTO_ENHANCE_MS=60000`），超时即断开增强并以原始 query 搜索。显式 `--mode enhance` 模式沿用 5 分钟超时（`YCE_TIMEOUT_ENHANCE_MS=300000`）。
   【联网由 AI 判断】CLI **不会**根据 query 关键词自动联网。是否调用联网由 Agent 在调用时自行判断：需要外部事实 / 调研 / 最新资料 / 官方文档 / 竞品对照时，显式传 `--mode network` 或在代码任务上加 `--with-network`。联网结果是事实依据，不是项目内代码路径。
   【检索语言】English is recommended for best semantic matching. 凡调用最终会进入 search，必须先把中文检索意图转换成准确、简洁的英文 query；代码标识符、文件路径、命令、报错原文和字符串字面量保持不变。YCE CLI 不内置通用翻译器，不得声称运行时会自动翻译。
   【无增强就不增强】未配置 `YCE_YOUWEN_TOKEN`/`YOUWEN_TOKEN`、或任务本身不需要提示词增强时，**不要调用 enhance**：直接 `--mode search`（或让 `auto` 自动跳过 enhance 走 search）。禁止为了“走完整链路”而空跑 enhance。显式 `--mode enhance` 且无密钥时返回 AUTH_ERROR。
@@ -83,7 +84,7 @@ node ./scripts/yce.js --help
 - **联网必须由 Agent 显式触发**（见下方「联网检索：何时由 AI 调用」）。
 - `search` 模式如果不传 `--cwd`，会默认用当前 shell 目录；调用前先确认自己已经在目标项目目录里。
 - 进入增强链路时，优先传 `--history`；YCE 内部调用 `yw-enhance` 时会固定追加 `--auto-confirm --auto-skills`。
-- 外层等待建议 `>= 120s`；仓内默认 `YCE_TIMEOUT_ENHANCE_MS=300000`、`YCE_TIMEOUT_SEARCH_MS=180000`、`YCE_TIMEOUT_NETWORK_MS=120000`。
+- 外层等待建议 `>= 120s`；仓内 `auto` 模式增强默认 `YCE_TIMEOUT_AUTO_ENHANCE_MS=60000`（1 分钟），显式 `--mode enhance` 默认 `YCE_TIMEOUT_ENHANCE_MS=300000`（5 分钟）；`YCE_TIMEOUT_SEARCH_MS=180000`、`YCE_TIMEOUT_NETWORK_MS=120000`。
 - `--json-pretty` 只是 `--xml-pretty` 的旧别名，**永远不会让 YCE 输出 JSON**。
 - `--help` 也返回 XML，但它是帮助载荷，不是实际增强 / 检索结果。
 - 不要在 home 目录或超大目录里做检索。
@@ -97,10 +98,9 @@ node ./scripts/yce.js --help
 mode=enhance                         → enhance
 mode=search                          → search
 mode=network                         → network_search
-命中“检索意图” + 命中“模糊标记”     → enhance_then_search
-命中“检索意图” + 命中“增强意图”     → enhance_then_search
-只命中“检索意图”                    → search
-其他情况                            → enhance
+命中"模糊标记"                      → enhance_then_search
+命中"增强意图"                      → enhance_then_search
+其他情况（含仅命中检索意图）        → search
 ```
 
 **联网是否执行（与上面初始动作独立，且不做关键词猜测）：**
@@ -112,13 +112,14 @@ mode=network                         → 一定联网
 ```
 
 **关键点：**
-- 同一句话如果同时命中“检索意图 + 模糊标记”，会优先进入 `enhance_then_search`，不会落到纯 `search`。
-- 同一句话如果同时命中“检索意图 + 增强意图”，也会优先进入 `enhance_then_search`。
+- `auto` 模式只在提示词确实模糊（命中模糊标记）或用户显式表达增强意图（命中增强关键词）时才进入 `enhance_then_search`；提示词已经足够明确时直接走 `search`，不会空跑增强。
+- 同一句话如果命中"模糊标记"或"增强意图"，会进入 `enhance_then_search`；否则直接 `search`。
 - 只有显式 `--mode enhance` / `--mode search` / `--mode network` 才能跳过上面的自动分流。
 - 当 `mode=auto` 且初始动作实际执行了增强时，编排器会把最终动作提升为 `enhance_then_search`，在**同一次 CLI 调用**内继续 search；即使增强失败，也会以原始 query 搜索。显式 `--mode enhance` 不会触发该补偿 search。
+- `auto` 模式增强默认 1 分钟超时（`YCE_TIMEOUT_AUTO_ENHANCE_MS=60000`），超时即断开增强并以原始 query 搜索；显式 `--mode enhance` 模式默认 5 分钟（`YCE_TIMEOUT_ENHANCE_MS=300000`）。可通过 `--timeout-enhance-ms` 覆盖。
 - 未配置 Youwen 增强密钥时：`auto` **不会调用** enhance，直接 `search`；显式 `--mode enhance` 立即失败（`AUTH_ERROR`），不会调用 youwen 脚本（除非同时 `--with-network`，此时会继续联网）。
-- **Agent 侧也要遵守**：没有增强密钥、或问题已经足够具体只差定位代码时，**直接 `search`，不要为了“增强+检索”硬调 enhance**。
-- **`auto` 不会因为 query 里出现“最新 / 官方文档 / latest”等字样就自动联网。** 要联网必须由调用方显式传参。
+- **Agent 侧也要遵守**：没有增强密钥、或问题已经足够具体只差定位代码时，**直接 `search`，不要为了"增强+检索"硬调 enhance**。
+- **`auto` 不会因为 query 里出现"最新 / 官方文档 / latest"等字样就自动联网。** 要联网必须由调用方显式传参。
 
 ### 1. 检索意图关键词（会倾向进入 search）
 - `搜索代码`
@@ -171,9 +172,9 @@ mode=network                         → 一定联网
 - 没有 `YCE_RELAY_TOKEN` 时不要假装已联网
 
 **怎么选模式：**
-- 用户话很模糊，但明确是“找代码”，**且有增强密钥** → 先把检索意图转换成英文 query，再调用 `auto`；若它执行增强，YCE 会在同一次调用内强制收口到 search
+- 用户话很模糊（命中模糊标记），但明确是"找代码"，**且有增强密钥** → 先把检索意图转换成英文 query，再调用 `auto`；若它执行增强，YCE 会在同一次调用内强制收口到 search
 - 用户只想把任务说清楚，不需要搜代码，**且有增强密钥** → `enhance`
-- 用户已经给出了明确技术目标，只差定位代码 → 转换成英文 query 后直接 `search`（**不要先 enhance**）
+- 用户已经给出了明确技术目标，只差定位代码 → 转换成英文 query 后直接 `search`（**不要先 enhance**）；`auto` 也会自动跳过增强走 `search`
 - **没有增强密钥 / 没有增强能力** → 一律不要调 enhance；代码定位用 `search`，需要外部事实用 `network` 或 `search --with-network`
 - 用户要外部事实 / 调研 / 最新资料 / 官方文档 / 竞品 → Agent 判断后调用 `--mode network`
 - 既要定位本仓代码，又要外部事实对照 → `search`（或有增强需求时用 `auto`）+ `--with-network`
@@ -342,7 +343,8 @@ YCE 的 stdout 固定是 XML，不再输出 JSON。最重要的标签如下：
 | `YCE_API_KEY` | 空 | 高级项：不走租约池时的直连 key；一般用户只需配置 `YCE_RELAY_TOKEN` |
 | `YCE_LOCAL_FALLBACK` | 空 | 设为 `true` 时远端失败才启用本地 fast fallback |
 | `YCE_DEFAULT_MODE` | `auto` | 默认模式 |
-| `YCE_TIMEOUT_ENHANCE_MS` | `300000` | 默认增强超时 |
+| `YCE_TIMEOUT_ENHANCE_MS` | `300000` | 默认增强超时（显式 `--mode enhance`） |
+| `YCE_TIMEOUT_AUTO_ENHANCE_MS` | `60000` | auto 模式增强超时，超时即断开并以原始 query 搜索 |
 | `YCE_TIMEOUT_SEARCH_MS` | `180000` | 默认代码检索超时 |
 | `YCE_TIMEOUT_NETWORK_MS` | `120000` | 默认联网检索超时 |
 
@@ -546,7 +548,9 @@ bash ./scripts/build-release.sh
 - yce 代码检索成功（`<search result-present="true">`）后，才进入改代码；如果检索返回空，先排障再继续，不要盲目直接动手
 - 外部事实 / 调研看 `<network-search result-present="true">` 的 evidence / summaries，保留来源 URL；不要把网页证据当成仓库路径
 - 是否联网由 **Agent 判断后显式传参**，CLI 不做关键词自动联网
-- 只要任务里同时包含"把问题说清楚"和"去代码库里找实现"，执行 `YCE auto`；只要它执行了增强，**同一次调用内必定以 YCE search 收口**，增强失败时使用原始 query，绝不停止在增强结果或增强错误上
+- 只要任务里同时包含"把问题说清楚"和"去代码库里找实现"，执行 `YCE auto`；只要它执行了增强，**同一次调用内必定以 YCE search 收口**，增强失败或超时时使用原始 query，绝不停止在增强结果或增强错误上
+- `auto` 只在提示词确实模糊时才增强；提示词已够明确时直接 `search`，不空跑增强
+- `auto` 增强默认 1 分钟超时，超时即断开并以原始 query 搜索；显式 `--mode enhance` 默认 5 分钟
 - 只增强就 `enhance`（**没有增强密钥就不要调**）
 - 只定位就 `search`（问题已够具体时优先，不必先 enhance）
 - 没有增强能力时：直接 `search` / `network`，**禁止空跑 enhance**
