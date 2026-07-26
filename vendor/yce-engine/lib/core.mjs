@@ -10,11 +10,11 @@
  *   → ANSWER: file paths + line ranges + suggested rg patterns
  */
 
-import { readdirSync, existsSync, statSync } from "node:fs";
-import { resolve, join, relative, sep, isAbsolute } from "node:path";
+import { readdirSync, statSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { resolve, join, relative, sep, isAbsolute, dirname } from "node:path";
 import { gzipSync } from "node:zlib";
 import { randomUUID } from "node:crypto";
-import { platform, arch, release, version as osVersion, hostname, cpus, totalmem } from "node:os";
+import { platform, arch, release, version as osVersion, hostname, cpus, totalmem, homedir } from "node:os";
 
 import {
   ProtobufEncoder,
@@ -46,6 +46,22 @@ class YceEngineError extends Error {
 }
 
 /**
+ * Undici wraps socket-level failures as TypeError("fetch failed", { cause }).
+ * Walk the cause chain for the first concrete error code (ECONNRESET,
+ * UND_ERR_CONNECT_TIMEOUT, ...) so classification and diagnostics keep it.
+ * @param {Error} err
+ * @returns {string}
+ */
+function _extractCauseCode(err) {
+  let cause = err?.cause;
+  for (let depth = 0; depth < 4 && cause; depth++) {
+    if (typeof cause.code === "string" && cause.code) return cause.code;
+    cause = cause.cause;
+  }
+  return "";
+}
+
+/**
  * Classify a raw fetch/HTTP error into a YceEngineError.
  * @param {Error} err
  * @returns {YceEngineError}
@@ -62,13 +78,24 @@ function _classifyError(err) {
     return new YceEngineError(err.message, "SERVER_ERROR", { status: s });
   }
 
-  // Timeout (AbortSignal.timeout throws AbortError or TimeoutError)
-  if (err.name === "AbortError" || err.name === "TimeoutError" || /timeout/i.test(err.message)) {
-    return new YceEngineError(err.message, "TIMEOUT");
+  const causeCode = _extractCauseCode(err);
+  const message = causeCode ? `${err.message} (${causeCode})` : err.message;
+  const details = causeCode ? { cause: causeCode } : {};
+
+  // Timeout (AbortSignal.timeout throws AbortError or TimeoutError; undici
+  // connect-phase hangs surface as UND_ERR_CONNECT_TIMEOUT / ETIMEDOUT)
+  if (
+    err.name === "AbortError" ||
+    err.name === "TimeoutError" ||
+    /timeout/i.test(err.message) ||
+    causeCode === "UND_ERR_CONNECT_TIMEOUT" ||
+    causeCode === "ETIMEDOUT"
+  ) {
+    return new YceEngineError(message, "TIMEOUT", details);
   }
 
   // Everything else is a network-level issue
-  return new YceEngineError(err.message, "NETWORK_ERROR");
+  return new YceEngineError(message, "NETWORK_ERROR", details);
 }
 
 function _isTransientCapacitySignal({ status = null, code = "", message = "" } = {}) {
@@ -97,6 +124,42 @@ const YCE_REMOTE_APP_VER = process.env.YCE_REMOTE_APP_VER || process.env.WS_APP_
 const YCE_REMOTE_LS_VER = process.env.YCE_REMOTE_LS_VER || process.env.WS_LS_VER || "1.9544.35";
 const YCE_REMOTE_MODEL = process.env.YCE_REMOTE_MODEL || process.env.WS_MODEL || "MODEL_SWE_1_6_FAST";
 const DEBUG_MODE = process.env.YCE_ENGINE_DEBUG === "1" || process.env.YCE_ENGINE_DEBUG === "true" || process.env.FAST_CONTEXT_DEBUG === "1" || process.env.FAST_CONTEXT_DEBUG === "true";
+
+// ─── Transport Tuning ──────────────────────────────────────
+
+// undici's default global dispatcher keeps idle sockets for only 4s and waits
+// 10s for TCP/TLS connect. Search turns are seconds apart, so with defaults
+// every turn pays a fresh TLS handshake (~1-1.6s to the relay). Swap in an
+// Agent tuned for this call pattern via the documented global-dispatcher
+// symbol, so the vendored engine needs no undici dependency. If the runtime
+// doesn't expose the symbol, fetch keeps its stock behavior.
+const _GLOBAL_DISPATCHER_SYMBOL = Symbol.for("undici.globalDispatcher.1");
+// Captured at module load so test stubs that replace globalThis.fetch never
+// see the dispatcher-priming request below.
+const _realFetch = globalThis.fetch;
+let _dispatcherInstalled = false;
+
+async function _installTunedDispatcher() {
+  if (_dispatcherInstalled) return;
+  _dispatcherInstalled = true;
+  if (process.env.YCE_DISPATCHER_TUNING === "0") return;
+  if (typeof _realFetch !== "function") return;
+  try {
+    // A data: URL fetch forces undici to lazily create its global dispatcher
+    // without touching the network, giving us the Agent constructor.
+    await _realFetch("data:text/plain,");
+    const current = globalThis[_GLOBAL_DISPATCHER_SYMBOL];
+    const Agent = current?.constructor;
+    if (typeof Agent !== "function") return;
+    globalThis[_GLOBAL_DISPATCHER_SYMBOL] = new Agent({
+      keepAliveTimeout: 30_000,
+      keepAliveMaxTimeout: 60_000,
+      connect: { timeout: 5_000 },
+    });
+  } catch {
+    // Tuning is best-effort; stock fetch behavior remains correct.
+  }
+}
 
 // Default excludes aligned with YCE fast-search guidance.
 // Minimal defaults — only dirs that are almost never source code.
@@ -666,6 +729,182 @@ function isUsableLeasedApiKey(apiKey) {
 
 let _leasedRelay = null;
 let _lastRelayError = "";
+let _lastRelayFailure = null;
+let _relayQuotaBlockedUntilMs = 0;
+let _relayLeaseBackoffUntilMs = 0;
+
+const _sleep = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs));
+
+// Server backoff windows only help if they survive the process, and every CLI
+// invocation is a fresh process. Persist the windows to a small state file so
+// the next invocation fails fast locally instead of re-hitting the same 429.
+let _relayStateFile = process.env.YCE_RELAY_STATE_FILE ||
+  join(homedir(), ".cache", "yce-engine", "relay-state.json");
+let _relayStateLoaded = false;
+let _relayStatePersistEnabled = process.env.YCE_RELAY_STATE_PERSIST !== "0";
+
+function _loadPersistedRelayState() {
+  if (_relayStateLoaded) return;
+  _relayStateLoaded = true;
+  if (!_relayStatePersistEnabled) return;
+  try {
+    const raw = JSON.parse(readFileSync(_relayStateFile, "utf-8"));
+    const now = Date.now();
+    if (Number.isFinite(raw?.quotaBlockedUntilMs) && raw.quotaBlockedUntilMs > now) {
+      _relayQuotaBlockedUntilMs = raw.quotaBlockedUntilMs;
+    }
+    if (Number.isFinite(raw?.leaseBackoffUntilMs) && raw.leaseBackoffUntilMs > now) {
+      _relayLeaseBackoffUntilMs = raw.leaseBackoffUntilMs;
+    }
+    if ((_relayQuotaBlockedUntilMs > now || _relayLeaseBackoffUntilMs > now) &&
+        raw.lastFailure && typeof raw.lastFailure === "object") {
+      _lastRelayFailure = raw.lastFailure;
+    }
+  } catch {
+    // Missing or corrupt state file means no active backoff.
+  }
+}
+
+function _persistRelayState() {
+  if (!_relayStatePersistEnabled) return;
+  try {
+    const now = Date.now();
+    if (_relayQuotaBlockedUntilMs <= now && _relayLeaseBackoffUntilMs <= now) {
+      rmSync(_relayStateFile, { force: true });
+      return;
+    }
+    mkdirSync(dirname(_relayStateFile), { recursive: true });
+    writeFileSync(_relayStateFile, JSON.stringify({
+      quotaBlockedUntilMs: _relayQuotaBlockedUntilMs,
+      leaseBackoffUntilMs: _relayLeaseBackoffUntilMs,
+      lastFailure: _lastRelayFailure,
+    }));
+  } catch {
+    // State persistence must never break the search flow.
+  }
+}
+
+function _parseRetryAfterSeconds(response, payload = {}) {
+  const payloadSeconds = Number(payload?.retry_after_seconds);
+  if (Number.isFinite(payloadSeconds) && payloadSeconds > 0) {
+    return Math.ceil(payloadSeconds);
+  }
+  const header = String(response?.headers?.get?.("retry-after") || "").trim();
+  if (!header) return 0;
+  const numericSeconds = Number(header);
+  if (Number.isFinite(numericSeconds) && numericSeconds > 0) {
+    return Math.ceil(numericSeconds);
+  }
+  const retryAtMs = Date.parse(header);
+  if (!Number.isFinite(retryAtMs)) return 0;
+  return Math.max(1, Math.ceil((retryAtMs - Date.now()) / 1000));
+}
+
+function _formatRelayFailure(failure, relayUrl) {
+  const retry = failure?.retryAfterSeconds > 0
+    ? ` retry-after=${failure.retryAfterSeconds}s`
+    : "";
+  return `relay lease failed: HTTP ${failure?.status || 0}${failure?.code ? ` ${failure.code}` : ""}${retry} from ${relayUrl}/yce/lease-key`;
+}
+
+function _recordRelayFailure(response, payload, relayUrl) {
+  const status = Number(response?.status) || 0;
+  const code = String(payload?.code || "").trim();
+  const retryAfterSeconds = _parseRetryAfterSeconds(response, payload);
+  const resetAt = String(payload?.reset_at || "").trim();
+  const resetAtMs = Date.parse(resetAt);
+  const inferredRetryable = code === "UPSTREAM_CAPACITY_BACKOFF" ||
+    code === "RATE_LIMITED" ||
+    code === "POOL_BUSY" ||
+    code === "USER_BUSY";
+  const failure = {
+    status,
+    code,
+    retryable: typeof payload?.retryable === "boolean"
+      ? payload.retryable
+      : inferredRetryable,
+    retryAfterSeconds,
+    resetAt,
+    scope: String(payload?.scope || "").trim(),
+    message: String(payload?.error || payload?.message || "").trim(),
+    period: String(payload?.period || "").trim(),
+    used: Number.isFinite(Number(payload?.used)) ? Number(payload.used) : null,
+    limit: Number.isFinite(Number(payload?.limit)) ? Number(payload.limit) : null,
+  };
+  _lastRelayFailure = failure;
+  _lastRelayError = _formatRelayFailure(failure, relayUrl);
+
+  const now = Date.now();
+  if (code === "QUOTA_EXCEEDED") {
+    // A current server supplies reset_at. Older servers get a short local
+    // suppression window so repeated calls do not hammer the same 429.
+    _relayQuotaBlockedUntilMs = Number.isFinite(resetAtMs) && resetAtMs > now
+      ? resetAtMs
+      : now + 60_000;
+  }
+  if ((code === "UPSTREAM_CAPACITY_BACKOFF" || code === "RATE_LIMITED") && retryAfterSeconds > 0) {
+    _relayLeaseBackoffUntilMs = Math.max(
+      _relayLeaseBackoffUntilMs,
+      now + retryAfterSeconds * 1000,
+    );
+  }
+  _persistRelayState();
+  return failure;
+}
+
+// A CLI invocation must never sleep for minutes because the server sent a
+// large Retry-After; beyond this cap we fail fast with the structured error.
+const MAX_LEASE_WAIT_MS = 20_000;
+
+function _cachedRelayFailure(now = Date.now()) {
+  _loadPersistedRelayState();
+  if (_relayQuotaBlockedUntilMs > now) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((_relayQuotaBlockedUntilMs - now) / 1000));
+    return {
+      ...(_lastRelayFailure || {}),
+      status: _lastRelayFailure?.status || 429,
+      code: "QUOTA_EXCEEDED",
+      retryable: false,
+      retryAfterSeconds,
+    };
+  }
+  if (_relayLeaseBackoffUntilMs > now) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((_relayLeaseBackoffUntilMs - now) / 1000));
+    return {
+      ...(_lastRelayFailure || {}),
+      code: _lastRelayFailure?.code || "UPSTREAM_CAPACITY_BACKOFF",
+      retryable: true,
+      retryAfterSeconds,
+    };
+  }
+  return null;
+}
+
+function _relayFailureError(fallbackCode, details = {}) {
+  const failure = _lastRelayFailure;
+  if (!failure) {
+    return new YceEngineError(
+      _lastRelayError || "relay key pool is temporarily unavailable",
+      fallbackCode,
+      details,
+    );
+  }
+  return new YceEngineError(
+    failure.message || _lastRelayError || "relay key pool is temporarily unavailable",
+    failure.code || fallbackCode,
+    {
+      status: failure.status,
+      retryable: failure.retryable,
+      retryAfterSeconds: failure.retryAfterSeconds,
+      resetAt: failure.resetAt,
+      scope: failure.scope,
+      period: failure.period,
+      used: failure.used,
+      limit: failure.limit,
+      ...details,
+    },
+  );
+}
 
 /**
  * Headers required by the public YCE protocol proxy (scheme B):
@@ -698,12 +937,16 @@ function _usesPublicYceProtocolProxy() {
   return bases.some((b) => b.includes("/yce/api") || b.includes("/yce/auth") || b.includes("yce.aigy.de"));
 }
 
-async function _requestRelayLease({ excludeKeyIds = [], retryAttempt = 0 } = {}) {
+async function _requestRelayLease({
+  excludeKeyIds = [],
+  retryAttempt = 0,
+  sleep = _sleep,
+  random = Math.random,
+} = {}) {
   const normalizedExclusions = [...new Set(
     (excludeKeyIds || []).map((value) => String(value || "").trim()).filter(Boolean),
   )];
   const normalizedRetryAttempt = retryAttempt === 1 ? 1 : 0;
-  _lastRelayError = "";
   const relayUrl = _normalizeRelayUrl(process.env.YCE_RELAY_URL) || DEFAULT_YCE_RELAY_ORIGIN;
   const relayToken = String(process.env.YCE_RELAY_TOKEN || "").trim();
   if (!relayToken) {
@@ -711,56 +954,118 @@ async function _requestRelayLease({ excludeKeyIds = [], retryAttempt = 0 } = {})
     return null;
   }
 
-  try {
-    const response = await fetch(`${relayUrl}/yce/lease-key`, {
-      method: "POST",
-      headers: {
-        "Accept": "application/json",
-        "Authorization": `Bearer ${relayToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        exclude_key_ids: normalizedExclusions,
-        retry_attempt: normalizedRetryAttempt,
-      }),
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    if (!response.ok) {
-      const errorPayload = await response.json().catch(() => ({}));
-      const relayCode = String(errorPayload?.code || "").trim();
-      const retryAfter = String(response.headers.get("retry-after") || "").trim();
-      _lastRelayError = `relay lease failed: HTTP ${response.status}${relayCode ? ` ${relayCode}` : ""}${retryAfter ? ` retry-after=${retryAfter}s` : ""} from ${relayUrl}/yce/lease-key`;
+  const cachedFailure = _cachedRelayFailure();
+  if (cachedFailure?.code === "QUOTA_EXCEEDED") {
+    _lastRelayFailure = cachedFailure;
+    _lastRelayError = _formatRelayFailure(cachedFailure, relayUrl);
+    return null;
+  }
+  if (cachedFailure?.retryAfterSeconds > 0) {
+    const waitMs = cachedFailure.retryAfterSeconds * 1000 + Math.floor(random() * 250);
+    if (waitMs > MAX_LEASE_WAIT_MS) {
+      _lastRelayFailure = cachedFailure;
+      _lastRelayError = _formatRelayFailure(cachedFailure, relayUrl);
       return null;
     }
+    await sleep(waitMs);
+  }
+  _lastRelayError = "";
+  _lastRelayFailure = null;
 
-    const payload = await response.json();
-    const apiKey = String(payload?.api_key || "").trim();
-    if (!isUsableLeasedApiKey(apiKey)) return null;
+  // The lease is the first request of a run; install the tuned dispatcher
+  // before it so the connection it opens lands in the reusable pool.
+  await _installTunedDispatcher();
 
-    return {
-      apiKey,
-      keyId: String(payload?.key_id || "").trim(),
-      leaseId: String(payload?.lease_id || "").trim(),
-      relayUrl,
-      relayToken,
-      retryAttempt: normalizedRetryAttempt,
-      leaseExpiresAt: String(payload?.lease_expires_at || "").trim(),
-    };
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await fetch(`${relayUrl}/yce/lease-key`, {
+        method: "POST",
+        headers: {
+          "Accept": "application/json",
+          "Authorization": `Bearer ${relayToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          exclude_key_ids: normalizedExclusions,
+          retry_attempt: normalizedRetryAttempt,
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({}));
+        const failure = _recordRelayFailure(response, errorPayload, relayUrl);
+        const waitMs = failure.retryAfterSeconds * 1000 + Math.floor(random() * 250);
+        const shouldWaitOnce = attempt === 0 &&
+          failure.retryAfterSeconds > 0 &&
+          waitMs <= MAX_LEASE_WAIT_MS &&
+          (failure.code === "UPSTREAM_CAPACITY_BACKOFF" || failure.code === "RATE_LIMITED");
+        if (shouldWaitOnce) {
+          await sleep(waitMs);
+          continue;
+        }
+        return null;
+      }
+
+      const payload = await response.json();
+      const apiKey = String(payload?.api_key || "").trim();
+      if (!isUsableLeasedApiKey(apiKey)) return null;
+
+      _lastRelayError = "";
+      _lastRelayFailure = null;
+      _relayQuotaBlockedUntilMs = 0;
+      _relayLeaseBackoffUntilMs = 0;
+      _persistRelayState();
+      return {
+        apiKey,
+        keyId: String(payload?.key_id || "").trim(),
+        leaseId: String(payload?.lease_id || "").trim(),
+        relayUrl,
+        relayToken,
+        retryAttempt: normalizedRetryAttempt,
+        leaseExpiresAt: String(payload?.lease_expires_at || "").trim(),
+        // Optional server capability fields; absent on older servers.
+        leaseReusable: typeof payload?.lease_reusable === "boolean" ? payload.lease_reusable : undefined,
+        maxStreamCalls: Number.isFinite(Number(payload?.max_stream_calls)) && Number(payload.max_stream_calls) > 0
+          ? Number(payload.max_stream_calls)
+          : undefined,
+      };
+    }
+    return null;
   } catch (error) {
     _lastRelayError = `relay lease error: ${error?.message || String(error)}`;
+    _lastRelayFailure = {
+      status: 0,
+      code: "RELAY_NETWORK_ERROR",
+      retryable: true,
+      retryAfterSeconds: 0,
+      resetAt: "",
+      scope: "network",
+      message: _lastRelayError,
+    };
     return null;
   }
 }
 
-async function leaseApiKeyFromRelay({ excludeKeyIds = [], retryAttempt = 0, forceNew = false } = {}) {
+async function leaseApiKeyFromRelay({
+  excludeKeyIds = [],
+  retryAttempt = 0,
+  forceNew = false,
+  sleep = _sleep,
+  random = Math.random,
+} = {}) {
   const hasExclusions = (excludeKeyIds || []).some((value) => String(value || "").trim());
   const normalizedRetryAttempt = retryAttempt === 1 ? 1 : 0;
   if (_leasedRelay?.apiKey && !forceNew && !hasExclusions && normalizedRetryAttempt === 0) {
     return _leasedRelay.apiKey;
   }
   if (forceNew) _leasedRelay = null;
-  const leased = await _requestRelayLease({ excludeKeyIds, retryAttempt: normalizedRetryAttempt });
+  const leased = await _requestRelayLease({
+    excludeKeyIds,
+    retryAttempt: normalizedRetryAttempt,
+    sleep,
+    random,
+  });
   if (!leased) return null;
   _leasedRelay = leased;
   return leased.apiKey;
@@ -770,6 +1075,61 @@ function _clearLeasedRelay(expectedLeaseId = "") {
   if (!_leasedRelay) return;
   if (expectedLeaseId && _leasedRelay.leaseId !== expectedLeaseId) return;
   _leasedRelay = null;
+}
+
+// One lease per search run — STRICTLY OPT-IN by server capability. The lease
+// is reused only when the server's lease response explicitly declares
+// lease_reusable:true; older/production servers without the field keep the
+// original lease-per-call behavior (their quota accounting depends on it).
+// The server keeps a lease active for its full TTL (5 min default) and marks
+// it completed when the /yce/usage receipt arrives, so a reused lease sends
+// one receipt at release time (see usage accounting above). Reuse saves the
+// per-turn lease RTT and lease-scheduler pressure; quota still follows the
+// actual upstream calls (the server bills each forwarded call).
+// YCE_LEASE_REUSE=0 forces lease-per-call; YCE_LEASE_REUSE=1 forces reuse on
+// (testing only, against servers known to support it).
+const LEASE_REUSE_SAFETY_MS = 15_000;
+const DEFAULT_MAX_STREAM_CALLS_PER_LEASE = 16;
+// The server counts every POST (including same-lease retries) against its
+// cap while the client only observes its own attempts; keep headroom so the
+// client rotates leases before the server's hard limit 401s a live search.
+const LEASE_CALL_RETRY_HEADROOM = 4;
+
+function _leaseCallBudgetLeft(usageContext) {
+  const serverLimit = Number.isFinite(usageContext?.maxStreamCalls) && usageContext.maxStreamCalls > 0
+    ? usageContext.maxStreamCalls
+    : DEFAULT_MAX_STREAM_CALLS_PER_LEASE;
+  const limit = Math.max(1, serverLimit - LEASE_CALL_RETRY_HEADROOM);
+  const used = Math.max(
+    usageContext?.usageStats?.calls || 0,
+    usageContext?.attempts || 0,
+  );
+  return used < limit;
+}
+
+function _leaseReusable(usageContext) {
+  if (process.env.YCE_LEASE_REUSE === "0") return false;
+  if (usageContext?.serverAllowsReuse !== true && process.env.YCE_LEASE_REUSE !== "1") return false;
+  if (!_leaseCallBudgetLeft(usageContext)) return false;
+  const expiresAtMs = Date.parse(String(usageContext?.leaseExpiresAt || ""));
+  return Number.isFinite(expiresAtMs) && expiresAtMs - LEASE_REUSE_SAFETY_MS > Date.now();
+}
+
+function _leaseExpired(usageContext) {
+  const expiresAtMs = Date.parse(String(usageContext?.leaseExpiresAt || ""));
+  return Number.isFinite(expiresAtMs) && expiresAtMs - LEASE_REUSE_SAFETY_MS <= Date.now();
+}
+
+function _usageContextFromLease(leased) {
+  return {
+    keyId: leased.keyId,
+    leaseId: leased.leaseId || "",
+    relayUrl: leased.relayUrl,
+    relayToken: leased.relayToken,
+    leaseExpiresAt: leased.leaseExpiresAt || "",
+    serverAllowsReuse: leased.leaseReusable,
+    maxStreamCalls: leased.maxStreamCalls,
+  };
 }
 
 function _normalizeRelayUrl(raw) {
@@ -800,7 +1160,7 @@ function _extractStreamError(data) {
   return null;
 }
 
-async function _reportYceUsage(usageContext, { statusCode = null, errorMessage = "", durationMs = null } = {}) {
+async function _reportYceUsage(usageContext, { statusCode = null, errorMessage = "", durationMs = null, calls = null } = {}) {
   if (!usageContext?.relayUrl || !usageContext?.relayToken || !usageContext?.keyId) return;
   try {
     await fetch(`${usageContext.relayUrl}/yce/usage`, {
@@ -817,12 +1177,76 @@ async function _reportYceUsage(usageContext, { statusCode = null, errorMessage =
         status_code: typeof statusCode === "number" ? statusCode : null,
         error_message: String(errorMessage || "").slice(0, 1000),
         duration_ms: typeof durationMs === "number" ? durationMs : null,
+        // Number of streaming calls this receipt covers (lease reuse batches
+        // several calls into one receipt); lets the server keep per-call
+        // latency samples honest. Older servers ignore unknown fields.
+        calls: typeof calls === "number" && calls > 0 ? calls : null,
       }),
       signal: AbortSignal.timeout(3000),
     });
   } catch {
     // Usage reporting must never break local code search.
   }
+}
+
+// The relay treats /yce/usage as the LEASE RELEASE RECEIPT: the server marks
+// the lease completed the moment a report for its lease_id arrives, and any
+// later call on that lease gets HTTP 401. Usage must therefore be reported
+// once per LEASE, not once per streaming call:
+//   - success outcomes accumulate on the usage context;
+//   - the receipt is sent (in the background) when the lease is dropped —
+//     replaced, expired, failed over, or at end of search;
+//   - error paths report immediately and mark the context reported, because
+//     the lease is being abandoned right there anyway.
+// search() flushes pending receipts before returning so none outlive the CLI.
+const _pendingUsageReports = new Set();
+
+function _reportYceUsageBackground(usageContext, info) {
+  const pending = _reportYceUsage(usageContext, info)
+    .catch(() => {})
+    .finally(() => _pendingUsageReports.delete(pending));
+  _pendingUsageReports.add(pending);
+}
+
+async function _flushUsageReports() {
+  while (_pendingUsageReports.size > 0) {
+    await Promise.allSettled([..._pendingUsageReports]);
+  }
+}
+
+function _accumulateLeaseUsage(usageContext, { statusCode = null, durationMs = null } = {}) {
+  if (!usageContext) return;
+  const stats = usageContext.usageStats || (usageContext.usageStats = {
+    calls: 0,
+    lastStatusCode: null,
+    totalDurationMs: 0,
+  });
+  stats.calls += 1;
+  if (typeof statusCode === "number") stats.lastStatusCode = statusCode;
+  if (typeof durationMs === "number") stats.totalDurationMs += durationMs;
+}
+
+// Send the lease's single usage receipt. Safe to call more than once — only
+// the first call reports (the server would flag duplicates otherwise).
+function _releaseLeaseUsage(usageContext, override = null) {
+  if (!usageContext || usageContext.usageReported) return;
+  const stats = usageContext.usageStats;
+  if (!override && (!stats || stats.calls === 0)) return;
+  usageContext.usageReported = true;
+  _reportYceUsageBackground(usageContext, override || {
+    statusCode: stats.lastStatusCode,
+    errorMessage: "",
+    durationMs: stats.totalDurationMs > 0 ? stats.totalDurationMs : null,
+    calls: stats.calls,
+  });
+}
+
+// Error-path receipt: report now, awaited, and mark the context so the
+// release path doesn't double-report the same lease.
+async function _reportLeaseFailure(usageContext, info) {
+  if (!usageContext || usageContext.usageReported) return;
+  usageContext.usageReported = true;
+  await _reportYceUsage(usageContext, info);
 }
 
 // ─── JWT Cache ──────────────────────────────────────────────
@@ -867,12 +1291,18 @@ async function getCachedJwt(apiKey, usageContext = null) {
 
 /**
  * Standard unary HTTP POST with proto content type.
+ *
+ * Unary calls (JWT fetch, rate-limit check) sit on the critical path of every
+ * search, so one transient socket error (e.g. ECONNRESET on a reused
+ * keep-alive connection) must not kill the whole run: retry once on
+ * network/timeout/5xx failures. Client errors (4xx) never retry.
+ *
  * @param {string} url
  * @param {Buffer} protoBytes
  * @param {boolean} [compress=true]
  * @returns {Promise<Buffer>}
  */
-async function _unaryRequest(url, protoBytes, compress = true, usageContext = null) {
+async function _unaryRequest(url, protoBytes, compress = true, usageContext = null, maxRetries = 1) {
   const headers = {
     "Content-Type": "application/proto",
     "Connect-Protocol-Version": "1",
@@ -889,6 +1319,7 @@ async function _unaryRequest(url, protoBytes, compress = true, usageContext = nu
     body = protoBytes;
   }
 
+  await _installTunedDispatcher();
   const doFetch = () => fetch(url, {
     method: "POST",
     headers,
@@ -896,21 +1327,29 @@ async function _unaryRequest(url, protoBytes, compress = true, usageContext = nu
     signal: AbortSignal.timeout(30000),
   });
 
-  let resp;
-  try {
-    resp = await doFetch();
-  } catch (error) {
-    throw _classifyError(error);
+  let lastErr;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    let classified;
+    try {
+      const resp = await doFetch();
+      if (resp.ok) {
+        const arrayBuf = await resp.arrayBuffer();
+        return Buffer.from(arrayBuf);
+      }
+      const err = new Error(`HTTP ${resp.status}`);
+      err.status = resp.status;
+      classified = _classifyError(err);
+    } catch (error) {
+      classified = _classifyError(error);
+    }
+    lastErr = classified;
+    const retryable = classified.code === "NETWORK_ERROR" ||
+      classified.code === "TIMEOUT" ||
+      classified.code === "SERVER_ERROR";
+    if (!retryable || attempt >= maxRetries) break;
+    await _sleep(500 * (attempt + 1) + Math.floor(Math.random() * 250));
   }
-
-  if (!resp.ok) {
-    const err = new Error(`HTTP ${resp.status}`);
-    err.status = resp.status;
-    throw _classifyError(err);
-  }
-
-  const arrayBuf = await resp.arrayBuffer();
-  return Buffer.from(arrayBuf);
+  throw lastErr;
 }
 
 /**
@@ -927,6 +1366,10 @@ async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2, 
   const spanId = randomUUID().replace(/-/g, "").slice(0, 16);
   const baseTimeoutMs = Number.isFinite(timeoutMs) ? timeoutMs : 30000;
   const abortMs = baseTimeoutMs + 5000;
+  // timeoutMs is the budget for the whole logical call INCLUDING retries.
+  // Without this, retries can stack up to ~3x the budget and the outer
+  // process kill timer fires before the engine can report anything.
+  const deadlineAt = Date.now() + abortMs;
 
   const headers = {
     "Content-Type": "application/connect+proto",
@@ -944,12 +1387,22 @@ async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2, 
     ..._protocolAuthHeaders(usageContext),
   };
 
+  await _installTunedDispatcher();
   const doFetch = () => fetch(url, {
     method: "POST",
     headers,
     body: frame,
-    signal: AbortSignal.timeout(abortMs),
+    signal: AbortSignal.timeout(Math.max(1000, Math.min(abortMs, deadlineAt - Date.now()))),
   });
+
+  // Jittered backoff so concurrent clients don't retry in lockstep; skip the
+  // retry entirely when the remaining budget can't fit a meaningful attempt.
+  const backoffOrGiveUp = async (attempt) => {
+    const delayMs = 1000 * (attempt + 1) + Math.floor(Math.random() * 500);
+    if (Date.now() + delayMs + 2000 > deadlineAt) return false;
+    await _sleep(delayMs);
+    return true;
+  };
 
   const logicalStartedAt = Date.now();
   let lastErr;
@@ -957,6 +1410,9 @@ async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2, 
   let lastErrorMessage = "request failed";
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
+      // The server's per-lease call cap counts every POST, retries included;
+      // track attempts so the reuse budget matches the server's ledger.
+      if (usageContext) usageContext.attempts = (usageContext.attempts || 0) + 1;
       const resp = await doFetch();
       if (!resp.ok) {
         const err = new Error(`HTTP ${resp.status}`);
@@ -967,10 +1423,7 @@ async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2, 
         // 429 is a capacity signal for one bounded cross-key retry. Other 4xx
         // failures are client/auth errors and must not be retried on another key.
         if (resp.status === 429 || (resp.status >= 400 && resp.status < 500)) break;
-        if (attempt < maxRetries) {
-          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
-          continue;
-        }
+        if (attempt < maxRetries && await backoffOrGiveUp(attempt)) continue;
         break;
       }
 
@@ -991,9 +1444,8 @@ async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2, 
             });
         break;
       }
-      await _reportYceUsage(usageContext, {
+      _accumulateLeaseUsage(usageContext, {
         statusCode: resp.status,
-        errorMessage: "",
         durationMs: Date.now() - logicalStartedAt,
       });
       return data;
@@ -1003,15 +1455,12 @@ async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2, 
       lastErrorMessage = e?.message || e?.code || "request failed";
       const classified = _classifyError(e);
       if (classified.code === "AUTH_ERROR" || classified.code === "PAYLOAD_TOO_LARGE") break;
-      if (attempt < maxRetries) {
-        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
-        continue;
-      }
+      if (attempt < maxRetries && await backoffOrGiveUp(attempt)) continue;
       break;
     }
   }
   const classified = _classifyError(lastErr || new Error(lastErrorMessage));
-  await _reportYceUsage(usageContext, {
+  await _reportLeaseFailure(usageContext, {
     statusCode: lastStatus,
     errorMessage: lastErrorMessage,
     durationMs: Date.now() - logicalStartedAt,
@@ -1031,6 +1480,9 @@ function _clearRelayCredentialState(state) {
   const leaseId = state?.usageContext?.leaseId || "";
   _clearLeasedRelay(leaseId);
   if (!state) return;
+  // Dropping the lease is the release point: send its single usage receipt
+  // (no-op when an error path already reported, or nothing ran on it).
+  _releaseLeaseUsage(state.usageContext);
   state.apiKey = null;
   state.jwt = null;
   state.usageContext = null;
@@ -1038,7 +1490,9 @@ function _clearRelayCredentialState(state) {
 
 function _isCrossKeyRetryable(error) {
   if (!error) return false;
-  if (error.code === "TRANSIENT_CAPACITY" || error.code === "RATE_LIMITED") return true;
+  if (error.code === "RATE_LIMITED") return false;
+  if (error.code === "TRANSIENT_CAPACITY") return true;
+  if ((error?.details?.status ?? error?.status) === 429) return false;
   return _isTransientCapacitySignal({
     status: error?.details?.status ?? error?.status ?? null,
     code: error?.details?.upstreamCode || error?.code || "",
@@ -1054,6 +1508,8 @@ async function _streamingRequestWithRelayFailover({
   leaseCredential = _leaseRelayCredential,
   getJwt = getCachedJwt,
   request = _streamingRequest,
+  sleep = _sleep,
+  random = Math.random,
 }) {
   if (!credentialState || typeof buildProto !== "function") {
     throw new Error("credentialState and buildProto are required");
@@ -1061,25 +1517,22 @@ async function _streamingRequestWithRelayFailover({
 
   const ensureCredential = async (options = {}) => {
     if (!credentialState.relayManaged) return;
-    if (credentialState.apiKey && credentialState.jwt && credentialState.usageContext) return;
+    if (credentialState.apiKey && credentialState.jwt && credentialState.usageContext) {
+      if (!_leaseExpired(credentialState.usageContext)) return;
+      _clearRelayCredentialState(credentialState);
+    }
     const leased = await leaseCredential(options);
     if (!leased?.apiKey || !leased?.keyId) {
-      throw new YceEngineError(
-        _lastRelayError || "relay key pool is temporarily unavailable",
+      throw _relayFailureError(
         options.retryAttempt === 1 ? "RELAY_POOL_BUSY" : "RELAY_UNAVAILABLE",
       );
     }
     credentialState.apiKey = leased.apiKey;
-    credentialState.usageContext = {
-      keyId: leased.keyId,
-      leaseId: leased.leaseId || "",
-      relayUrl: leased.relayUrl,
-      relayToken: leased.relayToken,
-    };
+    credentialState.usageContext = _usageContextFromLease(leased);
     try {
       credentialState.jwt = await getJwt(leased.apiKey, credentialState.usageContext);
     } catch (error) {
-      await _reportYceUsage(credentialState.usageContext, {
+      await _reportLeaseFailure(credentialState.usageContext, {
         statusCode: error?.status || 401,
         errorMessage: error?.message || "failed to fetch JWT",
       });
@@ -1090,6 +1543,11 @@ async function _streamingRequestWithRelayFailover({
 
   await ensureCredential({ retryAttempt: 0, forceNew: true });
   const failedKeyId = credentialState.usageContext?.keyId || "";
+  // A reused lease can be revoked server-side at any time (restart, Redis
+  // flush, per-lease call cap). That surfaces as AUTH_ERROR on a lease that
+  // already served calls — heal by re-leasing once instead of failing the
+  // search. A first-call AUTH_ERROR is a real credential problem and rethrows.
+  const wasReusedLease = (credentialState.usageContext?.usageStats?.calls || 0) > 0;
   try {
     const data = await request(
       buildProto(credentialState.apiKey, credentialState.jwt),
@@ -1097,9 +1555,34 @@ async function _streamingRequestWithRelayFailover({
       maxRetries,
       credentialState.usageContext,
     );
-    if (credentialState.relayManaged) _clearRelayCredentialState(credentialState);
+    // Keep a still-valid lease for the next logical call of this search run;
+    // ensureCredential re-leases automatically once it nears expiry.
+    if (credentialState.relayManaged && !_leaseReusable(credentialState.usageContext)) {
+      _clearRelayCredentialState(credentialState);
+    }
     return data;
   } catch (error) {
+    const staleLease = credentialState.relayManaged &&
+      wasReusedLease &&
+      error?.code === "AUTH_ERROR";
+    if (staleLease) {
+      _clearRelayCredentialState(credentialState);
+      await ensureCredential({ retryAttempt: 0, forceNew: true });
+      return await request(
+        buildProto(credentialState.apiKey, credentialState.jwt),
+        timeoutMs,
+        maxRetries,
+        credentialState.usageContext,
+      ).then((data) => {
+        if (!_leaseReusable(credentialState.usageContext)) {
+          _clearRelayCredentialState(credentialState);
+        }
+        return data;
+      }).catch((retryError) => {
+        _clearRelayCredentialState(credentialState);
+        throw retryError;
+      });
+    }
     if (!credentialState.relayManaged || !_isCrossKeyRetryable(error)) {
       if (credentialState.relayManaged) _clearRelayCredentialState(credentialState);
       throw error;
@@ -1107,26 +1590,18 @@ async function _streamingRequestWithRelayFailover({
     _clearRelayCredentialState(credentialState);
   }
 
+  await sleep(250 + Math.floor(random() * 501));
   const alternate = await leaseCredential({
     excludeKeyIds: failedKeyId ? [failedKeyId] : [],
     retryAttempt: 1,
     forceNew: true,
   });
   if (!alternate?.apiKey || !alternate?.keyId) {
-    throw new YceEngineError(
-      _lastRelayError || "relay key pool is busy after one bounded failover",
-      "RELAY_POOL_BUSY",
-      { excludedKeyId: failedKeyId },
-    );
+    throw _relayFailureError("RELAY_POOL_BUSY", { excludedKeyId: failedKeyId });
   }
 
   credentialState.apiKey = alternate.apiKey;
-  credentialState.usageContext = {
-    keyId: alternate.keyId,
-    leaseId: alternate.leaseId || "",
-    relayUrl: alternate.relayUrl,
-    relayToken: alternate.relayToken,
-  };
+  credentialState.usageContext = _usageContextFromLease(alternate);
   try {
     credentialState.jwt = await getJwt(alternate.apiKey, credentialState.usageContext);
     return await request(
@@ -1137,7 +1612,7 @@ async function _streamingRequestWithRelayFailover({
     );
   } catch (error) {
     if (!error?.__yceUsageReported && !credentialState.jwt) {
-      await _reportYceUsage(credentialState.usageContext, {
+      await _reportLeaseFailure(credentialState.usageContext, {
         statusCode: error?.status || 401,
         errorMessage: error?.message || "failed to fetch JWT",
       });
@@ -1201,7 +1676,8 @@ async function checkRateLimit(apiKey, jwt, usageContext = null) {
     await _unaryRequest(`${API_BASE}/CheckUserMessageRateLimit`, req.toBuffer(), true, usageContext);
     return true;
   } catch (e) {
-    if (e.status === 429) return false;
+    // Classified errors carry the HTTP status in details, raw ones on the error.
+    if (e.status === 429 || e?.details?.status === 429) return false;
     return true; // Don't block on network issues
   }
 }
@@ -1763,7 +2239,22 @@ function _parseAnswer(xmlText, projectRoot) {
  * @param {function} [opts.onProgress] - Progress callback
  * @returns {Promise<Object>}
  */
-export async function search({
+export async function search(options) {
+  const runState = {};
+  try {
+    return await _searchImpl(options, runState);
+  } finally {
+    // Release the lease still held at end of search: the usage receipt is
+    // what frees the server-side in-flight slot — without it the user's
+    // concurrency budget stays occupied until the lease TTL expires and
+    // back-to-back searches hit USER_BUSY.
+    if (runState.credentialState) _clearRelayCredentialState(runState.credentialState);
+    // Background usage reports must not outlive the CLI process.
+    await _flushUsageReports();
+  }
+}
+
+async function _searchImpl({
   query,
   projectRoot,
   apiKey = null,
@@ -1783,7 +2274,7 @@ export async function search({
   bootstrapMaxTurns = 2,
   bootstrapMaxCommands = 6,
   onProgress = null,
-}) {
+}, runState = {}) {
   const log = (msg) => onProgress?.(msg);
   projectRoot = resolve(projectRoot);
   const effectiveExcludePaths = _mergeExcludePaths(excludePaths);
@@ -1796,12 +2287,7 @@ export async function search({
     const leased = await _leaseRelayCredential({ retryAttempt: 0 });
     if (leased) {
       apiKey = leased.apiKey;
-      initialUsageContext = {
-        keyId: leased.keyId,
-        leaseId: leased.leaseId || "",
-        relayUrl: leased.relayUrl,
-        relayToken: leased.relayToken,
-      };
+      initialUsageContext = _usageContextFromLease(leased);
       relayManaged = true;
     } else {
       apiKey = String(process.env.YCE_API_KEY || "").trim();
@@ -1823,7 +2309,7 @@ export async function search({
       jwt = await getCachedJwt(apiKey, initialUsageContext);
     } catch (error) {
       if (relayManaged) {
-        await _reportYceUsage(initialUsageContext, {
+        await _reportLeaseFailure(initialUsageContext, {
           statusCode: error?.status || 401,
           errorMessage: error?.message || "failed to fetch JWT",
         });
@@ -1838,13 +2324,21 @@ export async function search({
     usageContext: initialUsageContext,
     relayManaged,
   };
+  runState.credentialState = credentialState;
 
-  // Check rate limit
+  // Advisory rate-limit probe. Runs concurrently with the bootstrap phase and
+  // local repo-map work instead of adding a serial RTT up front; the streaming
+  // path already downgrades 429s with bounded cross-key failover, so the probe
+  // only needs to settle before the main search loop starts.
   log("Checking rate limit...");
-  if (!(await checkRateLimit(apiKey, jwt, credentialState.usageContext))) {
+  const probedKeyId = credentialState.usageContext?.keyId || "";
+  const rateLimitPromise = checkRateLimit(apiKey, jwt, credentialState.usageContext)
+    .catch(() => true);
+
+  const handleRateLimited = async () => {
     if (credentialState.relayManaged) {
       const failedKeyId = credentialState.usageContext?.keyId || "";
-      await _reportYceUsage(credentialState.usageContext, {
+      await _reportLeaseFailure(credentialState.usageContext, {
         statusCode: 429,
         errorMessage: "rate limit check rejected the leased key",
       });
@@ -1858,16 +2352,11 @@ export async function search({
         return { files: [], error: `RELAY_POOL_BUSY: ${_lastRelayError || "no alternate key available"}` };
       }
       credentialState.apiKey = alternate.apiKey;
-      credentialState.usageContext = {
-        keyId: alternate.keyId,
-        leaseId: alternate.leaseId || "",
-        relayUrl: alternate.relayUrl,
-        relayToken: alternate.relayToken,
-      };
+      credentialState.usageContext = _usageContextFromLease(alternate);
       try {
         credentialState.jwt = await getCachedJwt(alternate.apiKey, credentialState.usageContext);
       } catch (error) {
-        await _reportYceUsage(credentialState.usageContext, {
+        await _reportLeaseFailure(credentialState.usageContext, {
           statusCode: error?.status || 401,
           errorMessage: error?.message || "failed to fetch JWT",
         });
@@ -1877,18 +2366,17 @@ export async function search({
       if (await checkRateLimit(credentialState.apiKey, credentialState.jwt, credentialState.usageContext)) {
         // Keep this alternate lease for the first streaming call. The helper
         // clears it after that logical call completes.
-      } else {
-        await _reportYceUsage(credentialState.usageContext, {
-          statusCode: 429,
-          errorMessage: "rate limit check rejected the alternate leased key",
-        });
-        _clearRelayCredentialState(credentialState);
-        return { files: [], error: "Rate limited, please try again later" };
+        return null;
       }
-    } else {
+      await _reportLeaseFailure(credentialState.usageContext, {
+        statusCode: 429,
+        errorMessage: "rate limit check rejected the alternate leased key",
+      });
+      _clearRelayCredentialState(credentialState);
       return { files: [], error: "Rate limited, please try again later" };
     }
-  }
+    return { files: [], error: "Rate limited, please try again later" };
+  };
 
   const executor = new ToolExecutor(projectRoot);
   const toolDefs = getToolDefinitions(maxCommands);
@@ -1908,6 +2396,16 @@ export async function search({
       onProgress,
     });
     log(`Bootstrap hints: patterns=${bootstrapHints.rgPatterns.length}, hot_dirs=${bootstrapHints.hotDirs.length}`);
+  }
+
+  // Settle the advisory probe before the main loop; a 429 still gets the
+  // bounded key-switch treatment. Skip if bootstrap failover already replaced
+  // the probed key — the verdict belongs to the old key.
+  const probeStillRelevant = !credentialState.relayManaged ||
+    (credentialState.usageContext?.keyId || "") === probedKeyId;
+  if (!(await rateLimitPromise) && probeStillRelevant) {
+    const rateLimited = await handleRateLimited();
+    if (rateLimited) return rateLimited;
   }
 
   const { tree: repoMap, depth: actualDepth, sizeBytes: treeSizeBytes, fellBack, autoDepth, strategy: repoMapStrategy, hotDirs = [] } = buildOptimizedRepoMap({
@@ -2340,9 +2838,26 @@ export const __test = {
   streamingRequestWithRelayFailover: _streamingRequestWithRelayFailover,
   API_BASE,
   AUTH_BASE,
+  unaryRequest: _unaryRequest,
+  classifyError: _classifyError,
+  flushUsageReports: _flushUsageReports,
+  leaseReusable: _leaseReusable,
+  accumulateLeaseUsage: _accumulateLeaseUsage,
+  releaseLeaseUsage: _releaseLeaseUsage,
+  reportLeaseFailure: _reportLeaseFailure,
+  clearRelayCredentialState: _clearRelayCredentialState,
+  setRelayStateFile(path) {
+    _relayStateFile = path;
+    _relayStateLoaded = false;
+  },
   resetRelayState() {
     _leasedRelay = null;
     _lastRelayError = "";
+    _lastRelayFailure = null;
+    _relayQuotaBlockedUntilMs = 0;
+    _relayLeaseBackoffUntilMs = 0;
+    _relayStateLoaded = false;
     _jwtCache.clear();
+    try { rmSync(_relayStateFile, { force: true }); } catch {}
   },
 };

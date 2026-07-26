@@ -161,6 +161,11 @@ async function enhance(prompt, opts = {}) {
 
   const enableSearch = opts.noSearch === true ? false : config.enableSearch;
   const token = opts.token || config.token;
+  // SSE timeout follows the caller's budget so the wrapper's kill timer never
+  // fires before this request gives up cleanly. Default keeps standalone use.
+  const sseTimeoutMs = Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0
+    ? opts.timeoutMs
+    : 300000;
 
   const body = {
     prompt,
@@ -214,7 +219,7 @@ async function enhance(prompt, opts = {}) {
     const events = [];
     await postSSE(endpoint, body, (event, data) => {
       events.push({ event, data });
-    }, 300000, sseOptions);
+    }, sseTimeoutMs, sseOptions);
     console.log(JSON.stringify(events, null, 2));
     return;
   }
@@ -282,7 +287,7 @@ async function enhance(prompt, opts = {}) {
     } else if (event === "error" || event === "forbidden") {
       error = data.error || "Pipeline failed";
     }
-  }, 300000, sseOptions);
+  }, sseTimeoutMs, sseOptions);
 
   // Print agent status summary
   for (const [, info] of Object.entries(agentStatus)) {
@@ -696,6 +701,7 @@ async function main() {
           skillsDir: args["skills-dir"],
           autoSkills: args["auto-skills"] === true,
           force: args.force === true,
+          timeoutMs: Number.parseInt(args["timeout-ms"], 10) || undefined,
         });
         break;
       }

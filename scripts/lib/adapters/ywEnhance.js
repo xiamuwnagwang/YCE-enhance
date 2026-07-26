@@ -17,6 +17,12 @@ function buildBaseArgs(scriptPath, prompt, options = {}) {
   if (options.noSearch) {
     args.push("--no-search");
   }
+  // Give the SSE request a smaller budget than the subprocess kill timer so
+  // youwen.js can fail cleanly (structured error on stdout) instead of being
+  // SIGTERMed mid-stream.
+  if (Number.isInteger(options.timeoutMs) && options.timeoutMs > 20000) {
+    args.push("--timeout-ms", String(options.timeoutMs - 10000));
+  }
   return args;
 }
 
@@ -50,7 +56,7 @@ function summarizeEvents(stdoutText) {
 }
 
 async function captureRawEvents(scriptPath, prompt, options, timeoutMs, env) {
-  const args = buildBaseArgs(scriptPath, prompt, options);
+  const args = buildBaseArgs(scriptPath, prompt, { ...options, timeoutMs });
   args.push("--json");
   const commandResult = await runCommand("node", args, { timeoutMs, env });
   if (commandResult.timedOut) {
@@ -88,7 +94,7 @@ async function runYwEnhance({ prompt, history, scriptPath, timeoutMs, noSearch, 
   }
 
   const startedAt = Date.now();
-  const args = buildBaseArgs(scriptPath, prompt, { history, noSearch });
+  const args = buildBaseArgs(scriptPath, prompt, { history, noSearch, timeoutMs });
   const commandResult = await runCommand("node", args, { timeoutMs, env });
   const durationMs = Date.now() - startedAt;
 

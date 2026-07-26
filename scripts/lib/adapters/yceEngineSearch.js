@@ -119,7 +119,18 @@ async function runYceEngineSearch({
   if (Number.isInteger(hotspotMaxBytes)) args.push("--hotspot-max-bytes", String(hotspotMaxBytes));
   if (Number.isInteger(bootstrapMaxTurns)) args.push("--bootstrap-max-turns", String(bootstrapMaxTurns));
   if (Number.isInteger(bootstrapMaxCommands)) args.push("--bootstrap-max-commands", String(bootstrapMaxCommands));
-  if (Number.isInteger(timeoutMs)) args.push("--timeout-ms", String(timeoutMs));
+  // The engine gets a smaller internal budget than the subprocess kill timer,
+  // so on timeout it can still flush its structured JSON (partial results,
+  // quota codes, diagnostics) before SIGTERM. Equal budgets made SIGTERM win
+  // every race and every timeout surfaced as a bare TIMEOUT with no output.
+  const ENGINE_BUDGET_HEADROOM_MS = 10000;
+  const MIN_ENGINE_BUDGET_MS = 30000;
+  if (Number.isInteger(timeoutMs)) {
+    const engineTimeoutMs = timeoutMs > MIN_ENGINE_BUDGET_MS + ENGINE_BUDGET_HEADROOM_MS
+      ? timeoutMs - ENGINE_BUDGET_HEADROOM_MS
+      : timeoutMs;
+    args.push("--timeout-ms", String(engineTimeoutMs));
+  }
   args.push(bootstrapEnabled === false ? "--no-bootstrap" : "--bootstrap-enabled");
 
   const startedAt = Date.now();
@@ -138,20 +149,29 @@ async function runYceEngineSearch({
     result.diagnostics = payload.diagnostics && typeof payload.diagnostics === "object" ? payload.diagnostics : null;
   }
 
+  const failWithLocalFallback = (code, message) => {
+    const error = buildError("yce-engine", code, message);
+    if (isLocalFallbackEnabled(env)) {
+      const fallback = runLocalSearch({ query, cwd, maxResults });
+      if (fallback.search.result_present) {
+        fallback.search.raw_stdout = [
+          fallback.search.raw_stdout,
+          "",
+          "Remote yce-engine failed; local fallback was used.",
+          `Remote error: ${message}`,
+        ].join("\n");
+        return { search: fallback.search, error, durationMs };
+      }
+    }
+    return { search: result, error, durationMs };
+  };
+
   if (commandResult.timedOut) {
-    return {
-      search: result,
-      error: buildError("yce-engine", "TIMEOUT", `yce-engine search timed out after ${timeoutMs}ms.`),
-      durationMs,
-    };
+    return failWithLocalFallback("TIMEOUT", `yce-engine search timed out after ${timeoutMs}ms.`);
   }
 
   if (commandResult.spawnError) {
-    return {
-      search: result,
-      error: buildError("yce-engine", "EXEC_ERROR", commandResult.spawnError.message),
-      durationMs,
-    };
+    return failWithLocalFallback("EXEC_ERROR", commandResult.spawnError.message);
   }
 
   if (commandResult.exitCode === 0) {
