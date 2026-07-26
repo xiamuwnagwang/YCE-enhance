@@ -602,6 +602,130 @@ test("a lease that served no calls sends no receipt on release", async (t) => {
   assert.equal(reportCalls, 0, "unused lease should not emit a usage receipt");
 });
 
+test("structured relay 401 is preserved in per-call usage instead of blaming the upstream key", async (t) => {
+  const previousFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = previousFetch;
+  });
+  const reports = [];
+  let streamCalls = 0;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith("/yce/usage")) {
+      reports.push(JSON.parse(String(init?.body || "{}")));
+      return new Response(JSON.stringify({ success: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    streamCalls += 1;
+    return new Response(JSON.stringify({
+      error: "lease stream call limit reached; acquire a new lease",
+      code: "LEASE_CALL_LIMIT",
+      source: "relay",
+    }), {
+      status: 401,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  const usageContext = {
+    keyId: "key-1",
+    leaseId: "lease-1",
+    relayUrl: "https://relay.invalid",
+    relayToken: "token",
+    usageMode: "per_call_v1",
+  };
+
+  await assert.rejects(
+    __test.streamingRequest(Buffer.from("request"), 1000, 0, usageContext),
+    (error) => error?.code === "AUTH_ERROR" &&
+      error?.details?.relayCode === "LEASE_CALL_LIMIT" &&
+      error?.details?.errorSource === "relay",
+  );
+  assert.equal(streamCalls, 1);
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].event, "code_search_call");
+  assert.equal(reports[0].call_seq, 1);
+  assert.equal(reports[0].error_code, "LEASE_CALL_LIMIT");
+  assert.equal(reports[0].error_source, "relay");
+});
+
+test("usage requires a 2xx acknowledgement and retries transient 5xx responses", async (t) => {
+  const previousFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = previousFetch;
+  });
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls < 3) {
+      return new Response(JSON.stringify({ error: "temporary failure" }), {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  const usageContext = {
+    keyId: "key-1",
+    leaseId: "lease-retry",
+    relayUrl: "https://relay.invalid",
+    relayToken: "token",
+  };
+  __test.accumulateLeaseUsage(usageContext, { statusCode: 200, durationMs: 100 });
+  __test.releaseLeaseUsage(usageContext);
+  await __test.flushUsageReports();
+  assert.equal(calls, 3);
+  assert.equal(usageContext.usageReported, true);
+  assert.equal(usageContext.lastUsageError, "");
+});
+
+test("per-call mode keeps mixed outcomes and releases the lease separately", async (t) => {
+  const previousFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = previousFetch;
+  });
+  const reports = [];
+  globalThis.fetch = async (_url, init) => {
+    reports.push(JSON.parse(String(init?.body || "{}")));
+    return new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  const usageContext = {
+    keyId: "key-1",
+    leaseId: "lease-mixed",
+    relayUrl: "https://relay.invalid",
+    relayToken: "token",
+    usageMode: "per_call_v1",
+  };
+  __test.accumulateLeaseUsage(usageContext, { statusCode: 200, durationMs: 300 });
+  __test.accumulateLeaseUsage(usageContext, { statusCode: 200, durationMs: 400 });
+  await __test.reportLeaseFailure(usageContext, {
+    statusCode: 503,
+    errorMessage: "upstream unavailable",
+    durationMs: 500,
+  });
+  const state = { relayManaged: true, apiKey: "k", jwt: "j", usageContext };
+  __test.clearRelayCredentialState(state);
+  await __test.flushUsageReports();
+
+  assert.deepEqual(reports.map((report) => report.event), [
+    "code_search_call",
+    "code_search_call",
+    "code_search_call",
+    "lease_release",
+  ]);
+  assert.deepEqual(reports.slice(0, 3).map((report) => report.call_seq), [1, 2, 3]);
+  assert.deepEqual(reports.slice(0, 3).map((report) => report.status_code), [200, 200, 503]);
+  assert.equal(usageContext.usageStats.successCalls, 2);
+  assert.equal(usageContext.usageStats.failureCalls, 1);
+  assert.equal(usageContext.usageStats.totalDurationMs, 1200);
+});
+
 test("stale reused lease heals via one re-lease instead of failing the search", async (t) => {
   const previous = process.env.YCE_LEASE_REUSE;
   delete process.env.YCE_LEASE_REUSE;
@@ -629,7 +753,11 @@ test("stale reused lease heals via one re-lease instead of failing the search", 
     requests += 1;
     // Simulate server-side lease revocation on the second call of lease-1.
     if (usageContext.leaseId === "lease-1" && (usageContext.usageStats?.calls || 0) > 0) {
-      throw new __test.YceEngineError("HTTP 401", "AUTH_ERROR", { status: 401 });
+      throw new __test.YceEngineError("lease stream call limit reached", "AUTH_ERROR", {
+        status: 401,
+        relayCode: "LEASE_CALL_LIMIT",
+        errorSource: "relay",
+      });
     }
     __test.accumulateLeaseUsage(usageContext, { statusCode: 200, durationMs: 100 });
     return Buffer.from("ok");
@@ -650,6 +778,55 @@ test("stale reused lease heals via one re-lease instead of failing the search", 
   assert.equal(second.toString(), "ok");
   assert.equal(leaseCalls, 2, "stale lease should trigger exactly one re-lease");
   assert.equal(state.usageContext?.leaseId, "lease-2", "healed lease should be kept for the next turn");
+});
+
+test("structured relay lease error heals once even before the first stream succeeds", async (t) => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ success: true }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+  t.after(async () => {
+    await __test.flushUsageReports();
+    globalThis.fetch = previousFetch;
+  });
+  const state = { relayManaged: true, apiKey: null, jwt: null, usageContext: null };
+  let leaseCalls = 0;
+  const leaseCredential = async () => {
+    leaseCalls += 1;
+    return {
+      apiKey: `key-${leaseCalls}-secret-value-that-is-long-enough`,
+      keyId: `key-${leaseCalls}`,
+      leaseId: `lease-${leaseCalls}`,
+      relayUrl: "https://relay.invalid",
+      relayToken: "token",
+      leaseExpiresAt: new Date(Date.now() + 120_000).toISOString(),
+      leaseReusable: true,
+      usageMode: "per_call_v1",
+    };
+  };
+  const result = await __test.streamingRequestWithRelayFailover({
+    credentialState: state,
+    buildProto: () => Buffer.from("request"),
+    leaseCredential,
+    getJwt: async () => "jwt",
+    request: async (_proto, _timeout, _retries, usageContext) => {
+      if (usageContext.leaseId === "lease-1") {
+        throw new __test.YceEngineError("invalid or expired lease", "AUTH_ERROR", {
+          status: 401,
+          relayCode: "LEASE_INVALID",
+          errorSource: "relay",
+        });
+      }
+      __test.accumulateLeaseUsage(usageContext, { statusCode: 200, durationMs: 100 });
+      return Buffer.from("ok");
+    },
+    sleep: async () => {},
+    random: () => 0,
+  });
+  assert.equal(result.toString(), "ok");
+  assert.equal(leaseCalls, 2);
+  assert.equal(state.usageContext?.leaseId, "lease-2");
 });
 
 test("first-call AUTH_ERROR on a fresh lease still fails fast (no heal loop)", async (t) => {

@@ -72,10 +72,15 @@ function _classifyError(err) {
   // HTTP status-based classification
   if (err.status) {
     const s = err.status;
-    if (s === 413) return new YceEngineError(err.message, "PAYLOAD_TOO_LARGE", { status: s });
-    if (s === 429) return new YceEngineError(err.message, "RATE_LIMITED", { status: s });
-    if (s === 401 || s === 403) return new YceEngineError(err.message, "AUTH_ERROR", { status: s });
-    return new YceEngineError(err.message, "SERVER_ERROR", { status: s });
+    const details = {
+      status: s,
+      relayCode: String(err.relayCode || "").trim() || undefined,
+      errorSource: String(err.errorSource || "").trim() || undefined,
+    };
+    if (s === 413) return new YceEngineError(err.message, "PAYLOAD_TOO_LARGE", details);
+    if (s === 429) return new YceEngineError(err.message, "RATE_LIMITED", details);
+    if (s === 401 || s === 403) return new YceEngineError(err.message, "AUTH_ERROR", details);
+    return new YceEngineError(err.message, "SERVER_ERROR", details);
   }
 
   const causeCode = _extractCauseCode(err);
@@ -1029,6 +1034,7 @@ async function _requestRelayLease({
         maxStreamCalls: Number.isFinite(Number(payload?.max_stream_calls)) && Number(payload.max_stream_calls) > 0
           ? Number(payload.max_stream_calls)
           : undefined,
+        usageMode: String(payload?.usage_mode || "").trim() || undefined,
       };
     }
     return null;
@@ -1129,6 +1135,7 @@ function _usageContextFromLease(leased) {
     leaseExpiresAt: leased.leaseExpiresAt || "",
     serverAllowsReuse: leased.leaseReusable,
     maxStreamCalls: leased.maxStreamCalls,
+    usageMode: leased.usageMode,
   };
 }
 
@@ -1160,45 +1167,84 @@ function _extractStreamError(data) {
   return null;
 }
 
-async function _reportYceUsage(usageContext, { statusCode = null, errorMessage = "", durationMs = null, calls = null } = {}) {
-  if (!usageContext?.relayUrl || !usageContext?.relayToken || !usageContext?.keyId) return;
+async function _httpErrorFromResponse(response) {
+  let payload = {};
   try {
-    await fetch(`${usageContext.relayUrl}/yce/usage`, {
-      method: "POST",
-      headers: {
-        "Accept": "application/json",
-        "Authorization": `Bearer ${usageContext.relayToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        key_id: usageContext.keyId,
-        lease_id: usageContext.leaseId || "",
-        event: "code_search",
-        status_code: typeof statusCode === "number" ? statusCode : null,
-        error_message: String(errorMessage || "").slice(0, 1000),
-        duration_ms: typeof durationMs === "number" ? durationMs : null,
-        // Number of streaming calls this receipt covers (lease reuse batches
-        // several calls into one receipt); lets the server keep per-call
-        // latency samples honest. Older servers ignore unknown fields.
-        calls: typeof calls === "number" && calls > 0 ? calls : null,
-      }),
-      signal: AbortSignal.timeout(3000),
-    });
+    const contentType = String(response?.headers?.get?.("content-type") || "").toLowerCase();
+    if (contentType.includes("json")) payload = await response.json();
   } catch {
-    // Usage reporting must never break local code search.
+    payload = {};
   }
+  const relayCode = String(payload?.code || "").trim();
+  const errorSource = String(payload?.source || "").trim();
+  const message = String(payload?.error || payload?.message || `HTTP ${response.status}`).trim() ||
+    `HTTP ${response.status}`;
+  const error = new Error(message);
+  error.status = response.status;
+  error.relayCode = relayCode;
+  error.errorSource = errorSource;
+  return error;
 }
 
-// The relay treats /yce/usage as the LEASE RELEASE RECEIPT: the server marks
-// the lease completed the moment a report for its lease_id arrives, and any
-// later call on that lease gets HTTP 401. Usage must therefore be reported
-// once per LEASE, not once per streaming call:
-//   - success outcomes accumulate on the usage context;
-//   - the receipt is sent (in the background) when the lease is dropped —
-//     replaced, expired, failed over, or at end of search;
-//   - error paths report immediately and mark the context reported, because
-//     the lease is being abandoned right there anyway.
-// search() flushes pending receipts before returning so none outlive the CLI.
+async function _reportYceUsage(usageContext, {
+  event = "code_search",
+  callSeq = null,
+  statusCode = null,
+  errorMessage = "",
+  errorCode = "",
+  errorSource = "",
+  durationMs = null,
+  calls = null,
+} = {}) {
+  if (!usageContext?.relayUrl || !usageContext?.relayToken || !usageContext?.keyId) return;
+  const body = JSON.stringify({
+    key_id: usageContext.keyId,
+    lease_id: usageContext.leaseId || "",
+    event,
+    call_seq: typeof callSeq === "number" && callSeq > 0 ? callSeq : null,
+    status_code: typeof statusCode === "number" ? statusCode : null,
+    error_message: String(errorMessage || "").slice(0, 1000),
+    error_code: String(errorCode || "").slice(0, 128),
+    error_source: String(errorSource || "").slice(0, 32),
+    duration_ms: typeof durationMs === "number" ? durationMs : null,
+    calls: typeof calls === "number" && calls > 0 ? calls : null,
+  });
+  let lastError = "";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await fetch(`${usageContext.relayUrl}/yce/usage`, {
+        method: "POST",
+        headers: {
+          "Accept": "application/json",
+          "Authorization": `Bearer ${usageContext.relayToken}`,
+          "Content-Type": "application/json",
+        },
+        body,
+        signal: AbortSignal.timeout(3000),
+      });
+      if (response.ok) {
+        usageContext.lastUsageError = "";
+        return true;
+      }
+      const payload = await response.json().catch(() => ({}));
+      lastError = String(payload?.error || `HTTP ${response.status}`);
+      // 4xx means the receipt itself is invalid and retrying cannot repair it.
+      if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) {
+        break;
+      }
+    } catch (error) {
+      lastError = error?.message || String(error);
+    }
+    if (attempt < 2) await _sleep(150 * (2 ** attempt));
+  }
+  usageContext.lastUsageError = lastError || "usage receipt was not acknowledged";
+  return false;
+}
+
+// usage_mode=per_call_v1 separates telemetry from release: every logical call
+// reports its own outcome, and lease_release is sent only when the search drops
+// the lease. Older servers omit the capability, so the client preserves their
+// lease-scoped aggregate receipt. search() flushes all reports before return.
 const _pendingUsageReports = new Set();
 
 function _reportYceUsageBackground(usageContext, info) {
@@ -1206,6 +1252,7 @@ function _reportYceUsageBackground(usageContext, info) {
     .catch(() => {})
     .finally(() => _pendingUsageReports.delete(pending));
   _pendingUsageReports.add(pending);
+  return pending;
 }
 
 async function _flushUsageReports() {
@@ -1214,39 +1261,103 @@ async function _flushUsageReports() {
   }
 }
 
-function _accumulateLeaseUsage(usageContext, { statusCode = null, durationMs = null } = {}) {
+function _accumulateLeaseUsage(usageContext, {
+  statusCode = null,
+  durationMs = null,
+  errorMessage = "",
+  errorCode = "",
+  errorSource = "",
+} = {}) {
   if (!usageContext) return;
   const stats = usageContext.usageStats || (usageContext.usageStats = {
     calls: 0,
+    successCalls: 0,
+    failureCalls: 0,
     lastStatusCode: null,
+    lastErrorMessage: "",
+    lastErrorCode: "",
+    lastErrorSource: "",
     totalDurationMs: 0,
   });
   stats.calls += 1;
   if (typeof statusCode === "number") stats.lastStatusCode = statusCode;
   if (typeof durationMs === "number") stats.totalDurationMs += durationMs;
+  if (String(errorMessage || "") || (typeof statusCode === "number" && statusCode >= 400)) {
+    stats.failureCalls += 1;
+    stats.lastErrorMessage = String(errorMessage || "");
+    stats.lastErrorCode = String(errorCode || "");
+    stats.lastErrorSource = String(errorSource || "");
+  } else {
+    stats.successCalls += 1;
+  }
+  if (usageContext.usageMode === "per_call_v1") {
+    return _reportYceUsageBackground(usageContext, {
+      event: "code_search_call",
+      callSeq: stats.calls,
+      statusCode,
+      errorMessage,
+      errorCode,
+      errorSource,
+      durationMs,
+      calls: 1,
+    });
+  }
 }
 
-// Send the lease's single usage receipt. Safe to call more than once — only
-// the first call reports (the server would flag duplicates otherwise).
-function _releaseLeaseUsage(usageContext, override = null) {
-  if (!usageContext || usageContext.usageReported) return;
-  const stats = usageContext.usageStats;
-  if (!override && (!stats || stats.calls === 0)) return;
-  usageContext.usageReported = true;
-  _reportYceUsageBackground(usageContext, override || {
+function _legacyLeaseUsageInfo(usageContext) {
+  const stats = usageContext?.usageStats;
+  if (!stats || stats.calls === 0) return null;
+  return {
+    event: "code_search",
     statusCode: stats.lastStatusCode,
-    errorMessage: "",
+    errorMessage: stats.lastErrorMessage,
+    errorCode: stats.lastErrorCode,
+    errorSource: stats.lastErrorSource,
     durationMs: stats.totalDurationMs > 0 ? stats.totalDurationMs : null,
     calls: stats.calls,
+  };
+}
+
+// Release the reusable lease exactly once. New servers receive a dedicated
+// lease_release event; old servers keep the legacy aggregate code_search
+// receipt, which still doubles as release.
+function _releaseLeaseUsage(usageContext, override = null) {
+  if (!usageContext || usageContext.usageReported || usageContext.usageReportPending) return;
+  const info = usageContext.usageMode === "per_call_v1"
+    ? { event: "lease_release" }
+    : (override || _legacyLeaseUsageInfo(usageContext));
+  if (!info) return;
+  const pending = _reportYceUsageBackground(usageContext, info);
+  usageContext.usageReportPending = pending;
+  pending.then((acknowledged) => {
+    if (acknowledged) usageContext.usageReported = true;
+  }).finally(() => {
+    if (usageContext.usageReportPending === pending) usageContext.usageReportPending = null;
   });
 }
 
-// Error-path receipt: report now, awaited, and mark the context so the
-// release path doesn't double-report the same lease.
+// Record the failing logical call. Per-call mode leaves the lease open until
+// the caller clears it; legacy mode sends the aggregate receipt immediately.
 async function _reportLeaseFailure(usageContext, info) {
-  if (!usageContext || usageContext.usageReported) return;
-  usageContext.usageReported = true;
-  await _reportYceUsage(usageContext, info);
+  if (!usageContext) return;
+  const rawError = info?.error;
+  const classified = rawError ? _classifyError(rawError) : null;
+  const normalizedInfo = {
+    ...info,
+    statusCode: info?.statusCode ?? classified?.details?.status ?? rawError?.status ?? null,
+    errorMessage: info?.errorMessage || classified?.message || rawError?.message || "request failed",
+    errorCode: info?.errorCode || classified?.details?.relayCode || rawError?.relayCode || "",
+    errorSource: info?.errorSource || classified?.details?.errorSource || rawError?.errorSource || "",
+  };
+  delete normalizedInfo.error;
+  const pending = _accumulateLeaseUsage(usageContext, normalizedInfo);
+  if (usageContext.usageMode === "per_call_v1") {
+    await pending;
+    return;
+  }
+  if (usageContext.usageReported) return;
+  const acknowledged = await _reportYceUsage(usageContext, _legacyLeaseUsageInfo(usageContext));
+  if (acknowledged) usageContext.usageReported = true;
 }
 
 // ─── JWT Cache ──────────────────────────────────────────────
@@ -1336,8 +1447,7 @@ async function _unaryRequest(url, protoBytes, compress = true, usageContext = nu
         const arrayBuf = await resp.arrayBuffer();
         return Buffer.from(arrayBuf);
       }
-      const err = new Error(`HTTP ${resp.status}`);
-      err.status = resp.status;
+      const err = await _httpErrorFromResponse(resp);
       classified = _classifyError(err);
     } catch (error) {
       classified = _classifyError(error);
@@ -1408,6 +1518,8 @@ async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2, 
   let lastErr;
   let lastStatus = null;
   let lastErrorMessage = "request failed";
+  let lastErrorCode = "";
+  let lastErrorSource = "";
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       // The server's per-lease call cap counts every POST, retries included;
@@ -1415,11 +1527,12 @@ async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2, 
       if (usageContext) usageContext.attempts = (usageContext.attempts || 0) + 1;
       const resp = await doFetch();
       if (!resp.ok) {
-        const err = new Error(`HTTP ${resp.status}`);
-        err.status = resp.status;
+        const err = await _httpErrorFromResponse(resp);
         lastErr = err;
         lastStatus = resp.status;
         lastErrorMessage = err.message;
+        lastErrorCode = err.relayCode || "";
+        lastErrorSource = err.errorSource || "";
         // 429 is a capacity signal for one bounded cross-key retry. Other 4xx
         // failures are client/auth errors and must not be retried on another key.
         if (resp.status === 429 || (resp.status >= 400 && resp.status < 500)) break;
@@ -1454,6 +1567,8 @@ async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2, 
       lastStatus = typeof e?.status === "number" ? e.status : null;
       lastErrorMessage = e?.message || e?.code || "request failed";
       const classified = _classifyError(e);
+      lastErrorCode = classified?.details?.relayCode || e?.relayCode || "";
+      lastErrorSource = classified?.details?.errorSource || e?.errorSource || "";
       if (classified.code === "AUTH_ERROR" || classified.code === "PAYLOAD_TOO_LARGE") break;
       if (attempt < maxRetries && await backoffOrGiveUp(attempt)) continue;
       break;
@@ -1463,6 +1578,8 @@ async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2, 
   await _reportLeaseFailure(usageContext, {
     statusCode: lastStatus,
     errorMessage: lastErrorMessage,
+    errorCode: classified?.details?.relayCode || lastErrorCode,
+    errorSource: classified?.details?.errorSource || lastErrorSource,
     durationMs: Date.now() - logicalStartedAt,
   });
   classified.__yceUsageReported = true;
@@ -1500,6 +1617,17 @@ function _isCrossKeyRetryable(error) {
   });
 }
 
+function _isRelayLeaseLifecycleError(error) {
+  if (!error || error?.details?.errorSource !== "relay") return false;
+  return new Set([
+    "LEASE_REQUIRED",
+    "LEASE_INVALID",
+    "LEASE_INACTIVE",
+    "LEASE_EXPIRED",
+    "LEASE_CALL_LIMIT",
+  ]).has(String(error?.details?.relayCode || ""));
+}
+
 async function _streamingRequestWithRelayFailover({
   credentialState,
   buildProto,
@@ -1532,7 +1660,17 @@ async function _streamingRequestWithRelayFailover({
     try {
       credentialState.jwt = await getJwt(leased.apiKey, credentialState.usageContext);
     } catch (error) {
+      const classified = _classifyError(error);
+      if (_isRelayLeaseLifecycleError(classified) && options.leaseLifecycleRetry !== true) {
+        _clearRelayCredentialState(credentialState);
+        return ensureCredential({
+          retryAttempt: 0,
+          forceNew: true,
+          leaseLifecycleRetry: true,
+        });
+      }
       await _reportLeaseFailure(credentialState.usageContext, {
+        error,
         statusCode: error?.status || 401,
         errorMessage: error?.message || "failed to fetch JWT",
       });
@@ -1543,11 +1681,9 @@ async function _streamingRequestWithRelayFailover({
 
   await ensureCredential({ retryAttempt: 0, forceNew: true });
   const failedKeyId = credentialState.usageContext?.keyId || "";
-  // A reused lease can be revoked server-side at any time (restart, Redis
-  // flush, per-lease call cap). That surfaces as AUTH_ERROR on a lease that
-  // already served calls — heal by re-leasing once instead of failing the
-  // search. A first-call AUTH_ERROR is a real credential problem and rethrows.
-  const wasReusedLease = (credentialState.usageContext?.usageStats?.calls || 0) > 0;
+  // Current relays return structured lease lifecycle errors. Those are safe to
+  // heal with one fresh lease even before the first stream (for example Redis
+  // restarted after lease issue). A bare/upstream 401 is never re-leased.
   try {
     const data = await request(
       buildProto(credentialState.apiKey, credentialState.jwt),
@@ -1563,8 +1699,7 @@ async function _streamingRequestWithRelayFailover({
     return data;
   } catch (error) {
     const staleLease = credentialState.relayManaged &&
-      wasReusedLease &&
-      error?.code === "AUTH_ERROR";
+      _isRelayLeaseLifecycleError(error);
     if (staleLease) {
       _clearRelayCredentialState(credentialState);
       await ensureCredential({ retryAttempt: 0, forceNew: true });
@@ -1613,6 +1748,7 @@ async function _streamingRequestWithRelayFailover({
   } catch (error) {
     if (!error?.__yceUsageReported && !credentialState.jwt) {
       await _reportLeaseFailure(credentialState.usageContext, {
+        error,
         statusCode: error?.status || 401,
         errorMessage: error?.message || "failed to fetch JWT",
       });
@@ -2305,17 +2441,33 @@ async function _searchImpl({
   }
   if (!jwt) {
     log("Fetching JWT...");
-    try {
-      jwt = await getCachedJwt(apiKey, initialUsageContext);
-    } catch (error) {
-      if (relayManaged) {
-        await _reportLeaseFailure(initialUsageContext, {
-          statusCode: error?.status || 401,
-          errorMessage: error?.message || "failed to fetch JWT",
-        });
-        _clearLeasedRelay(initialUsageContext?.leaseId || "");
+    for (let leaseLifecycleRetry = 0; ; leaseLifecycleRetry++) {
+      try {
+        jwt = await getCachedJwt(apiKey, initialUsageContext);
+        break;
+      } catch (error) {
+        const classified = _classifyError(error);
+        if (relayManaged && leaseLifecycleRetry === 0 && _isRelayLeaseLifecycleError(classified)) {
+          _releaseLeaseUsage(initialUsageContext);
+          _clearLeasedRelay(initialUsageContext?.leaseId || "");
+          const replacement = await _leaseRelayCredential({ retryAttempt: 0, forceNew: true });
+          if (replacement?.apiKey && replacement?.keyId) {
+            apiKey = replacement.apiKey;
+            initialUsageContext = _usageContextFromLease(replacement);
+            continue;
+          }
+        }
+        if (relayManaged) {
+          await _reportLeaseFailure(initialUsageContext, {
+            error,
+            statusCode: error?.status || 401,
+            errorMessage: error?.message || "failed to fetch JWT",
+          });
+          _releaseLeaseUsage(initialUsageContext);
+          _clearLeasedRelay(initialUsageContext?.leaseId || "");
+        }
+        throw error;
       }
-      throw error;
     }
   }
   const credentialState = {
@@ -2357,6 +2509,7 @@ async function _searchImpl({
         credentialState.jwt = await getCachedJwt(alternate.apiKey, credentialState.usageContext);
       } catch (error) {
         await _reportLeaseFailure(credentialState.usageContext, {
+          error,
           statusCode: error?.status || 401,
           errorMessage: error?.message || "failed to fetch JWT",
         });
