@@ -11,6 +11,17 @@ import { join, resolve, relative, sep, basename, isAbsolute, win32 } from "node:
 import { promisify } from "node:util";
 import { buildDirectoryTree } from "./tree-builder.mjs";
 import { resolveRipgrepPath } from "./ripgrep.mjs";
+import {
+  buildPowerShellProcessQueryScript,
+  classifyPowerShellCommand,
+  parseProcessFilterJson,
+} from "./windows-process-command.mjs";
+
+export {
+  buildPowerShellProcessQueryScript,
+  classifyPowerShellCommand,
+  parseProcessFilterJson,
+} from "./windows-process-command.mjs";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -37,6 +48,7 @@ function readIntEnv(name, defaultValue, opts = {}) {
 
 const RESULT_MAX_LINES = readIntEnv("FC_RESULT_MAX_LINES", 50, { min: 1, max: 500 });
 const LINE_MAX_CHARS = readIntEnv("FC_LINE_MAX_CHARS", 250, { min: 20, max: 10000 });
+const POWERSHELL_TIMEOUT_MS = readIntEnv("YCE_POWERSHELL_TIMEOUT_MS", 10000, { min: 1000, max: 60000 });
 
 export class ToolExecutor {
   /**
@@ -421,6 +433,99 @@ export class ToolExecutor {
     return out || "(no matches)";
   }
 
+  _preparePowerShellInvocation(command) {
+    const classification = classifyPowerShellCommand(command);
+    if (!classification.ok) {
+      return { error: `Error: PowerShell command rejected: ${classification.reason}` };
+    }
+    if (process.platform !== "win32") {
+      return { error: "Error: the restricted PowerShell process query is available only on Windows" };
+    }
+
+    const configuredExecutable = String(process.env.YCE_POWERSHELL_PATH || "").trim();
+    const executable = configuredExecutable || "powershell.exe";
+    return {
+      classification,
+      executable,
+      args: [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        buildPowerShellProcessQueryScript(classification.command),
+      ],
+      options: {
+        cwd: this.root,
+        encoding: "utf-8",
+        maxBuffer: 10 * 1024 * 1024,
+        timeout: POWERSHELL_TIMEOUT_MS,
+        windowsHide: true,
+      },
+    };
+  }
+
+  _formatPowerShellOutput(stdout, stderr, expectedPids) {
+    if (!String(stdout || "").trim() && String(stderr || "").trim()) {
+      return `Error: PowerShell process query failed: ${ToolExecutor._truncate(String(stderr).trim())}`;
+    }
+
+    const records = parseProcessFilterJson(stdout || "", expectedPids);
+    return JSON.stringify(records);
+  }
+
+  _formatPowerShellError(error) {
+    const detail = String(error?.stderr || error?.message || "PowerShell process query failed").trim();
+    return `Error: PowerShell process query failed: ${ToolExecutor._truncate(detail)}`;
+  }
+
+  /**
+   * Execute the strictly allowlisted Windows process query.
+   *
+   * This is intentionally separate from the filesystem search commands. It
+   * never invokes a shell and never accepts a general PowerShell script.
+   *
+   * @param {unknown} command
+   * @returns {Promise<string>}
+   */
+  async powershell(command) {
+    const invocation = this._preparePowerShellInvocation(command);
+    if (invocation.error) return invocation.error;
+
+    try {
+      const { stdout, stderr } = await execFileAsync(
+        invocation.executable,
+        invocation.args,
+        invocation.options,
+      );
+      return this._formatPowerShellOutput(stdout, stderr, invocation.classification.pids);
+    } catch (error) {
+      return this._formatPowerShellError(error);
+    }
+  }
+
+  /**
+   * Synchronous counterpart kept for callers of execCommand(). The normal
+   * search loop uses execCommandAsync().
+   *
+   * @param {unknown} command
+   * @returns {string}
+   */
+  powershellSync(command) {
+    const invocation = this._preparePowerShellInvocation(command);
+    if (invocation.error) return invocation.error;
+
+    try {
+      const stdout = execFileSync(
+        invocation.executable,
+        invocation.args,
+        invocation.options,
+      );
+      return this._formatPowerShellOutput(stdout, "", invocation.classification.pids);
+    } catch (error) {
+      return this._formatPowerShellError(error);
+    }
+  }
+
   /**
    * Dispatch a command dict to the appropriate method (async).
    * Uses async rg for parallelism, sync for others (they are fast enough).
@@ -444,6 +549,8 @@ export class ToolExecutor {
           return this.ls(cmd.path, cmd.long_format || false, cmd.all || false);
         case "glob":
           return this.glob(cmd.pattern, cmd.path, cmd.type_filter || "all");
+        case "powershell":
+          return await this.powershell(cmd.command);
         default:
           return `Error: unknown command type '${t}'`;
       }
@@ -474,6 +581,8 @@ export class ToolExecutor {
           return this.ls(cmd.path, cmd.long_format || false, cmd.all || false);
         case "glob":
           return this.glob(cmd.pattern, cmd.path, cmd.type_filter || "all");
+        case "powershell":
+          return this.powershellSync(cmd.command);
         default:
           return `Error: unknown command type '${t}'`;
       }

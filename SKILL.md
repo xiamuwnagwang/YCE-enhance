@@ -1,6 +1,6 @@
 ---
 name: yce
-version: 2.3.1
+version: 2.3.2
 description: |
   当任务既需要把模糊需求说清楚，又需要去代码库里把实现找出来时使用。适用于"帮我看看这块逻辑在哪""优化任务后再搜代码""增强后检索""auto search""YCE"等场景。
   也在需要当前外部信息、多源事实核对、官方库文档、竞品/行业调研、公开仓库架构资料时使用联网能力（`--mode network` 或 `--with-network`）。
@@ -249,7 +249,7 @@ YCE 的 stdout 固定是 XML，不再输出 JSON。最重要的标签如下：
     <query><![CDATA[送给 yce 的检索词]]></query>
     <result><![CDATA[Path: src/...]]></result>
   </search>
-  <network-search/>
+  <network-search executed="false" success="false" result-present="false"/>
   <errors/>
 </yce>
 ```
@@ -382,7 +382,7 @@ YCE 调 `yw-enhance` 不是裸调用，而是固定这样拼：
 ```text
 config.yceEngineScript（默认 ./vendor/yce-engine/yce-engine.mjs）
   → node 子进程执行 yce-engine.mjs --project <cwd> --query <q>
-  → YCE semantic agent 在本地循环执行 rg/readfile/tree 收集上下文
+  → YCE semantic agent 在本地循环执行 rg/readfile/tree/ls/glob 收集上下文；Windows 进程兼容查询只允许严格白名单 PowerShell 命令
   → 返回文件路径 + 行号范围 + 建议 grep 关键词
   → 若 yce-engine 返回 resource_exhausted / 上游错误 / 空结果，且 `YCE_LOCAL_FALLBACK=true`，才启用 local fast fallback
 ```
@@ -412,7 +412,7 @@ config.yceEngineScript（默认 ./vendor/yce-engine/yce-engine.mjs）
 - fallback 会跳过 `.git`、`node_modules`、`dist`、`build`、`coverage`、`vendor`、真实 `.env` 等噪声/敏感路径。
 - 退出码 0 且输出含 `Found 0 relevant files` 时映射为 `EMPTY_RESULT`（命令成功但无结果）。
 - 若租约/鉴权失败，返回 `AUTH_ERROR`（优先检查 `YCE_RELAY_URL` / `YCE_RELAY_TOKEN`）。
-- 引擎在本地循环执行 rg/readfile/tree 收集上下文；远端只做推理，**不上传代码、不建服务端索引**。
+- 引擎在本地循环执行 rg/readfile/tree/ls/glob 收集上下文；如确有 Windows 进程兼容需求，只能调用严格白名单的 `Get-CimInstance Win32_Process` 查询，不开放通用 PowerShell；远端只做推理，**不上传代码、不建服务端索引**。
 - 默认配置会写入 `YCE_RELAY_URL=https://yce.aigy.de`；`YCE_RELAY_TOKEN` 是独立的 YCE 搜索密钥，不能和 `YCE_YOUWEN_TOKEN` 混用。
 - 排障时先看 `<meta><dependency-paths>` 里的 `yce-engine-script` 路径是否正确。
 

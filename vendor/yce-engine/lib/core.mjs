@@ -5,7 +5,7 @@
  *
  * Flow:
  *   query + tree → YCE semantic search API
- *   → YCE returns tool_calls (rg/readfile/tree/ls/glob, up to 8 parallel)
+ *   → YCE returns tool_calls (rg/readfile/tree/ls/glob, plus a strict Windows process query)
  *   → execute locally → send results back → repeat for N rounds
  *   → ANSWER: file paths + line ranges + suggested rg patterns
  */
@@ -242,6 +242,9 @@ directory, not \`.
   - tree: Display directory structure as a tree
     - Required: path (string)
     - Optional: levels (int)
+  - powershell: Windows-only process query; this is not a general shell
+    - Required: command (string)
+    - Allowed shapes: the exact legacy Get-CimInstance Win32_Process or the strict -Filter "ProcessId = ... OR ProcessId = ..." form
 
 # THINKING RULES
 - Think step-by-step. Plan, reason, and reflect before each tool call.
@@ -284,7 +287,7 @@ must change.
 # TOOL USE GUIDELINES
 - You must use a SINGLE restricted_exec call in your answer, that lets \
 you execute at most {max_commands} commands in a single turn. Each command must be \
-an object with a \`type\` field of \`rg\`, \`readfile\`, or \`tree\` and the appropriate fields for that type.
+an object with a \`type\` field of \`rg\`, \`readfile\`, \`tree\`, \`ls\`, \`glob\`, or the strictly allowlisted \`powershell\` process-query type and the appropriate fields for that type.
 - Example restricted_exec usage:
 [TOOL_CALLS]restricted_exec[ARGS]{{
   "command1": {{
@@ -636,7 +639,7 @@ async function _runBootstrapPhase({
 function _buildCommandSchema(n) {
   return {
     type: "object",
-    description: `Command ${n} to execute. Must be one of: rg, readfile, or tree.`,
+    description: `Command ${n} to execute. Must be one of: rg, readfile, tree, ls, glob, or the strictly allowlisted Windows powershell process query.`,
     oneOf: [
       {
         properties: {
@@ -683,6 +686,13 @@ function _buildCommandSchema(n) {
         },
         required: ["type", "pattern", "path"],
       },
+      {
+        properties: {
+          type: { type: "string", const: "powershell", description: "Run only the strict Windows process query; never provide a pipeline, semicolon, or another PowerShell statement." },
+          command: { type: "string", description: "Exact legacy Get-CimInstance Win32_Process or exact ProcessId filter query. No extra arguments or attached commands." },
+        },
+        required: ["type", "command"],
+      },
     ],
   };
 }
@@ -701,7 +711,7 @@ function getToolDefinitions(maxCommands = 8) {
       type: "function",
       function: {
         name: "restricted_exec",
-        description: "Execute restricted commands (rg, readfile, tree, ls, glob) in parallel.",
+        description: "Execute restricted commands (rg, readfile, tree, ls, glob, or the strict Windows process query) in parallel.",
         parameters: { type: "object", properties: props, required: ["command1"] },
       },
     },
@@ -1004,7 +1014,12 @@ async function _requestRelayLease({
         const shouldWaitOnce = attempt === 0 &&
           failure.retryAfterSeconds > 0 &&
           waitMs <= MAX_LEASE_WAIT_MS &&
-          (failure.code === "UPSTREAM_CAPACITY_BACKOFF" || failure.code === "RATE_LIMITED");
+          [
+            "UPSTREAM_CAPACITY_BACKOFF",
+            "RATE_LIMITED",
+            "POOL_BUSY",
+            "USER_BUSY",
+          ].includes(failure.code);
         if (shouldWaitOnce) {
           await sleep(waitMs);
           continue;
@@ -2428,6 +2443,13 @@ async function _searchImpl({
     } else {
       apiKey = String(process.env.YCE_API_KEY || "").trim();
       if (!apiKey) {
+        const relayToken = String(process.env.YCE_RELAY_TOKEN || "").trim();
+        if (relayToken) {
+          const detail = _lastRelayError || "relay key lease returned no usable key";
+          throw new Error(
+            `YCE relay key lease failed: ${detail}. Check YCE_RELAY_URL/YCE_RELAY_TOKEN and retry.`,
+          );
+        }
         throw new Error(
           "YCE API key not found. Configure YCE_RELAY_URL/YCE_RELAY_TOKEN (default relay: https://yce.aigy.de; YCE_RELAY_TOKEN must be a YCE search key) " +
           "or set YCE_API_KEY. Run yce-engine.mjs --check-key to verify relay connectivity.",
@@ -2770,6 +2792,8 @@ async function _searchImpl({
             newCommands.push({ type: "readfile", desc: `read ${shortFile}` });
           } else if (t === "tree" && cmd.path) {
             newCommands.push({ type: "tree", desc: `tree ${cmd.path}` });
+          } else if (t === "powershell" && cmd.command) {
+            newCommands.push({ type: "powershell", desc: "strict Windows process query" });
           }
         }
 

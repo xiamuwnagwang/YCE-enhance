@@ -966,7 +966,12 @@ function serializeForStdout(payload, pretty = false) {
     }
     pushLine(1, `</network-search>`);
   } else {
-    pushLine(1, `<network-search/>`);
+    // Keep the element in the XML contract, but make it explicit that the
+    // network stage was skipped rather than executed and returned no result.
+    pushLine(
+      1,
+      `<network-search executed="false" success="false" result-present="false"/>`,
+    );
   }
 
   if (Array.isArray(payload.errors) && payload.errors.length > 0) {
