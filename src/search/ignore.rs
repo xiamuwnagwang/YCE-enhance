@@ -56,7 +56,7 @@ impl IgnoreRules {
             .copied()
             .map(str::to_string)
             .chain(extra.iter().cloned())
-            .chain(read_ignore_file(&source)?.into_iter())
+            .chain(read_ignore_file(&source)?)
         {
             let pattern = pattern.trim();
             if pattern.is_empty() || pattern.contains('\0') || !seen.insert(pattern.to_string()) {
