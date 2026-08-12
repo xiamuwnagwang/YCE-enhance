@@ -25,6 +25,7 @@ function buildInvalidArgsResponse(message, config, cwd) {
     enhance: null,
     search: null,
     network_search: null,
+    plan: null,
     errors: [
       {
         source: "cli",
@@ -37,10 +38,11 @@ function buildInvalidArgsResponse(message, config, cwd) {
         enhance: 0,
         search: 0,
         network: 0,
+        plan: 0,
         total: 0,
       },
       dependency_paths: {
-        yw_enhance_script: config.youwenScript,
+        prompt_enhance_script: config.promptEnhanceScript,
         yce_engine_script: config.yceEngineScript,
       },
       timestamp: new Date().toISOString(),
@@ -85,14 +87,23 @@ function buildSearchOptions(args, config) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const config = loadRuntimeConfig();
+  const cwd = args.cwd ? ensureAbsolutePath(args.cwd) : process.cwd();
+
+  // 任务卡子命令：node scripts/yce.js task <show|list|check|done|new> ...
+  if (args._[0] === "task") {
+    const { runTaskCommand } = require("./lib/taskCli");
+    const outcome = runTaskCommand(args, cwd);
+    console.log(outcome.output);
+    process.exit(outcome.exitCode);
+  }
+
   const query = normalizeQuery(args);
   const mode = String(args.mode || config.defaultMode || "auto").toLowerCase();
-  const cwd = args.cwd ? ensureAbsolutePath(args.cwd) : process.cwd();
   const pretty = args["xml-pretty"] === true || args["json-pretty"] === true;
 
   if (args.help === true || args.h === true) {
     const payload = buildInvalidArgsResponse(
-      "Usage: node scripts/yce.js \"<query>\" [--mode auto|enhance|search|network] [--with-network] [--network-profile quick|balanced|exhaustive] [--library <name>] [--repo <owner/name>] [--history <text>] [--cwd <path>] [--xml-pretty] [--timeout-enhance-ms <n>] [--timeout-search-ms <n>] [--timeout-network-ms <n>] [--max-turns 1-5] [--max-commands 1-20] [--max-results 1-30] [--tree-depth 0-6] [--exclude <glob[,glob]>] [--repo-map-mode classic|bootstrap_hotspot] [--bootstrap-enabled true|false|--no-bootstrap] [--bootstrap-tree-depth 1-3] [--hotspot-top-k 0-8] [--hotspot-tree-depth 1-4] [--hotspot-max-bytes 16384-256000] [--bootstrap-max-turns 1-5] [--bootstrap-max-commands 1-20] [--no-search] [--raw-events] [--json-pretty (legacy alias)]",
+      "Usage: node scripts/yce.js \"<query>\" [--mode auto|enhance|search|network|plan] [--task <id>|--no-task] [--with-network] [--network-profile quick|balanced|exhaustive] [--library <name>] [--repo <owner/name>] [--history <text>] [--cwd <path>] [--xml-pretty] [--timeout-enhance-ms <n>] [--timeout-search-ms <n>] [--timeout-network-ms <n>] [--timeout-plan-ms <n>] [--with-search (plan)] [--search-context <text> (plan)] [--save <dir|file.md> (plan)] [--enable-web-search|--no-web-search (plan)] [--language zh-CN|en-US (plan)] [--plan-provider claude|openai|openai-responses|gemini] [--plan-base-url <url>] [--plan-token <token>] [--plan-model <model>] [--plan-temperature <n>] [--max-turns 1-5] [--max-commands 1-20] [--max-results 1-30] [--tree-depth 0-6] [--exclude <glob[,glob]>] [--repo-map-mode classic|bootstrap_hotspot] [--bootstrap-enabled true|false|--no-bootstrap] [--bootstrap-tree-depth 1-3] [--hotspot-top-k 0-8] [--hotspot-tree-depth 1-4] [--hotspot-max-bytes 16384-256000] [--bootstrap-max-turns 1-5] [--bootstrap-max-commands 1-20] [--no-search] [--raw-events] [--json-pretty (legacy alias)] | node scripts/yce.js task <show [id]|list|check <n> --evidence <text>|done [--force]|new --goal <text> [--accept <text>]...> [--task <id>] [--cwd <path>]",
       config,
       cwd
     );
@@ -100,7 +111,7 @@ async function main() {
     process.exit(0);
   }
 
-  if (!["auto", "enhance", "search", "network"].includes(mode)) {
+  if (!["auto", "enhance", "search", "network", "plan"].includes(mode)) {
     const payload = buildInvalidArgsResponse(`Unsupported mode: ${mode}`, config, cwd);
     console.log(serializeForStdout(payload, pretty));
     process.exit(1);
@@ -137,6 +148,38 @@ async function main() {
     console.log(serializeForStdout(payload, pretty));
     process.exit(1);
   }
+
+  const timeoutPlanMs = toPositiveInt(args["timeout-plan-ms"], config.timeoutPlanMs);
+  const planLanguage = typeof args.language === "string" ? args.language.trim() : "";
+  if (planLanguage && !["zh-CN", "en-US"].includes(planLanguage)) {
+    const payload = buildInvalidArgsResponse(
+      "language must be zh-CN or en-US.",
+      config,
+      cwd,
+    );
+    console.log(serializeForStdout(payload, pretty));
+    process.exit(1);
+  }
+  let planEnableWebSearch;
+  if (args["enable-web-search"] === true) {
+    planEnableWebSearch = true;
+  }
+  if (args["no-web-search"] === true) {
+    planEnableWebSearch = false;
+  }
+  const planCustomProviderFlags = {
+    provider: typeof args["plan-provider"] === "string" ? args["plan-provider"].trim() : "",
+    baseUrl: typeof args["plan-base-url"] === "string" ? args["plan-base-url"].trim() : "",
+    token: typeof args["plan-token"] === "string" ? args["plan-token"].trim() : "",
+    model: typeof args["plan-model"] === "string" ? args["plan-model"].trim() : "",
+    temperature: args["plan-temperature"],
+  };
+  const hasPlanProviderFlags = Boolean(
+    planCustomProviderFlags.provider ||
+      planCustomProviderFlags.baseUrl ||
+      planCustomProviderFlags.token ||
+      planCustomProviderFlags.model,
+  );
   let searchOptions;
   try {
     searchOptions = buildSearchOptions(args, config);
@@ -174,12 +217,26 @@ async function main() {
       timeoutEnhanceMs,
       timeoutSearchMs,
       timeoutNetworkMs,
+      timeoutPlanMs,
       withNetwork: args["with-network"] === true,
       networkOptions: {
         profile: networkProfile,
         library:
           typeof args.library === "string" ? args.library.trim() : "",
         repo: typeof args.repo === "string" ? args.repo.trim() : "",
+      },
+      planOptions: {
+        withSearch: args["with-search"] === true,
+        searchContext:
+          typeof args["search-context"] === "string" ? args["search-context"] : "",
+        enableWebSearch: planEnableWebSearch,
+        language: planLanguage,
+        customProvider: hasPlanProviderFlags ? planCustomProviderFlags : null,
+        savePath: typeof args.save === "string" ? args.save.trim() : "",
+      },
+      taskOptions: {
+        taskId: typeof args.task === "string" ? args.task.trim() : "",
+        noTask: args["no-task"] === true,
       },
       searchOptions,
       config,
@@ -231,6 +288,7 @@ async function main() {
       enhance: null,
       search: null,
       network_search: null,
+      plan: null,
       errors: [
         {
           source: "cli",
@@ -243,10 +301,11 @@ async function main() {
           enhance: 0,
           search: 0,
           network: 0,
+          plan: 0,
           total: 0,
         },
         dependency_paths: {
-          yw_enhance_script: config.youwenScript,
+          prompt_enhance_script: config.promptEnhanceScript,
           yce_engine_script: config.yceEngineScript,
         },
         timestamp: new Date().toISOString(),

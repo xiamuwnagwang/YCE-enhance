@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 /**
- * YCE 内置优问增强 CLI
+ * YCE 内置提示词增强 CLI
  *
- * 连接优问后端 API，提供完整的 4-Agent 流水线增强能力。
+ * 连接 YCE Relay，提供完整的 4-Agent 流水线增强能力。
  * 当前脚本作为 YCE 仓内入口，默认读取 YCE 根目录 `.env`。
  *
  * 流水线: Agent1(摘要) → Agent2(意图) → Agent3(搜索) → Agent4(综合)
@@ -15,10 +15,12 @@ const https = require("https");
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const { randomUUID } = require("crypto");
 
 // ==================== 配置 ====================
 
-const DEFAULT_API_URL = "https://a.aigy.de";
+const DEFAULT_API_URL = "https://yce.aigy.de";
+const MAX_INSTALLED_SKILLS = 256;
 
 function firstNonEmpty(...values) {
   for (const value of values) {
@@ -30,11 +32,11 @@ function firstNonEmpty(...values) {
 }
 
 function loadConfig() {
-  let apiUrl = firstNonEmpty(process.env.YCE_YOUWEN_API_URL, process.env.YOUWEN_API_URL) || DEFAULT_API_URL;
-  let mgrepApiKey = firstNonEmpty(process.env.YCE_YOUWEN_MGREP_API_KEY, process.env.YOUWEN_MGREP_API_KEY);
-  let token = firstNonEmpty(process.env.YCE_YOUWEN_TOKEN, process.env.YOUWEN_TOKEN);
-  let enhanceMode = firstNonEmpty(process.env.YCE_YOUWEN_ENHANCE_MODE, process.env.YOUWEN_ENHANCE_MODE) || "agent";
-  let enableSearch = firstNonEmpty(process.env.YCE_YOUWEN_ENABLE_SEARCH, process.env.YOUWEN_ENABLE_SEARCH) !== "false";
+  let apiUrl = DEFAULT_API_URL;
+  let token = "";
+  let enhanceMode = "agent";
+  let enableSearch = true;
+  const envValues = {};
 
   const envPath = path.join(__dirname, "..", ".env");
   if (fs.existsSync(envPath)) {
@@ -46,20 +48,47 @@ function loadConfig() {
       if (!m) continue;
       const [, key, rawVal] = m;
       const val = rawVal.replace(/^["']|["']$/g, "").trim();
-      if ((key === "YCE_YOUWEN_API_URL" || key === "YOUWEN_API_URL") && val) apiUrl = val;
-      if ((key === "YCE_YOUWEN_MGREP_API_KEY" || key === "YOUWEN_MGREP_API_KEY") && val) mgrepApiKey = val;
-      if ((key === "YCE_YOUWEN_TOKEN" || key === "YOUWEN_TOKEN") && val) token = val;
-      if ((key === "YCE_YOUWEN_ENHANCE_MODE" || key === "YOUWEN_ENHANCE_MODE") && val) enhanceMode = val;
-      if (key === "YCE_YOUWEN_ENABLE_SEARCH" || key === "YOUWEN_ENABLE_SEARCH") enableSearch = val !== "false";
+      envValues[key] = val;
+      if (key === "YCE_RELAY_URL" && val) apiUrl = val;
+      if (key === "YCE_RELAY_TOKEN" && val) token = val;
+      if (key === "YCE_PROMPT_ENHANCE_MODE" && val) enhanceMode = val;
+      if (key === "YCE_PROMPT_ENHANCE_ENABLE_SEARCH") enableSearch = val !== "false";
     }
+  }
+
+  // 进程环境用于一次性覆盖当前调用，优先级必须高于仓内 .env。
+  // 这样测试、本地 Relay 和 MCP 启动器无需改写持久化密钥配置。
+  apiUrl = firstNonEmpty(process.env.YCE_RELAY_URL, apiUrl) || DEFAULT_API_URL;
+  token = firstNonEmpty(process.env.YCE_RELAY_TOKEN, token);
+  enhanceMode = firstNonEmpty(process.env.YCE_PROMPT_ENHANCE_MODE, enhanceMode) || "agent";
+  const enableSearchOverride = firstNonEmpty(process.env.YCE_PROMPT_ENHANCE_ENABLE_SEARCH);
+  if (enableSearchOverride) enableSearch = enableSearchOverride !== "false";
+
+  // 增强侧 BYOK 自备模型（服务端 prompt_enhance_allow_custom_model 放行后才生效）。
+  const readByok = (key) => firstNonEmpty(process.env[key], envValues[key]);
+  const byokProvider = readByok("YCE_ENHANCE_PROVIDER");
+  const byokBaseUrl = readByok("YCE_ENHANCE_BASE_URL");
+  const byokToken = readByok("YCE_ENHANCE_TOKEN");
+  const byokModel = readByok("YCE_ENHANCE_MODEL");
+  let customProvider = null;
+  if (byokProvider || byokBaseUrl || byokToken || byokModel) {
+    customProvider = {
+      provider: byokProvider,
+      baseUrl: byokBaseUrl,
+      token: byokToken,
+      model: byokModel,
+    };
+    const temperature = Number(readByok("YCE_ENHANCE_TEMPERATURE"));
+    if (Number.isFinite(temperature)) customProvider.temperature = temperature;
+    if (readByok("YCE_ENHANCE_FORCE_STREAM") === "true") customProvider.forceStream = true;
   }
 
   return {
     apiUrl: apiUrl.replace(/\/+$/, ""),
-    mgrepApiKey,
     token,
     enhanceMode,
     enableSearch,
+    customProvider,
   };
 }
 
@@ -106,7 +135,13 @@ function postSSE(endpoint, body, onEvent, timeout = 300000, options = {}) {
       if (res.statusCode !== 200) {
         let data = "";
         res.on("data", (chunk) => { data += chunk; });
-        res.on("end", () => reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 500)}`)));
+        res.on("end", () => {
+          if (res.statusCode === 404) {
+            reject(new Error("线上 YCE 服务尚未部署该端点（HTTP 404）。请等待服务端发布该能力后重试。"));
+            return;
+          }
+          reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 500)}`));
+        });
         return;
       }
 
@@ -146,14 +181,131 @@ function postSSE(endpoint, body, onEvent, timeout = 300000, options = {}) {
   });
 }
 
+// ==================== 任务锚点（plan）解析 ====================
+
+/**
+ * 解析 <plan> 锚点块（紧凑标签 <g>/<t>/<d>，兼容完整标签 <goal>/<title>/<done>）。
+ * 与服务端 promptcore parsePlanBlock 的容错行为对齐。
+ */
+function parsePlanBlock(block) {
+  const pick = (source, tag) => {
+    const match = source.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "i"));
+    return match ? match[1].trim() : "";
+  };
+  const pickAll = (source, tag) => {
+    const values = [];
+    const pattern = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "gi");
+    let match;
+    while ((match = pattern.exec(source)) !== null) {
+      const value = match[1].trim();
+      if (value) values.push(value);
+    }
+    return values;
+  };
+
+  const goal = pick(block, "g") || pick(block, "goal");
+  const stages = [];
+  const stagePattern = /<stage>([\s\S]*?)<\/stage>/gi;
+  let stageMatch;
+  while ((stageMatch = stagePattern.exec(block)) !== null) {
+    const stageBlock = stageMatch[1];
+    const title = pick(stageBlock, "t") || pick(stageBlock, "title");
+    let accept = pickAll(stageBlock, "d");
+    if (accept.length === 0) accept = pickAll(stageBlock, "done");
+    if (!title && accept.length === 0) continue;
+    stages.push({ n: stages.length + 1, title, accept });
+  }
+  if (!goal) return null;
+  return { goal, stages };
+}
+
+/**
+ * 后端未升级时的正文兜底：若增强正文以 <plan>...</plan> 开头，
+ * 剥离锚点块并解析出 plan，保证两条路径拿到相同结果、正文无标签残留。
+ */
+function extractInlinePlan(answer) {
+  const text = String(answer || "");
+  const match = text.match(/^\s*<plan>([\s\S]*?)<\/plan>\s*/i);
+  if (!match) {
+    return { plan: null, body: text };
+  }
+  return {
+    plan: parsePlanBlock(match[1]),
+    body: text.slice(match[0].length),
+  };
+}
+
+function emitTaskPlan(taskPlan, asJson) {
+  if (!taskPlan || asJson) return;
+  console.log("<task-plan>");
+  console.log(JSON.stringify(taskPlan));
+  console.log("</task-plan>");
+}
+
 // ==================== 命令实现 ====================
 
 /**
+ * enhance --mode direct：单次 JSON 增强（无 Agent 管线、无技能推荐）。
+ * 使用 YCE Relay /yce/prompt-enhance/direct（Bearer YCE Key）。
+ */
+async function enhanceDirect(prompt, opts = {}) {
+  const token = opts.token || config.token;
+  if (!token) {
+    throw new Error("缺少 YCE Key：请设置 YCE_RELAY_TOKEN。");
+  }
+  const timeoutMs = Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0 ? opts.timeoutMs : 300000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const body = {
+      request_id: randomUUID(),
+      prompt,
+    };
+    if (opts.history) body.conversation_history = opts.history;
+    if (opts.language) body.language = opts.language;
+    if (config.customProvider) body.config = config.customProvider;
+    const response = await fetch(`${config.apiUrl}/yce/prompt-enhance/direct`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (response.status === 404) {
+        throw new Error(
+          "线上 YCE 服务尚未部署提示词增强端点（HTTP 404）。请等待服务端发布该能力后重试。",
+        );
+      }
+      throw new Error(
+        `HTTP ${response.status}: ${String(payload.error || payload.message || "").slice(0, 300)}${payload.code ? ` (${payload.code})` : ""}`,
+      );
+    }
+    const enhanced = String(payload.enhancedPrompt || "").trim();
+    if (!enhanced) {
+      throw new Error("direct 增强完成，但没有返回增强结果。");
+    }
+    if (opts.json) {
+      console.log(JSON.stringify([{ event: "complete", data: { enhancedPrompt: enhanced } }], null, 2));
+      return;
+    }
+    console.log("<enhanced>");
+    console.log(enhanced);
+    console.log("</enhanced>");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * enhance - 多 Agent 流水线增强
- * 使用 /api/skill/enhance (Bearer auth with token)
+ * 使用 YCE Relay /yce/prompt-enhance/agent（Bearer YCE Key）
  */
 async function enhance(prompt, opts = {}) {
-  // Respect .env defaults: YOUWEN_ENHANCE_MODE=disabled skips the pipeline
+  // Respect .env defaults: YCE_PROMPT_ENHANCE_MODE=disabled skips the pipeline
   if (config.enhanceMode === "disabled" && !opts.force) {
     console.log(prompt);
     return;
@@ -161,6 +313,9 @@ async function enhance(prompt, opts = {}) {
 
   const enableSearch = opts.noSearch === true ? false : config.enableSearch;
   const token = opts.token || config.token;
+  if (!token) {
+    throw new Error("缺少 YCE Key：请设置 YCE_RELAY_TOKEN。");
+  }
   // SSE timeout follows the caller's budget so the wrapper's kill timer never
   // fires before this request gives up cleanly. Default keeps standalone use.
   const sseTimeoutMs = Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0
@@ -168,6 +323,8 @@ async function enhance(prompt, opts = {}) {
     : 300000;
 
   const body = {
+    request_id: randomUUID(),
+    mode: "agent",
     prompt,
     conversation_history: opts.history || "",
     context_files: [],
@@ -181,17 +338,22 @@ async function enhance(prompt, opts = {}) {
   };
 
   // Optional fields
+  if (opts.language) {
+    body.language = opts.language;
+  }
+  if (config.customProvider) {
+    // BYOK 自备模型：仅当次请求使用；服务端开关关闭时会返回
+    // CLIENT_CREDENTIAL_OVERRIDE_FORBIDDEN，本脚本原样透出错误。
+    body.config = config.customProvider;
+  }
   if (opts.confirmedIntent) {
     body.confirmed_intent = opts.confirmedIntent;
   }
-  if (opts.mgrepKey || config.mgrepApiKey) {
-    body.mgrep_api_key = opts.mgrepKey || config.mgrepApiKey;
-  }
-
   // Skill 上下文注入：把全量已安装 skill 传给后端，由后端 AI 智能推荐
   if (opts.skillsDir || opts.autoSkills) {
     const extraDirs = opts.skillsDir ? [opts.skillsDir] : [];
-    const skills = scanAllSkills(extraDirs);
+    const discoveredSkills = scanAllSkills(extraDirs);
+    const skills = discoveredSkills.slice(0, MAX_INSTALLED_SKILLS);
     if (skills.length) {
       body.installed_skills = skills.map(s => ({
         name: s.name,
@@ -206,13 +368,16 @@ async function enhance(prompt, opts = {}) {
       body.prompt = prompt + `\n\n---\n\n【重要】基于提供的 ${skills.length} 个已安装工具（installed_skills 上下文），先给出工具推荐，再给出增强后的提示词。\n\n请严格按以下顺序输出：\n1) 开头先输出“推荐技能”小节\n2) 然后输出“增强提示词正文”\n\n开头格式要求（不要用 XML）：\n推荐技能：\n- 工具名：推荐理由（一句话）\n- 工具名：推荐理由（一句话）\n\n约束：\n1. 推荐 3-8 个工具\n2. 工具名只能从“候选工具名”里选择，禁止创造新名字\n3. 推荐理由必须结合当前任务，不要写通用空话\n4. 不要输出 <auto-skills> 或任何 XML 标签\n\n候选工具名：${skillNameList}`;
 
       if (!opts.json) {
+        if (discoveredSkills.length > skills.length) {
+          console.error(`ℹ️ 已发现 ${discoveredSkills.length} 个 Skill，按 Relay 请求上限发送前 ${skills.length} 个`);
+        }
         console.error(`🔍 已安装 ${skills.length} 个 Skill，由后端 AI 智能推荐`);
       }
     }
   }
 
-  const endpoint = "/api/skill/enhance";
-  const sseOptions = token ? { bearerToken: token } : {};
+  const endpoint = "/yce/prompt-enhance/agent";
+  const sseOptions = { bearerToken: token };
 
   if (opts.json) {
     // Non-stream: collect all events and output JSON
@@ -228,6 +393,7 @@ async function enhance(prompt, opts = {}) {
   let finalAnswer = "";
   let tokenUsage = null;
   let error = null;
+  let taskPlan = null;
   const agentStatus = {
     agent1: { name: "上下文处理", status: "pending" },
     agent2: { name: "意图分析", status: "pending" },
@@ -281,6 +447,12 @@ async function enhance(prompt, opts = {}) {
       agentStatus.agent4.status = "done";
       agentStatus.agent4.duration = data.duration_ms;
 
+    // 任务锚点：服务端剥离 <plan> 块后通过 plan_complete 事件下发
+    } else if (event === "plan_complete") {
+      if (data && data.plan && typeof data.plan.goal === "string" && data.plan.goal) {
+        taskPlan = data.plan;
+      }
+
     // Pipeline
     } else if (event === "pipeline_complete") {
       tokenUsage = data.token_usage;
@@ -310,12 +482,25 @@ async function enhance(prompt, opts = {}) {
     process.exit(1);
   }
 
+  // 正文兜底：后端未升级时 <plan> 锚点仍留在正文开头，剥离并解析，
+  // 保证事件路径与正文路径拿到相同 plan、正文无标签残留。
+  if (finalAnswer) {
+    const inline = extractInlinePlan(finalAnswer);
+    if (inline.plan && !taskPlan) {
+      taskPlan = inline.plan;
+    }
+    if (inline.plan || /^\s*<plan>/i.test(finalAnswer)) {
+      finalAnswer = inline.body;
+    }
+  }
+
   // Output final enhanced result to stdout using XML tags (best LLM parsing accuracy)
   if (finalAnswer) {
     console.error("");
     console.log("<enhanced>");
     console.log(finalAnswer);
     console.log("</enhanced>");
+    emitTaskPlan(taskPlan, false);
   } else {
     console.error("\n⚠ 未获得增强结果");
     process.exit(1);
@@ -591,48 +776,48 @@ async function checkForUpdateNonBlocking() {
 
 function printUsage() {
   console.log(`
-YCE 内置优问增强 CLI
+YCE 内置提示词增强 CLI
 
 用法:
-  node youwen.js <command> [options]
+  node prompt-enhance.js <command> [options]
 
 命令:
   enhance <prompt>    多 Agent 流水线增强（4-Agent: 摘要→意图→搜索→综合）
 
 enhance 选项:
+  --mode <agent|direct>     agent（默认，多 Agent 流水线）/ direct（单次 JSON，最快）
   --history <text>          对话历史上下文
+  --language <zh-CN|en-US>  输出语言（留空按服务端默认）
   --auto-confirm            自动确认意图（跳过歧义确认）
   --no-search               禁用 Agent 3 搜索
   --confirmed-intent <text> 确认的意图（歧义确认后重新提交）
   --json                    输出原始 JSON（所有 SSE 事件）
-  --token <code>            兑换码（使用 Bearer auth，也可通过 YCE_YOUWEN_TOKEN / YOUWEN_TOKEN 配置）
-  --mgrep-key <key>         Mixedbread API Key（增强语义检索，也可通过 YCE_YOUWEN_MGREP_API_KEY / YOUWEN_MGREP_API_KEY 配置）
+  鉴权固定读取 YCE_RELAY_TOKEN；代码检索、联网检索和提示词增强共用同一个 YCE Key。
   --skills-dir <path>       Skill 目录（自动扫描并注入匹配的 Skill 上下文）
   --auto-skills             自动扫描默认 Skill 目录并注入上下文
-  --force                   强制执行（忽略 YCE_YOUWEN_ENHANCE_MODE / YOUWEN_ENHANCE_MODE 的 disabled）
+  --force                   强制执行（忽略 YCE_PROMPT_ENHANCE_MODE 的 disabled）
+
+说明: agent 模式增强成功时，若服务端返回任务锚点，stdout 会在 <enhanced> 之后
+额外输出 <task-plan>{"goal":...,"stages":[...]}</task-plan>，供 agent 记录任务目标与验收。
 
 示例:
   # 基础增强
-  node youwen.js enhance "帮我写一个 React 登录组件"
-
-  # 使用兑换码（Bearer auth）
-  node youwen.js enhance "优化这段代码" --token "CODE-XXXX"
+  node prompt-enhance.js enhance "帮我写一个 React 登录组件"
 
   # 增强 + 自动注入 Skill 上下文
-  node youwen.js enhance "React useEffect 异步请求" --auto-skills
+  node prompt-enhance.js enhance "React useEffect 异步请求" --auto-skills
 
   # 增强 + 指定 Skill 目录
-  node youwen.js enhance "搜索最新 AI 新闻" --skills-dir ~/.claude/skills
+  node prompt-enhance.js enhance "搜索最新 AI 新闻" --skills-dir ~/.claude/skills
 
   # 带对话历史
-  node youwen.js enhance "优化这段代码" --history "之前讨论了性能问题..."
+  node prompt-enhance.js enhance "优化这段代码" --history "之前讨论了性能问题..."
 
-环境变量（优先读取 YCE_*，兼容 YOUWEN_*）:
-  YCE_YOUWEN_API_URL      优问后端地址 (默认 ${DEFAULT_API_URL})
-  YCE_YOUWEN_TOKEN        兑换码（默认 Bearer auth token）
-  YCE_YOUWEN_ENHANCE_MODE 增强模式: agent（默认）/ disabled（关闭）
-  YCE_YOUWEN_ENABLE_SEARCH 联合搜索: true（默认）/ false（关闭）
-  YCE_YOUWEN_MGREP_API_KEY Mixedbread API Key
+环境变量:
+  YCE_RELAY_URL                    YCE Relay 地址（默认 ${DEFAULT_API_URL}）
+  YCE_RELAY_TOKEN                  YCE Key（代码、联网和提示词增强共用）
+  YCE_PROMPT_ENHANCE_MODE          增强模式: agent（默认）/ disabled（关闭）
+  YCE_PROMPT_ENHANCE_ENABLE_SEARCH 联合搜索: true（默认）/ false（关闭）
 `);
 }
 
@@ -683,26 +868,41 @@ async function main() {
       case "enhance": {
         if (!input && !args.history) {
           console.error("错误: 请提供提示词或对话历史");
-          console.error("用法: node youwen.js enhance <prompt> [options]");
+          console.error("用法: node prompt-enhance.js enhance <prompt> [options]");
           process.exit(1);
         }
 
         // 后台异步检查版本更新，不阻塞主流程
-        checkForUpdateNonBlocking(args.token || config.token);
+        checkForUpdateNonBlocking();
 
-        await enhance(input, {
+        const enhanceMode = String(args.mode || "agent").toLowerCase();
+        if (!["agent", "direct"].includes(enhanceMode)) {
+          console.error(`错误: --mode 只支持 agent 或 direct，收到 '${enhanceMode}'`);
+          process.exit(1);
+        }
+        const language = typeof args.language === "string" ? args.language.trim() : "";
+        if (language && !["zh-CN", "en-US"].includes(language)) {
+          console.error("错误: --language 只支持 zh-CN 或 en-US");
+          process.exit(1);
+        }
+
+        const enhanceOptions = {
           history: args.history,
+          language,
           autoConfirm: args["auto-confirm"] === true,
           noSearch: args["no-search"] === true,
           confirmedIntent: args["confirmed-intent"],
           json: args.json === true,
-          token: args.token,
-          mgrepKey: args["mgrep-key"],
           skillsDir: args["skills-dir"],
           autoSkills: args["auto-skills"] === true,
           force: args.force === true,
           timeoutMs: Number.parseInt(args["timeout-ms"], 10) || undefined,
-        });
+        };
+        if (enhanceMode === "direct") {
+          await enhanceDirect(input, enhanceOptions);
+        } else {
+          await enhance(input, enhanceOptions);
+        }
         break;
       }
 

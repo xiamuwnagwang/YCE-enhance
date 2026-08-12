@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rmSync } from "node:fs";
 
-import { __test } from "../lib/core.mjs";
-import { connectFrameEncode } from "../lib/protobuf.mjs";
+import { __test, search } from "../lib/core.mjs";
+import { connectFrameEncode, ProtobufEncoder } from "../lib/protobuf.mjs";
 
 // Isolate persisted relay backoff state from the developer's real cache file.
 const TEST_RELAY_STATE_FILE = join(tmpdir(), `yce-test-relay-state-${process.pid}.json`);
@@ -13,6 +13,12 @@ __test.setRelayStateFile(TEST_RELAY_STATE_FILE);
 process.on("exit", () => {
   try { rmSync(TEST_RELAY_STATE_FILE, { force: true }); } catch {}
 });
+
+function encodedTestJwt() {
+  const response = new ProtobufEncoder();
+  response.writeString(1, "eyJhbGciOiJub25lIn0.eyJleHAiOjk5OTk5OTk5OTl9.");
+  return response.toBuffer();
+}
 
 test("stream error frames classify resource exhaustion as transient capacity", () => {
   const frame = connectFrameEncode(
@@ -64,7 +70,7 @@ test("HTTP 429 exits same-key retries and is not retried on another key", async 
   assert.equal(fetchCalls, 1, "HTTP 429 retried the same key");
 });
 
-test("same logical call retries once on an alternate relay key and rebuilds credentials", async () => {
+test("request-recovery resource exhaustion retries once on an alternate relay key", async () => {
   const state = {
     relayManaged: true,
     apiKey: "key-one-secret-value-that-is-long-enough",
@@ -74,6 +80,7 @@ test("same logical call retries once on an alternate relay key and rebuilds cred
       leaseId: "lease-1",
       relayUrl: "https://relay.invalid",
       relayToken: "token",
+      validationSource: "request_recovery",
     },
   };
   const leaseCalls = [];
@@ -119,6 +126,264 @@ test("same logical call retries once on an alternate relay key and rebuilds cred
   assert.equal(state.usageContext, null);
 });
 
+test("ordinary capacity, rate-limit and upstream 5xx failures do not multiply traffic across keys", async () => {
+  const failures = [
+    ["resource exhaustion", () => new __test.YceEngineError("resource_exhausted", "TRANSIENT_CAPACITY")],
+    ["HTTP 429", () => new __test.YceEngineError("rate limited", "RATE_LIMITED", {
+      status: 429,
+      errorSource: "upstream",
+    })],
+    ["HTTP 503", () => new __test.YceEngineError("upstream unavailable", "SERVER_ERROR", {
+      status: 503,
+      errorSource: "upstream",
+    })],
+  ];
+
+  for (const [label, makeError] of failures) {
+    const state = {
+      relayManaged: true,
+      apiKey: "key-one-secret-value-that-is-long-enough",
+      jwt: "jwt-one",
+      usageContext: {
+        keyId: "key-1",
+        leaseId: `ordinary-${label}`,
+        relayUrl: "https://relay.invalid",
+        relayToken: "",
+      },
+    };
+    let leaseCalls = 0;
+    await assert.rejects(__test.streamingRequestWithRelayFailover({
+      credentialState: state,
+      buildProto: () => Buffer.from("request"),
+      leaseCredential: async () => {
+        leaseCalls += 1;
+        throw new Error("ordinary failure must not lease an alternate key");
+      },
+      request: async () => {
+        throw makeError();
+      },
+      sleep: async () => {},
+      random: () => 0,
+    }));
+    assert.equal(leaseCalls, 0, `${label} unexpectedly leased an alternate key`);
+  }
+});
+
+test("request-recovery 429 and upstream 5xx each use at most one healthy alternate", async () => {
+  const failures = [
+    ["HTTP 429", () => new __test.YceEngineError("rate limited", "RATE_LIMITED", {
+      status: 429,
+      errorSource: "upstream",
+    })],
+    ["HTTP 503", () => new __test.YceEngineError("upstream unavailable", "SERVER_ERROR", {
+      status: 503,
+      errorSource: "upstream",
+    })],
+  ];
+
+  for (const [label, makeError] of failures) {
+    const state = {
+      relayManaged: true,
+      apiKey: "key-one-secret-value-that-is-long-enough",
+      jwt: "jwt-one",
+      usageContext: {
+        keyId: "key-1",
+        leaseId: `validation-${label}`,
+        relayUrl: "https://relay.invalid",
+        relayToken: "",
+        validationSource: "request_recovery",
+      },
+    };
+    const leaseCalls = [];
+    let requestCalls = 0;
+    const sameKeyRetryBudgets = [];
+    const result = await __test.streamingRequestWithRelayFailover({
+      credentialState: state,
+      buildProto: () => Buffer.from("request"),
+      leaseCredential: async (options) => {
+        leaseCalls.push(options);
+        return {
+          apiKey: "key-two-secret-value-that-is-long-enough",
+          keyId: "key-2",
+          leaseId: `alternate-${label}`,
+          relayUrl: "https://relay.invalid",
+          relayToken: "",
+        };
+      },
+      getJwt: async () => "jwt-two",
+      request: async (_proto, _timeout, sameKeyRetries) => {
+        sameKeyRetryBudgets.push(sameKeyRetries);
+        requestCalls += 1;
+        if (requestCalls === 1) throw makeError();
+        return Buffer.from("ok");
+      },
+      sleep: async () => {},
+      random: () => 0,
+    });
+    assert.equal(result.toString(), "ok", `${label} validation did not recover transparently`);
+    assert.equal(requestCalls, 2, `${label} validation request count`);
+    assert.deepEqual(sameKeyRetryBudgets, [0, 2], `${label} same-Key retry budgets`);
+    assert.equal(leaseCalls.length, 1, `${label} validation walked beyond one alternate`);
+    assert.deepEqual(leaseCalls[0].excludeKeyIds, ["key-1"]);
+    assert.equal(leaseCalls[0].retryAttempt, 1);
+  }
+});
+
+test("upstream key authentication failure retries once on an alternate relay key", async () => {
+  const state = {
+    relayManaged: true,
+    apiKey: "key-one-secret-value-that-is-long-enough",
+    jwt: "jwt-one",
+    usageContext: {
+      keyId: "key-1",
+      leaseId: "lease-1",
+      relayUrl: "https://relay.invalid",
+      relayToken: "token",
+    },
+  };
+  const leaseCalls = [];
+  let requests = 0;
+  const result = await __test.streamingRequestWithRelayFailover({
+    credentialState: state,
+    buildProto: () => Buffer.from("request"),
+    leaseCredential: async (options) => {
+      leaseCalls.push(options);
+      return {
+        apiKey: "key-two-secret-value-that-is-long-enough",
+        keyId: "key-2",
+        leaseId: "lease-2",
+        relayUrl: "https://relay.invalid",
+        relayToken: "token",
+      };
+    },
+    getJwt: async () => "jwt-two",
+    request: async () => {
+      requests += 1;
+      if (requests === 1) {
+        throw new __test.YceEngineError("upstream rejected key", "AUTH_ERROR", {
+          status: 403,
+          errorSource: "upstream",
+        });
+      }
+      return Buffer.from("ok");
+    },
+    sleep: async () => {},
+    random: () => 0,
+  });
+
+  assert.equal(result.toString(), "ok");
+  assert.equal(requests, 2);
+  assert.equal(leaseCalls.length, 1);
+  assert.deepEqual(leaseCalls[0].excludeKeyIds, ["key-1"]);
+  assert.equal(leaseCalls[0].retryAttempt, 1);
+});
+
+test("JWT authentication failure on the leased key retries once on an alternate key", async () => {
+  const state = {
+    relayManaged: true,
+    apiKey: null,
+    jwt: null,
+    usageContext: null,
+  };
+  const leaseCalls = [];
+  const leases = [
+    {
+      apiKey: "key-one-secret-value-that-is-long-enough",
+      keyId: "key-1",
+      leaseId: "lease-1",
+      relayUrl: "https://relay.invalid",
+      // Keep this unit test self-contained: usage reporting is covered below
+      // and must not race other tests that temporarily replace global fetch.
+      relayToken: "",
+    },
+    {
+      apiKey: "key-two-secret-value-that-is-long-enough",
+      keyId: "key-2",
+      leaseId: "lease-2",
+      relayUrl: "https://relay.invalid",
+      relayToken: "",
+    },
+  ];
+  const result = await __test.streamingRequestWithRelayFailover({
+    credentialState: state,
+    buildProto: () => Buffer.from("request"),
+    leaseCredential: async (options) => {
+      leaseCalls.push(options);
+      return leases.shift();
+    },
+    getJwt: async (apiKey) => {
+      if (apiKey.startsWith("key-one")) {
+        throw new __test.YceEngineError("invalid upstream key", "AUTH_ERROR", {
+          status: 401,
+          errorSource: "upstream",
+        });
+      }
+      return "jwt-two";
+    },
+    request: async () => Buffer.from("ok"),
+    sleep: async () => {},
+    random: () => 0,
+  });
+
+  assert.equal(result.toString(), "ok");
+  assert.equal(leaseCalls.length, 2);
+  assert.equal(leaseCalls[0].retryAttempt, 0);
+  assert.deepEqual(leaseCalls[1].excludeKeyIds, ["key-1"]);
+  assert.equal(leaseCalls[1].retryAttempt, 1);
+});
+
+test("JWT 5xx on a request-recovery lease preserves validation metadata for one alternate", async () => {
+  const state = {
+    relayManaged: true,
+    apiKey: null,
+    jwt: null,
+    usageContext: null,
+  };
+  const leaseCalls = [];
+  const leases = [
+    {
+      apiKey: "key-one-secret-value-that-is-long-enough",
+      keyId: "key-1",
+      leaseId: "validation-jwt-1",
+      relayUrl: "https://relay.invalid",
+      relayToken: "",
+      validationSource: "request_recovery",
+    },
+    {
+      apiKey: "key-two-secret-value-that-is-long-enough",
+      keyId: "key-2",
+      leaseId: "validation-jwt-2",
+      relayUrl: "https://relay.invalid",
+      relayToken: "",
+    },
+  ];
+  const result = await __test.streamingRequestWithRelayFailover({
+    credentialState: state,
+    buildProto: () => Buffer.from("request"),
+    leaseCredential: async (options) => {
+      leaseCalls.push(options);
+      return leases.shift();
+    },
+    getJwt: async (apiKey) => {
+      if (apiKey.startsWith("key-one")) {
+        throw new __test.YceEngineError("upstream unavailable", "SERVER_ERROR", {
+          status: 503,
+          errorSource: "upstream",
+        });
+      }
+      return "jwt-two";
+    },
+    request: async () => Buffer.from("ok"),
+    sleep: async () => {},
+    random: () => 0,
+  });
+
+  assert.equal(result.toString(), "ok");
+  assert.equal(leaseCalls.length, 2);
+  assert.deepEqual(leaseCalls[1].excludeKeyIds, ["key-1"]);
+  assert.equal(leaseCalls[1].retryAttempt, 1);
+});
+
 test("authentication, payload, network and rate-limit errors never cross keys", async () => {
   for (const code of ["AUTH_ERROR", "PAYLOAD_TOO_LARGE", "TIMEOUT", "NETWORK_ERROR", "RATE_LIMITED"]) {
     const state = {
@@ -151,6 +416,79 @@ test("authentication, payload, network and rate-limit errors never cross keys", 
   }
 });
 
+test("request-recovery user and client failures never switch keys", async () => {
+  const failures = [
+    ["payload", new __test.YceEngineError("too large", "PAYLOAD_TOO_LARGE", { status: 413 })],
+    ["user 400", new __test.YceEngineError("bad request", "SERVER_ERROR", { status: 400 })],
+    ["network", new __test.YceEngineError("socket closed", "NETWORK_ERROR")],
+    ["timeout", new __test.YceEngineError("timed out", "TIMEOUT")],
+  ];
+  for (const [label, failure] of failures) {
+    const state = {
+      relayManaged: true,
+      apiKey: "key-one-secret-value-that-is-long-enough",
+      jwt: "jwt-one",
+      usageContext: {
+        keyId: "key-1",
+        leaseId: `validation-client-${label}`,
+        relayUrl: "https://relay.invalid",
+        relayToken: "",
+        validationSource: "request_recovery",
+      },
+    };
+    let leaseCalls = 0;
+    await assert.rejects(__test.streamingRequestWithRelayFailover({
+      credentialState: state,
+      buildProto: () => Buffer.from("request"),
+      leaseCredential: async () => {
+        leaseCalls += 1;
+        throw new Error("client failure must not lease an alternate key");
+      },
+      request: async () => {
+        throw failure;
+      },
+      sleep: async () => {},
+      random: () => 0,
+    }));
+    assert.equal(leaseCalls, 0, `${label} unexpectedly leased an alternate key`);
+  }
+});
+
+test("request-recovery relay-originated 401 never switches upstream keys", async () => {
+  const state = {
+    relayManaged: true,
+    apiKey: "key-one-secret-value-that-is-long-enough",
+    jwt: "jwt-one",
+    usageContext: {
+      keyId: "key-1",
+      leaseId: "lease-relay-auth",
+      relayUrl: "https://relay.invalid",
+      relayToken: "token",
+      validationSource: "request_recovery",
+    },
+  };
+  let leaseCalls = 0;
+  await assert.rejects(
+    __test.streamingRequestWithRelayFailover({
+      credentialState: state,
+      buildProto: () => Buffer.from("request"),
+      leaseCredential: async () => {
+        leaseCalls += 1;
+        throw new Error("must not lease alternate");
+      },
+      request: async () => {
+        throw new __test.YceEngineError("relay rejected request", "AUTH_ERROR", {
+          status: 401,
+          errorSource: "relay",
+          relayCode: "RELAY_AUTH_FAILED",
+        });
+      },
+    }),
+    (error) => error?.code === "AUTH_ERROR" && error?.details?.errorSource === "relay",
+  );
+  assert.equal(leaseCalls, 0);
+});
+
 test("alternate failure is bounded and never walks the key pool", async () => {
   const state = {
     relayManaged: true,
@@ -161,6 +499,7 @@ test("alternate failure is bounded and never walks the key pool", async () => {
       leaseId: "lease-1",
       relayUrl: "https://relay.invalid",
       relayToken: "token",
+      validationSource: "request_recovery",
     },
   };
   let leaseCalls = 0;
@@ -227,7 +566,224 @@ test("relay retry lease sends exclusion and retry metadata", async (t) => {
   assert.deepEqual(capturedBody, {
     exclude_key_ids: ["key-1"],
     retry_attempt: 1,
+    supports_bounded_key_failover: true,
   });
+});
+
+test("relay validation_source reaches the request usage context", async (t) => {
+  __test.resetRelayState();
+  const previousFetch = globalThis.fetch;
+  const previousUrl = process.env.YCE_RELAY_URL;
+  const previousToken = process.env.YCE_RELAY_TOKEN;
+  t.after(() => {
+    globalThis.fetch = previousFetch;
+    if (previousUrl === undefined) delete process.env.YCE_RELAY_URL;
+    else process.env.YCE_RELAY_URL = previousUrl;
+    if (previousToken === undefined) delete process.env.YCE_RELAY_TOKEN;
+    else process.env.YCE_RELAY_TOKEN = previousToken;
+    __test.resetRelayState();
+  });
+  process.env.YCE_RELAY_URL = "https://relay.invalid";
+  process.env.YCE_RELAY_TOKEN = "relay-token";
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    api_key: "validation-key-secret-value-that-is-long-enough",
+    key_id: "validation-key",
+    lease_id: "validation-lease",
+    validation_source: "request_recovery",
+  }), { status: 200, headers: { "content-type": "application/json" } });
+
+  const leased = await __test.leaseRelayCredential({ forceNew: true });
+  assert.equal(leased.validationSource, "request_recovery");
+
+  const state = { relayManaged: true, apiKey: null, jwt: null, usageContext: null };
+  let requestUsageContext = null;
+  const result = await __test.streamingRequestWithRelayFailover({
+    credentialState: state,
+    buildProto: () => Buffer.from("request"),
+    leaseCredential: async () => leased,
+    getJwt: async () => "jwt",
+    request: async (_proto, _timeout, _retries, usageContext) => {
+      requestUsageContext = usageContext;
+      return Buffer.from("ok");
+    },
+    sleep: async () => {},
+    random: () => 0,
+  });
+  assert.equal(result.toString(), "ok");
+  assert.equal(requestUsageContext?.validationSource, "request_recovery");
+});
+
+test("initial JWT request-recovery 503 switches once without retrying the same key", async (t) => {
+  __test.resetRelayState();
+  const previousFetch = globalThis.fetch;
+  const previousUrl = process.env.YCE_RELAY_URL;
+  const previousToken = process.env.YCE_RELAY_TOKEN;
+  t.after(() => {
+    globalThis.fetch = previousFetch;
+    if (previousUrl === undefined) delete process.env.YCE_RELAY_URL;
+    else process.env.YCE_RELAY_URL = previousUrl;
+    if (previousToken === undefined) delete process.env.YCE_RELAY_TOKEN;
+    else process.env.YCE_RELAY_TOKEN = previousToken;
+    __test.resetRelayState();
+  });
+  process.env.YCE_RELAY_URL = "https://relay.invalid";
+  process.env.YCE_RELAY_TOKEN = "relay-token";
+  const leaseBodies = [];
+  let jwtCalls = 0;
+  globalThis.fetch = async (url, init) => {
+    const target = String(url);
+    if (target.endsWith("/yce/lease-key")) {
+      leaseBodies.push(JSON.parse(String(init?.body || "{}")));
+      const index = leaseBodies.length;
+      return new Response(JSON.stringify({
+        api_key: `jwt-key-${index}-secret-value-that-is-long-enough`,
+        key_id: `jwt-key-${index}`,
+        lease_id: `jwt-lease-${index}`,
+        validation_source: index === 1 ? "request_recovery" : "",
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (target.endsWith("/GetUserJwt")) {
+      jwtCalls += 1;
+      return new Response(JSON.stringify({
+        error: jwtCalls === 1 ? "upstream unavailable" : "upstream rejected key",
+        source: "upstream",
+      }), { status: jwtCalls === 1 ? 503 : 403, headers: { "content-type": "application/json" } });
+    }
+    if (target.endsWith("/yce/usage")) {
+      return new Response(JSON.stringify({ success: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    throw new Error(`unexpected URL in initial JWT failover test: ${target}`);
+  };
+
+  await assert.rejects(
+    search({
+      query: "bounded JWT failover",
+      projectRoot: tmpdir(),
+      bootstrapEnabled: false,
+    }),
+    (error) => error?.code === "AUTH_ERROR" && error?.details?.status === 403,
+  );
+  assert.equal(jwtCalls, 2, "validation JWT 503 retried the same key or walked beyond one alternate");
+  assert.equal(leaseBodies.length, 2, "initial JWT failure did not stay bounded to one alternate");
+  assert.equal(leaseBodies[0].retry_attempt, 0);
+  assert.deepEqual(leaseBodies[1].exclude_key_ids, ["jwt-key-1"]);
+  assert.equal(leaseBodies[1].retry_attempt, 1);
+});
+
+test("ordinary advisory 429 reports capacity without leasing another key", async (t) => {
+  __test.resetRelayState();
+  const previousFetch = globalThis.fetch;
+  const previousUrl = process.env.YCE_RELAY_URL;
+  const previousToken = process.env.YCE_RELAY_TOKEN;
+  t.after(() => {
+    globalThis.fetch = previousFetch;
+    if (previousUrl === undefined) delete process.env.YCE_RELAY_URL;
+    else process.env.YCE_RELAY_URL = previousUrl;
+    if (previousToken === undefined) delete process.env.YCE_RELAY_TOKEN;
+    else process.env.YCE_RELAY_TOKEN = previousToken;
+    __test.resetRelayState();
+  });
+  process.env.YCE_RELAY_URL = "https://relay.invalid";
+  process.env.YCE_RELAY_TOKEN = "relay-token";
+  let leaseCalls = 0;
+  let rateLimitCalls = 0;
+  let streamCalls = 0;
+  globalThis.fetch = async (url) => {
+    const target = String(url);
+    if (target.endsWith("/yce/lease-key")) {
+      leaseCalls += 1;
+      return new Response(JSON.stringify({
+        api_key: "ordinary-rate-key-secret-value-that-is-long-enough",
+        key_id: "ordinary-rate-key",
+        lease_id: "ordinary-rate-lease",
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (target.endsWith("/GetUserJwt")) {
+      return new Response(encodedTestJwt(), { status: 200 });
+    }
+    if (target.endsWith("/CheckUserMessageRateLimit")) {
+      rateLimitCalls += 1;
+      return new Response("busy", { status: 429 });
+    }
+    if (target.endsWith("/yce/usage")) {
+      return new Response(JSON.stringify({ success: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (target.endsWith("/GetDevstralStream")) streamCalls += 1;
+    throw new Error(`unexpected URL in ordinary advisory 429 test: ${target}`);
+  };
+
+  const result = await search({
+    query: "ordinary rate limit",
+    projectRoot: tmpdir(),
+    bootstrapEnabled: false,
+  });
+  assert.match(result.error, /Rate limited/);
+  assert.equal(leaseCalls, 1, "ordinary 429 leased another key and amplified traffic");
+  assert.equal(rateLimitCalls, 1);
+  assert.equal(streamCalls, 0);
+});
+
+test("request-recovery advisory 429 uses one alternate and stops there", async (t) => {
+  __test.resetRelayState();
+  const previousFetch = globalThis.fetch;
+  const previousUrl = process.env.YCE_RELAY_URL;
+  const previousToken = process.env.YCE_RELAY_TOKEN;
+  t.after(() => {
+    globalThis.fetch = previousFetch;
+    if (previousUrl === undefined) delete process.env.YCE_RELAY_URL;
+    else process.env.YCE_RELAY_URL = previousUrl;
+    if (previousToken === undefined) delete process.env.YCE_RELAY_TOKEN;
+    else process.env.YCE_RELAY_TOKEN = previousToken;
+    __test.resetRelayState();
+  });
+  process.env.YCE_RELAY_URL = "https://relay.invalid";
+  process.env.YCE_RELAY_TOKEN = "relay-token";
+  const leaseBodies = [];
+  let rateLimitCalls = 0;
+  globalThis.fetch = async (url, init) => {
+    const target = String(url);
+    if (target.endsWith("/yce/lease-key")) {
+      leaseBodies.push(JSON.parse(String(init?.body || "{}")));
+      const index = leaseBodies.length;
+      return new Response(JSON.stringify({
+        api_key: `validation-rate-key-${index}-secret-value-that-is-long-enough`,
+        key_id: `validation-rate-key-${index}`,
+        lease_id: `validation-rate-lease-${index}`,
+        validation_source: index === 1 ? "request_recovery" : "",
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (target.endsWith("/GetUserJwt")) {
+      return new Response(encodedTestJwt(), { status: 200 });
+    }
+    if (target.endsWith("/CheckUserMessageRateLimit")) {
+      rateLimitCalls += 1;
+      return new Response("busy", { status: 429 });
+    }
+    if (target.endsWith("/yce/usage")) {
+      return new Response(JSON.stringify({ success: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    throw new Error(`unexpected URL in request-recovery advisory 429 test: ${target}`);
+  };
+
+  const result = await search({
+    query: "validation rate limit",
+    projectRoot: tmpdir(),
+    bootstrapEnabled: false,
+  });
+  assert.match(result.error, /Rate limited/);
+  assert.equal(leaseBodies.length, 2, "validation 429 walked beyond one alternate key");
+  assert.equal(rateLimitCalls, 2);
+  assert.deepEqual(leaseBodies[1].exclude_key_ids, ["validation-rate-key-1"]);
+  assert.equal(leaseBodies[1].retry_attempt, 1);
 });
 
 test("relay quota failure is structured and cached until reset", async (t) => {
@@ -829,7 +1385,7 @@ test("structured relay lease error heals once even before the first stream succe
   assert.equal(state.usageContext?.leaseId, "lease-2");
 });
 
-test("first-call AUTH_ERROR on a fresh lease still fails fast (no heal loop)", async (t) => {
+test("unstructured upstream 401 switches once and never walks beyond the alternate key", async (t) => {
   const previous = process.env.YCE_LEASE_REUSE;
   delete process.env.YCE_LEASE_REUSE;
   t.after(() => {
@@ -838,6 +1394,7 @@ test("first-call AUTH_ERROR on a fresh lease still fails fast (no heal loop)", a
   });
   const state = { relayManaged: true, apiKey: null, jwt: null, usageContext: null };
   let leaseCalls = 0;
+  let requestCalls = 0;
   await assert.rejects(
     __test.streamingRequestWithRelayFailover({
       credentialState: state,
@@ -845,9 +1402,9 @@ test("first-call AUTH_ERROR on a fresh lease still fails fast (no heal loop)", a
       leaseCredential: async () => {
         leaseCalls += 1;
         return {
-          apiKey: "key-secret-value-that-is-long-enough",
-          keyId: "key-1",
-          leaseId: "lease-1",
+          apiKey: `key-secret-value-${leaseCalls}-that-is-long-enough`,
+          keyId: `key-${leaseCalls}`,
+          leaseId: `lease-${leaseCalls}`,
           relayUrl: "https://relay.invalid",
           relayToken: "token",
           leaseExpiresAt: new Date(Date.now() + 120_000).toISOString(),
@@ -855,6 +1412,7 @@ test("first-call AUTH_ERROR on a fresh lease still fails fast (no heal loop)", a
       },
       getJwt: async () => "jwt",
       request: async () => {
+        requestCalls += 1;
         throw new __test.YceEngineError("HTTP 401", "AUTH_ERROR", { status: 401 });
       },
       sleep: async () => {},
@@ -862,7 +1420,8 @@ test("first-call AUTH_ERROR on a fresh lease still fails fast (no heal loop)", a
     }),
     (error) => error?.code === "AUTH_ERROR",
   );
-  assert.equal(leaseCalls, 1, "fresh-lease auth failure must not re-lease");
+  assert.equal(leaseCalls, 2, "401 should lease exactly one alternate key");
+  assert.equal(requestCalls, 2, "alternate failure must not trigger a third request");
 });
 
 test("concurrent relay leases retain their own key metadata", async (t) => {

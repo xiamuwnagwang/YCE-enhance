@@ -12,7 +12,7 @@
   .\install.ps1 -Target agents
   .\install.ps1 -Check
   .\install.ps1 -Setup
-  .\install.ps1 -Setup -YouwenToken "your-redemption-code"
+  .\install.ps1 -Setup -YceRelayToken "your-yce-key"
   .\install.ps1 -Sync
   .\install.ps1 -SyncEnv
   .\install.ps1 -Uninstall
@@ -29,12 +29,9 @@ param(
   [switch]$Edit,
   [switch]$Reset,
   [string]$Target,
-  [string]$YouwenScript,
-  [string]$YouwenApiUrl,
-  [string]$YouwenToken,
-  [string]$YouwenEnhanceMode,
-  [string]$YouwenEnableSearch,
-  [string]$YouwenMgrepApiKey,
+  [string]$PromptEnhanceScript,
+  [string]$PromptEnhanceMode,
+  [string]$PromptEnhanceEnableSearch,
   [string]$YceEngineScript,
   [string]$YceEngineMaxResults,
   [string]$YceEngineMaxTurns,
@@ -59,10 +56,8 @@ $RepoArchiveFallbackZip = "https://github.com/xiamuwnagwang/YCE-enhance/archive/
 $RemoteSkillMdUrl = "https://raw.githubusercontent.com/xiamuwnagwang/YCE-enhance/main/SKILL.md"
 $SkillName = "yce"
 
-$DefaultYouwenApiUrl = "https://a.aigy.de"
-$DefaultYouwenEnhanceMode = "agent"
-$DefaultYouwenEnableSearch = "true"
-$DefaultYouwenMgrepApiKey = ""
+$DefaultPromptEnhanceMode = "agent"
+$DefaultPromptEnhanceEnableSearch = "true"
 $DefaultYceEngineScript = ".\vendor\yce-engine\yce-engine.mjs"
 $DefaultYceEngineMaxResults = "10"
 $DefaultYceEngineMaxTurns = "3"
@@ -71,8 +66,8 @@ $DefaultMode = "auto"
 $DefaultTimeoutEnhance = "300000"
 $DefaultTimeoutSearch = "180000"
 $DefaultLocalFallback = "false"
-$DefaultYouwenScript = ".\scripts\youwen.js"
-$InstallFiles = @("scripts", "vendor", "SKILL.md", "install.sh", "install.ps1", ".env.example", ".gitignore")
+$DefaultPromptEnhanceScript = ".\scripts\prompt-enhance.js"
+$InstallFiles = @("scripts", "vendor", "src", "tests", "Cargo.toml", "Cargo.lock", "SKILL.md", "install.sh", "install.ps1", ".env.example", ".gitignore")
 
 function Initialize-NetworkDefaults {
   try {
@@ -179,17 +174,6 @@ function Read-EnvValueFromFile {
   return $null
 }
 
-function Get-YouwenEnvFile {
-  param([string]$YouwenScriptPath)
-  $resolved = Resolve-YcePath $YouwenScriptPath
-  if (-not $resolved -or -not (Test-Path $resolved)) { return $null }
-  $scriptsDir = Split-Path -Parent $resolved
-  $skillDir = Split-Path -Parent $scriptsDir
-  $envPath = Join-Path $skillDir ".env"
-  if (Test-Path $envPath) { return $envPath }
-  return $null
-}
-
 function Read-EnvMapFromFile {
   param([string]$FilePath)
   $map = @{}
@@ -215,8 +199,7 @@ function Merge-EnvMissingKeys {
   $mergeKeys = @(
     'YCE_RELAY_TOKEN', 'YCE_RELAY_URL', 'YCE_API_KEY',
     'YCE_ENGINE_SCRIPT', 'YCE_ENGINE_MAX_RESULTS', 'YCE_ENGINE_MAX_TURNS', 'YCE_LOCAL_FALLBACK',
-    'YCE_YOUWEN_TOKEN', 'YCE_YOUWEN_API_URL', 'YCE_YOUWEN_SCRIPT',
-    'YCE_YOUWEN_ENHANCE_MODE', 'YCE_YOUWEN_ENABLE_SEARCH', 'YCE_YOUWEN_MGREP_API_KEY',
+    'YCE_PROMPT_ENHANCE_SCRIPT', 'YCE_PROMPT_ENHANCE_MODE', 'YCE_PROMPT_ENHANCE_ENABLE_SEARCH',
     'YCE_DEFAULT_MODE', 'YCE_TIMEOUT_ENHANCE_MS', 'YCE_TIMEOUT_SEARCH_MS'
   )
 
@@ -260,7 +243,7 @@ function Merge-EnvMissingKeys {
         $trimmed = $line.Trim()
         if ($trimmed -and -not $trimmed.StartsWith('#') -and $trimmed -match '^([^=]+)=') {
           $key = $Matches[1].Trim()
-          if ($key.StartsWith('YCE_ACE_')) { continue }
+          if ($key.StartsWith('YCE_ACE_') -or $key.StartsWith('YCE_YOUWEN_') -or $key.StartsWith('YOUWEN_')) { continue }
         }
         $line
       }
@@ -621,12 +604,9 @@ function Move-EnvFromEngineIfNeeded {
 
 function Write-RuntimeConfig {
   param(
-    [string]$RuntimeYouwenScript,
-    [string]$RuntimeYouwenApiUrl,
-    [string]$RuntimeYouwenToken,
-    [string]$RuntimeYouwenEnhanceMode,
-    [string]$RuntimeYouwenEnableSearch,
-    [string]$RuntimeYouwenMgrepApiKey,
+    [string]$RuntimePromptEnhanceScript,
+    [string]$RuntimePromptEnhanceMode,
+    [string]$RuntimePromptEnhanceEnableSearch,
     [string]$RuntimeYceEngineScript,
     [string]$RuntimeYceEngineMaxResults,
     [string]$RuntimeYceEngineMaxTurns,
@@ -638,13 +618,13 @@ function Write-RuntimeConfig {
     [string]$RuntimeLocalFallback
   )
 
-  $resolvedYouwen = Resolve-YcePath $RuntimeYouwenScript
+  $resolvedPromptEnhance = Resolve-YcePath $RuntimePromptEnhanceScript
   $resolvedEngine = Resolve-YcePath $RuntimeYceEngineScript
 
-  if (-not $RuntimeYouwenScript) {
-    Write-Warn "未检测到仓内 yce enhance 脚本: $DefaultYouwenScript"
-  } elseif (-not (Test-Path $resolvedYouwen)) {
-    Write-Warn "youwen.js 不存在: $RuntimeYouwenScript"
+  if (-not $RuntimePromptEnhanceScript) {
+    Write-Warn "未检测到仓内提示词增强脚本: $DefaultPromptEnhanceScript"
+  } elseif (-not (Test-Path $resolvedPromptEnhance)) {
+    Write-Warn "prompt-enhance.js 不存在: $RuntimePromptEnhanceScript"
   }
   if (-not (Test-Path $resolvedEngine)) { Write-Warn "yce-engine 入口不存在: $RuntimeYceEngineScript" }
 
@@ -654,12 +634,9 @@ function Write-RuntimeConfig {
   if ($DryRun) {
     Write-DryRun "将生成 .env"
     Write-DryRun "  .env => $EnvFile"
-    Write-DryRun "  YCE_YOUWEN_SCRIPT = $RuntimeYouwenScript"
-    Write-DryRun "  YCE_YOUWEN_API_URL = $RuntimeYouwenApiUrl"
-    Write-DryRun "  YCE_YOUWEN_TOKEN = $(if ($RuntimeYouwenToken) { Get-MaskedValue $RuntimeYouwenToken } else { '(empty)' })"
-    Write-DryRun "  YCE_YOUWEN_ENHANCE_MODE = $RuntimeYouwenEnhanceMode"
-    Write-DryRun "  YCE_YOUWEN_ENABLE_SEARCH = $RuntimeYouwenEnableSearch"
-    Write-DryRun "  YCE_YOUWEN_MGREP_API_KEY = $(if ($RuntimeYouwenMgrepApiKey) { Get-MaskedValue $RuntimeYouwenMgrepApiKey } else { '(empty)' })"
+    Write-DryRun "  YCE_PROMPT_ENHANCE_SCRIPT = $RuntimePromptEnhanceScript"
+    Write-DryRun "  YCE_PROMPT_ENHANCE_MODE = $RuntimePromptEnhanceMode"
+    Write-DryRun "  YCE_PROMPT_ENHANCE_ENABLE_SEARCH = $RuntimePromptEnhanceEnableSearch"
     Write-DryRun "  YCE_ENGINE_SCRIPT = $RuntimeYceEngineScript"
     Write-DryRun "  YCE_ENGINE_MAX_RESULTS = $RuntimeYceEngineMaxResults"
     Write-DryRun "  YCE_ENGINE_MAX_TURNS = $RuntimeYceEngineMaxTurns"
@@ -680,16 +657,13 @@ function Write-RuntimeConfig {
     "# Path contract: this file MUST be at the YCE skill root (next to install.ps1 / SKILL.md)."
     "# Do NOT place .env under vendor/yce-engine/."
     ""
-    "# yw-enhance adapter"
-    "YCE_YOUWEN_SCRIPT=$RuntimeYouwenScript"
-    "YCE_YOUWEN_API_URL=$RuntimeYouwenApiUrl"
-    "YCE_YOUWEN_TOKEN=$RuntimeYouwenToken"
-    "YCE_YOUWEN_ENHANCE_MODE=$RuntimeYouwenEnhanceMode"
-    "YCE_YOUWEN_ENABLE_SEARCH=$RuntimeYouwenEnableSearch"
-    "YCE_YOUWEN_MGREP_API_KEY=$RuntimeYouwenMgrepApiKey"
+    "# Prompt enhancement adapter"
+    "YCE_PROMPT_ENHANCE_SCRIPT=$RuntimePromptEnhanceScript"
+    "YCE_PROMPT_ENHANCE_MODE=$RuntimePromptEnhanceMode"
+    "YCE_PROMPT_ENHANCE_ENABLE_SEARCH=$RuntimePromptEnhanceEnableSearch"
     ""
     "# yce-engine adapter (远端优先：默认连接 yce.aigy.de relay)"
-    "# YCE_RELAY_TOKEN 是 YCE 搜索密钥；不要和 YCE_YOUWEN_TOKEN 混用"
+    "# YCE_RELAY_TOKEN 是统一 YCE Key；代码检索、联网检索、提示词增强和 Y-Plan 规划共用"
     "YCE_ENGINE_SCRIPT=$RuntimeYceEngineScript"
     "YCE_ENGINE_MAX_RESULTS=$RuntimeYceEngineMaxResults"
     "YCE_ENGINE_MAX_TURNS=$RuntimeYceEngineMaxTurns"
@@ -703,6 +677,13 @@ function Write-RuntimeConfig {
     "YCE_DEFAULT_MODE=$RuntimeMode"
     "YCE_TIMEOUT_ENHANCE_MS=$RuntimeTimeoutEnhance"
     "YCE_TIMEOUT_SEARCH_MS=$RuntimeTimeoutSearch"
+    "# Y-Plan 规划超时（默认 480000）与 BYOK 自定义模型（服务端放行后才生效）"
+    "# YCE_TIMEOUT_PLAN_MS=480000"
+    "# YCE_YPLAN_PROVIDER="
+    "# YCE_YPLAN_BASE_URL="
+    "# YCE_YPLAN_TOKEN="
+    "# YCE_YPLAN_MODEL="
+    "# YCE_YPLAN_TEMPERATURE="
   )
 
   if (Test-Path $WrongEngineEnvFile) {
@@ -712,9 +693,9 @@ function Write-RuntimeConfig {
 
   Write-Ok "配置完成"
   Write-Host "  .env (skill root): $EnvFile"
+  Write-Host "  prompt enhancement entry: $RuntimePromptEnhanceScript"
   Write-Host "  yce-engine entry: $RuntimeYceEngineScript"
-  if ($RuntimeYouwenToken) { Write-Host "  Youwen 增强 Token: $(Get-MaskedValue $RuntimeYouwenToken)" }
-  if ($RuntimeYceRelayToken) { Write-Host "  YCE 搜索密钥: $(Get-MaskedValue $RuntimeYceRelayToken)" }
+  if ($RuntimeYceRelayToken) { Write-Host "  YCE Key: $(Get-MaskedValue $RuntimeYceRelayToken)" }
   Write-Host "  本地检索 fallback: $RuntimeLocalFallback"
 }
 
@@ -858,8 +839,7 @@ function Invoke-Install {
   Write-Host ""
   Write-Ok "完成"
   Write-Host ""
-  Write-Host "  配置检索密钥: .\install.ps1 -Setup -YceRelayToken `"yce_...`"" -ForegroundColor Cyan
-  Write-Host "  配置增强 Token: .\install.ps1 -Setup -YouwenToken `"YW-...`"（可选）" -ForegroundColor Cyan
+  Write-Host "  配置统一 YCE Key: .\install.ps1 -Setup -YceRelayToken `"yce_...`"" -ForegroundColor Cyan
   Write-Host "  同步到其他目录: .\install.ps1 -SyncEnv" -ForegroundColor Cyan
   Write-Host "  测试: node scripts\yce.js \"定位 provider 列表获取逻辑\" --mode search" -ForegroundColor Cyan
   Write-Host ""
@@ -980,25 +960,20 @@ function Invoke-Setup {
     }
   }
 
-  $runtimeYouwen = if ($YouwenScript) { $YouwenScript } elseif ($currentVars.ContainsKey('YCE_YOUWEN_SCRIPT')) { $currentVars['YCE_YOUWEN_SCRIPT'] } else { $DefaultYouwenScript }
-  $resolvedRepoYouwen = Resolve-YcePath $DefaultYouwenScript
-  if (Test-Path $resolvedRepoYouwen) {
-    if ($runtimeYouwen -and $runtimeYouwen -ne $DefaultYouwenScript) {
-      Write-Warn "检测到旧的外部 YCE_YOUWEN_SCRIPT，已切换为仓内脚本: $DefaultYouwenScript"
+  $runtimePromptEnhance = if ($PromptEnhanceScript) { $PromptEnhanceScript } elseif ($currentVars.ContainsKey('YCE_PROMPT_ENHANCE_SCRIPT')) { $currentVars['YCE_PROMPT_ENHANCE_SCRIPT'] } else { $DefaultPromptEnhanceScript }
+  $resolvedRepoPromptEnhance = Resolve-YcePath $DefaultPromptEnhanceScript
+  if (Test-Path $resolvedRepoPromptEnhance) {
+    if ($runtimePromptEnhance -and $runtimePromptEnhance -ne $DefaultPromptEnhanceScript) {
+      Write-Warn "检测到外部提示词增强脚本，已切换为仓内脚本: $DefaultPromptEnhanceScript"
     }
-    $runtimeYouwen = $DefaultYouwenScript
-  } elseif (-not $runtimeYouwen) {
-    $runtimeYouwen = $DefaultYouwenScript
+    $runtimePromptEnhance = $DefaultPromptEnhanceScript
+  } elseif (-not $runtimePromptEnhance) {
+    $runtimePromptEnhance = $DefaultPromptEnhanceScript
   }
-  $upstreamYouwenEnv = Get-YouwenEnvFile $runtimeYouwen
-  $runtimeYouwenApiUrl = if ($YouwenApiUrl) { $YouwenApiUrl } elseif ($currentVars.ContainsKey('YCE_YOUWEN_API_URL')) { $currentVars['YCE_YOUWEN_API_URL'] } elseif ($upstreamYouwenEnv) { Read-EnvValueFromFile -FilePath $upstreamYouwenEnv -Key 'YOUWEN_API_URL' } else { $DefaultYouwenApiUrl }
-  if (-not $runtimeYouwenApiUrl) { $runtimeYouwenApiUrl = $DefaultYouwenApiUrl }
-  $runtimeYouwenToken = if ($YouwenToken) { $YouwenToken } elseif ($currentVars.ContainsKey('YCE_YOUWEN_TOKEN')) { $currentVars['YCE_YOUWEN_TOKEN'] } elseif ($upstreamYouwenEnv) { Read-EnvValueFromFile -FilePath $upstreamYouwenEnv -Key 'YOUWEN_TOKEN' } else { $null }
-  $runtimeYouwenEnhanceMode = if ($YouwenEnhanceMode) { $YouwenEnhanceMode } elseif ($currentVars.ContainsKey('YCE_YOUWEN_ENHANCE_MODE')) { $currentVars['YCE_YOUWEN_ENHANCE_MODE'] } elseif ($upstreamYouwenEnv) { Read-EnvValueFromFile -FilePath $upstreamYouwenEnv -Key 'YOUWEN_ENHANCE_MODE' } else { $DefaultYouwenEnhanceMode }
-  if (-not $runtimeYouwenEnhanceMode) { $runtimeYouwenEnhanceMode = $DefaultYouwenEnhanceMode }
-  $runtimeYouwenEnableSearch = if ($YouwenEnableSearch) { $YouwenEnableSearch } elseif ($currentVars.ContainsKey('YCE_YOUWEN_ENABLE_SEARCH')) { $currentVars['YCE_YOUWEN_ENABLE_SEARCH'] } elseif ($upstreamYouwenEnv) { Read-EnvValueFromFile -FilePath $upstreamYouwenEnv -Key 'YOUWEN_ENABLE_SEARCH' } else { $DefaultYouwenEnableSearch }
-  if (-not $runtimeYouwenEnableSearch) { $runtimeYouwenEnableSearch = $DefaultYouwenEnableSearch }
-  $runtimeYouwenMgrepApiKey = if ($YouwenMgrepApiKey) { $YouwenMgrepApiKey } elseif ($currentVars.ContainsKey('YCE_YOUWEN_MGREP_API_KEY')) { $currentVars['YCE_YOUWEN_MGREP_API_KEY'] } elseif ($upstreamYouwenEnv) { Read-EnvValueFromFile -FilePath $upstreamYouwenEnv -Key 'YOUWEN_MGREP_API_KEY' } else { $DefaultYouwenMgrepApiKey }
+  $runtimePromptEnhanceMode = if ($PromptEnhanceMode) { $PromptEnhanceMode } elseif ($currentVars.ContainsKey('YCE_PROMPT_ENHANCE_MODE')) { $currentVars['YCE_PROMPT_ENHANCE_MODE'] } else { $DefaultPromptEnhanceMode }
+  if (-not $runtimePromptEnhanceMode) { $runtimePromptEnhanceMode = $DefaultPromptEnhanceMode }
+  $runtimePromptEnhanceEnableSearch = if ($PromptEnhanceEnableSearch) { $PromptEnhanceEnableSearch } elseif ($currentVars.ContainsKey('YCE_PROMPT_ENHANCE_ENABLE_SEARCH')) { $currentVars['YCE_PROMPT_ENHANCE_ENABLE_SEARCH'] } else { $DefaultPromptEnhanceEnableSearch }
+  if (-not $runtimePromptEnhanceEnableSearch) { $runtimePromptEnhanceEnableSearch = $DefaultPromptEnhanceEnableSearch }
   $runtimeYceEngineScript = if ($YceEngineScript) { $YceEngineScript } elseif ($currentVars.ContainsKey('YCE_ENGINE_SCRIPT')) { $currentVars['YCE_ENGINE_SCRIPT'] } else { $DefaultYceEngineScript }
   $runtimeYceEngineMaxResults = if ($YceEngineMaxResults) { $YceEngineMaxResults } elseif ($currentVars.ContainsKey('YCE_ENGINE_MAX_RESULTS')) { $currentVars['YCE_ENGINE_MAX_RESULTS'] } else { $DefaultYceEngineMaxResults }
   $runtimeYceEngineMaxTurns = if ($YceEngineMaxTurns) { $YceEngineMaxTurns } elseif ($currentVars.ContainsKey('YCE_ENGINE_MAX_TURNS')) { $currentVars['YCE_ENGINE_MAX_TURNS'] } else { $DefaultYceEngineMaxTurns }
@@ -1019,46 +994,32 @@ function Invoke-Setup {
     $runtimeLocalFallback = $DefaultLocalFallback
   }
 
-  $hasDirectArgs = $YouwenScript -or $YouwenApiUrl -or $YouwenToken -or $YouwenEnhanceMode -or $YouwenEnableSearch -or $YouwenMgrepApiKey -or $YceEngineScript -or $YceEngineMaxResults -or $YceEngineMaxTurns -or $YceRelayUrl -or $YceRelayToken -or $Mode -or $TimeoutEnhance -or $TimeoutSearch -or $LocalFallback -or $NoLocalFallback
+  $hasDirectArgs = $PromptEnhanceScript -or $PromptEnhanceMode -or $PromptEnhanceEnableSearch -or $YceEngineScript -or $YceEngineMaxResults -or $YceEngineMaxTurns -or $YceRelayUrl -or $YceRelayToken -or $Mode -or $TimeoutEnhance -or $TimeoutSearch -or $LocalFallback -or $NoLocalFallback
 
   if (-not $hasDirectArgs -or $Edit -or $Reset) {
     Write-Host '--- 交互式配置 ---'
     Write-Host ''
-    Write-Host '提示：YCE 检索默认连接 https://yce.aigy.de。' -ForegroundColor Cyan
-    Write-Host '      请把 YCE 搜索密钥写入 YCE_RELAY_TOKEN（请求 YCE 服务时使用）。' -ForegroundColor Cyan
-    Write-Host '      YCE_YOUWEN_TOKEN 只用于提示词增强，不再自动当作 YCE 搜索密钥。' -ForegroundColor Cyan
+    Write-Host '提示：YCE 默认连接 https://yce.aigy.de。' -ForegroundColor Cyan
+    Write-Host '      YCE_RELAY_TOKEN 是统一 YCE Key，代码检索、联网检索和提示词增强共用。' -ForegroundColor Cyan
     Write-Host ''
 
     Write-Host "YCE Relay URL 当前: $(if ($runtimeYceRelayUrl) { $runtimeYceRelayUrl } else { $DefaultYceRelayUrl })"
     $newRelayUrl = Read-Host "YCE Relay URL（回车默认 $DefaultYceRelayUrl）"
     if ($newRelayUrl) { $runtimeYceRelayUrl = $newRelayUrl }
 
-    Write-Host "YCE 搜索密钥当前: $(if ($runtimeYceRelayToken) { Get-MaskedValue $runtimeYceRelayToken } else { '(空，检索会无法租 key，除非设置 YCE_API_KEY)' })"
-    $newRelayToken = Read-Host 'YCE 搜索密钥 / YCE_RELAY_TOKEN（必填，格式 yce_...）'
+    Write-Host "YCE Key 当前: $(if ($runtimeYceRelayToken) { Get-MaskedValue $runtimeYceRelayToken } else { '(空，远端能力不可用)' })"
+    $newRelayToken = Read-Host 'YCE Key / YCE_RELAY_TOKEN（必填，格式 yce_...）'
     if ($newRelayToken) { $runtimeYceRelayToken = $newRelayToken }
 
-    Write-Host '提示：Youwen Token 仅用于提示词增强；没有增强需求可留空。' -ForegroundColor Cyan
-    Write-Host "Youwen 增强 Token 当前: $(if ($runtimeYouwenToken) { Get-MaskedValue $runtimeYouwenToken } else { '(空)' })"
-    $newYouwenToken = Read-Host 'Youwen 增强 Token（回车保留）'
-    if ($newYouwenToken) { $runtimeYouwenToken = $newYouwenToken }
+    Write-Host "提示词增强脚本当前: $(if ($runtimePromptEnhance) { $runtimePromptEnhance } else { '未检测到仓内脚本' })"
 
-    Write-Host "yw-enhance 脚本当前: $(if ($runtimeYouwen) { $runtimeYouwen } else { '未检测到仓内脚本' })"
+    Write-Host "提示词增强模式当前: $runtimePromptEnhanceMode"
+    $newEnhanceMode = Read-Host '提示词增强模式（agent/disabled，回车保留）'
+    if ($newEnhanceMode) { $runtimePromptEnhanceMode = $newEnhanceMode }
 
-    Write-Host "yw-enhance API 当前: $runtimeYouwenApiUrl"
-    $newYouwenApiUrl = Read-Host 'yw-enhance API（回车保留）'
-    if ($newYouwenApiUrl) { $runtimeYouwenApiUrl = $newYouwenApiUrl }
-
-    Write-Host "yw-enhance 模式当前: $runtimeYouwenEnhanceMode"
-    $newEnhanceMode = Read-Host 'yw-enhance 模式（agent/disabled，回车保留）'
-    if ($newEnhanceMode) { $runtimeYouwenEnhanceMode = $newEnhanceMode }
-
-    Write-Host "yw-enhance 联合搜索当前: $runtimeYouwenEnableSearch"
-    $newEnableSearch = Read-Host 'yw-enhance 联合搜索（true/false，回车保留）'
-    if ($newEnableSearch) { $runtimeYouwenEnableSearch = $newEnableSearch }
-
-    Write-Host "yw-enhance Mixedbread Key 当前: $(if ($runtimeYouwenMgrepApiKey) { Get-MaskedValue $runtimeYouwenMgrepApiKey } else { '(空)' })"
-    $newMgrepKey = Read-Host 'yw-enhance Mixedbread Key（回车保留）'
-    if ($newMgrepKey) { $runtimeYouwenMgrepApiKey = $newMgrepKey }
+    Write-Host "提示词增强联合搜索当前: $runtimePromptEnhanceEnableSearch"
+    $newEnableSearch = Read-Host '提示词增强联合搜索（true/false，回车保留）'
+    if ($newEnableSearch) { $runtimePromptEnhanceEnableSearch = $newEnableSearch }
 
     Write-Host "yce-engine 入口当前: $runtimeYceEngineScript"
     $newEngineScript = Read-Host 'yce-engine 入口（回车保留）'
@@ -1096,7 +1057,7 @@ function Invoke-Setup {
     }
   }
 
-  Write-RuntimeConfig -RuntimeYouwenScript $runtimeYouwen -RuntimeYouwenApiUrl $runtimeYouwenApiUrl -RuntimeYouwenToken $runtimeYouwenToken -RuntimeYouwenEnhanceMode $runtimeYouwenEnhanceMode -RuntimeYouwenEnableSearch $runtimeYouwenEnableSearch -RuntimeYouwenMgrepApiKey $runtimeYouwenMgrepApiKey -RuntimeYceEngineScript $runtimeYceEngineScript -RuntimeYceEngineMaxResults $runtimeYceEngineMaxResults -RuntimeYceEngineMaxTurns $runtimeYceEngineMaxTurns -RuntimeYceRelayUrl $runtimeYceRelayUrl -RuntimeYceRelayToken $runtimeYceRelayToken -RuntimeMode $runtimeMode -RuntimeTimeoutEnhance $runtimeTimeoutEnhance -RuntimeTimeoutSearch $runtimeTimeoutSearch -RuntimeLocalFallback $runtimeLocalFallback
+  Write-RuntimeConfig -RuntimePromptEnhanceScript $runtimePromptEnhance -RuntimePromptEnhanceMode $runtimePromptEnhanceMode -RuntimePromptEnhanceEnableSearch $runtimePromptEnhanceEnableSearch -RuntimeYceEngineScript $runtimeYceEngineScript -RuntimeYceEngineMaxResults $runtimeYceEngineMaxResults -RuntimeYceEngineMaxTurns $runtimeYceEngineMaxTurns -RuntimeYceRelayUrl $runtimeYceRelayUrl -RuntimeYceRelayToken $runtimeYceRelayToken -RuntimeMode $runtimeMode -RuntimeTimeoutEnhance $runtimeTimeoutEnhance -RuntimeTimeoutSearch $runtimeTimeoutSearch -RuntimeLocalFallback $runtimeLocalFallback
 
   Sync-EnvToOtherInstallsAuto
 
@@ -1179,27 +1140,26 @@ if ($Help) {
   Write-Host '  .\install.ps1                            # 交互式菜单（推荐）'
   Write-Host '  .\install.ps1 -Install                   # 安装或更新（必要时自动下载远程最新版本）'
   Write-Host '  .\install.ps1 -Target agents             # 仅安装到指定工具'
-  Write-Host '  .\install.ps1 -Setup                     # 交互式配置 YCE 搜索密钥 / Youwen 增强 Token'
-  Write-Host '  .\install.ps1 -Setup -YceRelayToken <key> # 直接写入 YCE 搜索密钥'
-  Write-Host '  .\install.ps1 -Setup -YouwenToken <token> # 仅写入 Youwen 增强 Token'
+  Write-Host '  .\install.ps1 -Setup                     # 交互式配置统一 YCE Key'
+  Write-Host '  .\install.ps1 -Setup -YceRelayToken <key> # 直接写入统一 YCE Key'
   Write-Host '  .\install.ps1 -Sync                      # 同步脚本 + 配置到其他已安装目录'
   Write-Host '  .\install.ps1 -SyncEnv                   # 仅同步 .env'
   Write-Host '  .\install.ps1 -Check                     # 检查安装状态'
   Write-Host '  .\install.ps1 -Uninstall                 # 卸载'
-  Write-Host '  .\install.ps1 -Setup -YouwenScript <path> -DryRun'
+  Write-Host '  .\install.ps1 -Setup -PromptEnhanceScript <path> -DryRun'
   Write-Host ''
   Write-Host "支持的工具: $($ToolMap.Key -join ', ')"
   Write-Host ''
   Write-Host '说明:'
   Write-Host '  - 检索默认连接远端 relay（https://yce.aigy.de），安装时会写入 YCE_RELAY_URL'
-  Write-Host '  - YCE_RELAY_TOKEN 是 YCE 搜索密钥，请用 -YceRelayToken 或交互项填写；不会再从 YCE_YOUWEN_TOKEN 自动复制'
+  Write-Host '  - YCE_RELAY_TOKEN 是统一 YCE Key，代码检索、联网检索和提示词增强共用'
   Write-Host '  - -Setup 可交互选择 YCE_LOCAL_FALLBACK；也可用 -LocalFallback true/false 或 -NoLocalFallback'
-  Write-Host '  - -Setup 会优先复用当前 .env，并优先对齐仓内 scripts\youwen.js 对应的 YCE 根目录配置'
-  Write-Host "  - YCE_YOUWEN_SCRIPT 默认使用仓内脚本: $DefaultYouwenScript；如需特殊覆盖，仍可通过 -YouwenScript 或 .env 指定"
+  Write-Host '  - -Setup 会优先复用当前 .env，并对齐仓内 scripts\prompt-enhance.js'
+  Write-Host "  - YCE_PROMPT_ENHANCE_SCRIPT 默认使用仓内脚本: $DefaultPromptEnhanceScript"
   Write-Host '  - 本仓已内置 yce-engine 检索引擎（vendor\yce-engine）与 yce enhance 脚本'
   Write-Host '  - 当前 install.ps1 目标兼容 Windows PowerShell 5.1'
-  Write-Host '  - scripts\lib\* 是内部模块，不应直接配置成 YCE_YOUWEN_SCRIPT'
-  Write-Host '  - yw-enhance 扩展参数: -YouwenApiUrl -YouwenToken -YouwenEnhanceMode -YouwenEnableSearch -YouwenMgrepApiKey'
+  Write-Host '  - scripts\lib\* 是内部模块，不应直接配置成 YCE_PROMPT_ENHANCE_SCRIPT'
+  Write-Host '  - 提示词增强参数: -PromptEnhanceScript -PromptEnhanceMode -PromptEnhanceEnableSearch'
   Write-Host '  - yce-engine 扩展参数: -YceEngineScript -YceEngineMaxResults -YceEngineMaxTurns -TimeoutEnhance -TimeoutSearch'
   Write-Host '  - 可加 -DryRun 只看将要执行的动作，不真正写文件/删除/同步'
   exit 0

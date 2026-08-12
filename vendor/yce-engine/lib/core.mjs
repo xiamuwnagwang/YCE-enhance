@@ -159,7 +159,9 @@ async function _installTunedDispatcher() {
     globalThis[_GLOBAL_DISPATCHER_SYMBOL] = new Agent({
       keepAliveTimeout: 30_000,
       keepAliveMaxTimeout: 60_000,
-      connect: { timeout: 5_000 },
+      // 10s 与 lease 请求的 AbortSignal.timeout(10_000) 对齐：
+      // 5s 在代理 / 高延迟网络下 TLS 握手会直接 fetch failed。
+      connect: { timeout: 10_000 },
     });
   } catch {
     // Tuning is best-effort; stock fetch behavior remains correct.
@@ -1003,6 +1005,7 @@ async function _requestRelayLease({
         body: JSON.stringify({
           exclude_key_ids: normalizedExclusions,
           retry_attempt: normalizedRetryAttempt,
+          supports_bounded_key_failover: true,
         }),
         signal: AbortSignal.timeout(10_000),
       });
@@ -1050,6 +1053,7 @@ async function _requestRelayLease({
           ? Number(payload.max_stream_calls)
           : undefined,
         usageMode: String(payload?.usage_mode || "").trim() || undefined,
+        validationSource: String(payload?.validation_source || "").trim() || undefined,
       };
     }
     return null;
@@ -1151,6 +1155,7 @@ function _usageContextFromLease(leased) {
     serverAllowsReuse: leased.leaseReusable,
     maxStreamCalls: leased.maxStreamCalls,
     usageMode: leased.usageMode,
+    validationSource: leased.validationSource,
   };
 }
 
@@ -1620,16 +1625,37 @@ function _clearRelayCredentialState(state) {
   state.usageContext = null;
 }
 
-function _isCrossKeyRetryable(error) {
+const REQUEST_RECOVERY_VALIDATION_SOURCE = "request_recovery";
+
+function _relayValidationSource(error, usageContext = null) {
+  return String(
+    usageContext?.validationSource ||
+    error?.__yceValidationSource ||
+    error?.details?.validationSource ||
+    "",
+  ).trim();
+}
+
+function _sameKeyRetryBudget(usageContext, configuredRetries) {
+  if (usageContext?.validationSource === REQUEST_RECOVERY_VALIDATION_SOURCE) return 0;
+  const retries = Number(configuredRetries);
+  return Number.isFinite(retries) && retries > 0 ? Math.floor(retries) : 0;
+}
+
+function _isCrossKeyRetryable(error, usageContext = null) {
   if (!error) return false;
-  if (error.code === "RATE_LIMITED") return false;
-  if (error.code === "TRANSIENT_CAPACITY") return true;
-  if ((error?.details?.status ?? error?.status) === 429) return false;
-  return _isTransientCapacitySignal({
-    status: error?.details?.status ?? error?.status ?? null,
-    code: error?.details?.upstreamCode || error?.code || "",
-    message: error?.message || "",
-  });
+  const status = Number(error?.details?.status ?? error?.status);
+  const source = String(error?.details?.errorSource || error?.errorSource || "").trim();
+  if (error.code === "AUTH_ERROR") {
+    return source !== "relay" && (status === 401 || status === 403);
+  }
+  if (_relayValidationSource(error, usageContext) !== REQUEST_RECOVERY_VALIDATION_SOURCE || source === "relay") {
+    return false;
+  }
+  if (error.code === "RATE_LIMITED" || error.code === "TRANSIENT_CAPACITY" || status === 429) {
+    return true;
+  }
+  return status >= 500 && status <= 599;
 }
 
 function _isRelayLeaseLifecycleError(error) {
@@ -1684,60 +1710,80 @@ async function _streamingRequestWithRelayFailover({
           leaseLifecycleRetry: true,
         });
       }
-      await _reportLeaseFailure(credentialState.usageContext, {
+      const failedUsageContext = credentialState.usageContext;
+      const failedKeyId = failedUsageContext?.keyId || leased.keyId || "";
+      const validationSource = failedUsageContext?.validationSource || leased.validationSource || "";
+      await _reportLeaseFailure(failedUsageContext, {
         error,
-        statusCode: error?.status || 401,
+        statusCode: error?.status || classified?.details?.status || 401,
         errorMessage: error?.message || "failed to fetch JWT",
       });
+      classified.__yceUsageReported = true;
+      classified.__yceFailedKeyId = failedKeyId;
+      classified.__yceValidationSource = validationSource;
       _clearRelayCredentialState(credentialState);
-      throw error;
+      throw classified;
     }
   };
 
-  await ensureCredential({ retryAttempt: 0, forceNew: true });
-  const failedKeyId = credentialState.usageContext?.keyId || "";
+  let failedKeyId = "";
+  let initialCredentialReady = false;
+  try {
+    await ensureCredential({ retryAttempt: 0, forceNew: true });
+    failedKeyId = credentialState.usageContext?.keyId || "";
+    initialCredentialReady = true;
+  } catch (error) {
+    const classified = _classifyError(error);
+    failedKeyId = String(classified.__yceFailedKeyId || "").trim();
+    if (!credentialState.relayManaged || !_isCrossKeyRetryable(classified)) {
+      throw classified;
+    }
+  }
   // Current relays return structured lease lifecycle errors. Those are safe to
   // heal with one fresh lease even before the first stream (for example Redis
-  // restarted after lease issue). A bare/upstream 401 is never re-leased.
-  try {
-    const data = await request(
-      buildProto(credentialState.apiKey, credentialState.jwt),
-      timeoutMs,
-      maxRetries,
-      credentialState.usageContext,
-    );
-    // Keep a still-valid lease for the next logical call of this search run;
-    // ensureCredential re-leases automatically once it nears expiry.
-    if (credentialState.relayManaged && !_leaseReusable(credentialState.usageContext)) {
-      _clearRelayCredentialState(credentialState);
-    }
-    return data;
-  } catch (error) {
-    const staleLease = credentialState.relayManaged &&
-      _isRelayLeaseLifecycleError(error);
-    if (staleLease) {
-      _clearRelayCredentialState(credentialState);
-      await ensureCredential({ retryAttempt: 0, forceNew: true });
-      return await request(
+  // restarted after lease issue). An upstream 401/403 is also allowed exactly
+  // one alternate Key, but Relay-originated authentication failures are not.
+  if (initialCredentialReady) {
+    try {
+      const data = await request(
         buildProto(credentialState.apiKey, credentialState.jwt),
         timeoutMs,
-        maxRetries,
+        _sameKeyRetryBudget(credentialState.usageContext, maxRetries),
         credentialState.usageContext,
-      ).then((data) => {
-        if (!_leaseReusable(credentialState.usageContext)) {
-          _clearRelayCredentialState(credentialState);
-        }
-        return data;
-      }).catch((retryError) => {
+      );
+      // Keep a still-valid lease for the next logical call of this search run;
+      // ensureCredential re-leases automatically once it nears expiry.
+      if (credentialState.relayManaged && !_leaseReusable(credentialState.usageContext)) {
         _clearRelayCredentialState(credentialState);
-        throw retryError;
-      });
+      }
+      return data;
+    } catch (error) {
+      const staleLease = credentialState.relayManaged &&
+        _isRelayLeaseLifecycleError(error);
+      if (staleLease) {
+        _clearRelayCredentialState(credentialState);
+        await ensureCredential({ retryAttempt: 0, forceNew: true });
+        return await request(
+          buildProto(credentialState.apiKey, credentialState.jwt),
+          timeoutMs,
+          _sameKeyRetryBudget(credentialState.usageContext, maxRetries),
+          credentialState.usageContext,
+        ).then((data) => {
+          if (!_leaseReusable(credentialState.usageContext)) {
+            _clearRelayCredentialState(credentialState);
+          }
+          return data;
+        }).catch((retryError) => {
+          _clearRelayCredentialState(credentialState);
+          throw retryError;
+        });
+      }
+      if (!credentialState.relayManaged || !_isCrossKeyRetryable(error, credentialState.usageContext)) {
+        if (credentialState.relayManaged) _clearRelayCredentialState(credentialState);
+        throw error;
+      }
+      _clearRelayCredentialState(credentialState);
     }
-    if (!credentialState.relayManaged || !_isCrossKeyRetryable(error)) {
-      if (credentialState.relayManaged) _clearRelayCredentialState(credentialState);
-      throw error;
-    }
-    _clearRelayCredentialState(credentialState);
   }
 
   await sleep(250 + Math.floor(random() * 501));
@@ -1757,14 +1803,14 @@ async function _streamingRequestWithRelayFailover({
     return await request(
       buildProto(credentialState.apiKey, credentialState.jwt),
       timeoutMs,
-      maxRetries,
+      _sameKeyRetryBudget(credentialState.usageContext, maxRetries),
       credentialState.usageContext,
     );
   } catch (error) {
     if (!error?.__yceUsageReported && !credentialState.jwt) {
       await _reportLeaseFailure(credentialState.usageContext, {
         error,
-        statusCode: error?.status || 401,
+        statusCode: error?.status || error?.details?.status || 401,
         errorMessage: error?.message || "failed to fetch JWT",
       });
     }
@@ -1802,7 +1848,13 @@ async function fetchJwt(apiKey, usageContext = null) {
   const outer = new ProtobufEncoder();
   outer.writeMessage(1, meta);
 
-  const resp = await _unaryRequest(`${AUTH_BASE}/GetUserJwt`, outer.toBuffer(), false, usageContext);
+  const resp = await _unaryRequest(
+    `${AUTH_BASE}/GetUserJwt`,
+    outer.toBuffer(),
+    false,
+    usageContext,
+    _sameKeyRetryBudget(usageContext, 1),
+  );
   for (const s of extractStrings(resp)) {
     if (s.startsWith("eyJ") && s.includes(".")) {
       return s;
@@ -1824,7 +1876,13 @@ async function checkRateLimit(apiKey, jwt, usageContext = null) {
   req.writeString(3, YCE_REMOTE_MODEL);
 
   try {
-    await _unaryRequest(`${API_BASE}/CheckUserMessageRateLimit`, req.toBuffer(), true, usageContext);
+    await _unaryRequest(
+      `${API_BASE}/CheckUserMessageRateLimit`,
+      req.toBuffer(),
+      true,
+      usageContext,
+      _sameKeyRetryBudget(usageContext, 1),
+    );
     return true;
   } catch (e) {
     // Classified errors carry the HTTP status in details, raw ones on the error.
@@ -2463,13 +2521,16 @@ async function _searchImpl({
   }
   if (!jwt) {
     log("Fetching JWT...");
-    for (let leaseLifecycleRetry = 0; ; leaseLifecycleRetry++) {
+    let leaseLifecycleRetried = false;
+    let crossKeyRetried = false;
+    for (;;) {
       try {
         jwt = await getCachedJwt(apiKey, initialUsageContext);
         break;
       } catch (error) {
         const classified = _classifyError(error);
-        if (relayManaged && leaseLifecycleRetry === 0 && _isRelayLeaseLifecycleError(classified)) {
+        if (relayManaged && !leaseLifecycleRetried && _isRelayLeaseLifecycleError(classified)) {
+          leaseLifecycleRetried = true;
           _releaseLeaseUsage(initialUsageContext);
           _clearLeasedRelay(initialUsageContext?.leaseId || "");
           const replacement = await _leaseRelayCredential({ retryAttempt: 0, forceNew: true });
@@ -2480,15 +2541,31 @@ async function _searchImpl({
           }
         }
         if (relayManaged) {
-          await _reportLeaseFailure(initialUsageContext, {
+          const failedUsageContext = initialUsageContext;
+          const failedKeyId = failedUsageContext?.keyId || "";
+          await _reportLeaseFailure(failedUsageContext, {
             error,
-            statusCode: error?.status || 401,
+            statusCode: error?.status || classified?.details?.status || 401,
             errorMessage: error?.message || "failed to fetch JWT",
           });
-          _releaseLeaseUsage(initialUsageContext);
-          _clearLeasedRelay(initialUsageContext?.leaseId || "");
+          _releaseLeaseUsage(failedUsageContext);
+          _clearLeasedRelay(failedUsageContext?.leaseId || "");
+          if (!crossKeyRetried && _isCrossKeyRetryable(classified, failedUsageContext)) {
+            crossKeyRetried = true;
+            const alternate = await _leaseRelayCredential({
+              excludeKeyIds: failedKeyId ? [failedKeyId] : [],
+              retryAttempt: 1,
+              forceNew: true,
+            });
+            if (!alternate?.apiKey || !alternate?.keyId) {
+              throw _relayFailureError("RELAY_POOL_BUSY", { excludedKeyId: failedKeyId });
+            }
+            apiKey = alternate.apiKey;
+            initialUsageContext = _usageContextFromLease(alternate);
+            continue;
+          }
         }
-        throw error;
+        throw classified;
       }
     }
   }
@@ -2501,9 +2578,10 @@ async function _searchImpl({
   runState.credentialState = credentialState;
 
   // Advisory rate-limit probe. Runs concurrently with the bootstrap phase and
-  // local repo-map work instead of adding a serial RTT up front; the streaming
-  // path already downgrades 429s with bounded cross-key failover, so the probe
-  // only needs to settle before the main search loop starts.
+  // local repo-map work instead of adding a serial RTT up front. A normal 429
+  // is reported as a capacity signal without multiplying upstream traffic;
+  // only a server-scheduled request-recovery validation may use one alternate
+  // Key so that the user's request is not sacrificed to the validation work.
   log("Checking rate limit...");
   const probedKeyId = credentialState.usageContext?.keyId || "";
   const rateLimitPromise = checkRateLimit(apiKey, jwt, credentialState.usageContext)
@@ -2511,12 +2589,17 @@ async function _searchImpl({
 
   const handleRateLimited = async () => {
     if (credentialState.relayManaged) {
-      const failedKeyId = credentialState.usageContext?.keyId || "";
-      await _reportLeaseFailure(credentialState.usageContext, {
+      const failedUsageContext = credentialState.usageContext;
+      const failedKeyId = failedUsageContext?.keyId || "";
+      const isRequestRecovery = failedUsageContext?.validationSource === REQUEST_RECOVERY_VALIDATION_SOURCE;
+      await _reportLeaseFailure(failedUsageContext, {
         statusCode: 429,
         errorMessage: "rate limit check rejected the leased key",
       });
       _clearRelayCredentialState(credentialState);
+      if (!isRequestRecovery) {
+        return { files: [], error: "Rate limited, please try again later" };
+      }
       const alternate = await _leaseRelayCredential({
         excludeKeyIds: failedKeyId ? [failedKeyId] : [],
         retryAttempt: 1,
@@ -2573,9 +2656,10 @@ async function _searchImpl({
     log(`Bootstrap hints: patterns=${bootstrapHints.rgPatterns.length}, hot_dirs=${bootstrapHints.hotDirs.length}`);
   }
 
-  // Settle the advisory probe before the main loop; a 429 still gets the
-  // bounded key-switch treatment. Skip if bootstrap failover already replaced
-  // the probed key — the verdict belongs to the old key.
+  // Settle the advisory probe before the main loop. Only request-recovery
+  // validation gets one bounded Key switch; ordinary 429s stop here. Skip if
+  // bootstrap failover already replaced the probed key — the verdict belongs
+  // to the old key.
   const probeStillRelevant = !credentialState.relayManaged ||
     (credentialState.usageContext?.keyId || "") === probedKeyId;
   if (!(await rateLimitPromise) && probeStillRelevant) {

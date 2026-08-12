@@ -2,6 +2,7 @@ const {
   buildError,
   detectQuotaError,
   extractEnhancedBlock,
+  extractTaskPlanBlock,
   fileExists,
   isNonEmptyString,
   parseEnhancedContent,
@@ -18,7 +19,7 @@ function buildBaseArgs(scriptPath, prompt, options = {}) {
     args.push("--no-search");
   }
   // Give the SSE request a smaller budget than the subprocess kill timer so
-  // youwen.js can fail cleanly (structured error on stdout) instead of being
+  // prompt-enhance.js can fail cleanly (structured error on stdout) instead of being
   // SIGTERMed mid-stream.
   if (Number.isInteger(options.timeoutMs) && options.timeoutMs > 20000) {
     args.push("--timeout-ms", String(options.timeoutMs - 10000));
@@ -74,12 +75,13 @@ async function captureRawEvents(scriptPath, prompt, options, timeoutMs, env) {
   return summarizeEvents(commandResult.stdout);
 }
 
-async function runYwEnhance({ prompt, history, scriptPath, timeoutMs, noSearch, rawEvents, env }) {
+async function runPromptEnhance({ prompt, history, scriptPath, timeoutMs, noSearch, rawEvents, env }) {
   const enhance = {
     executed: true,
     success: false,
     prompt: null,
     recommended_skills: [],
+    task_plan: null,
     raw_stdout: null,
     stderr_summary: [],
     used_history: isNonEmptyString(history),
@@ -88,7 +90,7 @@ async function runYwEnhance({ prompt, history, scriptPath, timeoutMs, noSearch, 
   if (!fileExists(scriptPath)) {
     return {
       enhance,
-      error: buildError("yw-enhance", "DEPENDENCY_NOT_FOUND", `yw-enhance script not found: ${scriptPath}`),
+      error: buildError("prompt-enhance", "DEPENDENCY_NOT_FOUND", `prompt enhancement script not found: ${scriptPath}`),
       durationMs: 0,
     };
   }
@@ -107,7 +109,7 @@ async function runYwEnhance({ prompt, history, scriptPath, timeoutMs, noSearch, 
     }
     return {
       enhance,
-      error: buildError("yw-enhance", "TIMEOUT", `yw-enhance timed out after ${timeoutMs}ms.`),
+      error: buildError("prompt-enhance", "TIMEOUT", `prompt enhancement timed out after ${timeoutMs}ms.`),
       durationMs,
     };
   }
@@ -118,7 +120,7 @@ async function runYwEnhance({ prompt, history, scriptPath, timeoutMs, noSearch, 
     }
     return {
       enhance,
-      error: buildError("yw-enhance", "EXEC_ERROR", commandResult.spawnError.message),
+      error: buildError("prompt-enhance", "EXEC_ERROR", commandResult.spawnError.message),
       durationMs,
     };
   }
@@ -127,15 +129,21 @@ async function runYwEnhance({ prompt, history, scriptPath, timeoutMs, noSearch, 
     if (rawEvents) {
       enhance.raw_events_summary = await captureRawEvents(scriptPath, prompt, { history, noSearch }, timeoutMs, env);
     }
-    const errText = summarizeText(commandResult.stderr || commandResult.stdout).join(" | ") || `yw-enhance exited with code ${commandResult.exitCode}`;
+    const errText = summarizeText(commandResult.stderr || commandResult.stdout).join(" | ") || `prompt enhancement exited with code ${commandResult.exitCode}`;
     const combined = `${commandResult.stderr || ""}\n${commandResult.stdout || ""}`;
+    const isNotDeployed = /尚未部署|HTTP 404/.test(combined);
     const isQuota = /"code"\s*:\s*"QUOTA_EXCEEDED"/i.test(combined) || detectQuotaError(combined);
+    const code = isNotDeployed ? "NOT_DEPLOYED" : isQuota ? "QUOTA_EXCEEDED" : "EXEC_ERROR";
     return {
       enhance,
       error: buildError(
-        "yw-enhance",
-        isQuota ? "QUOTA_EXCEEDED" : "EXEC_ERROR",
-        isQuota ? `yce 额度已用尽：${errText}` : errText
+        "prompt-enhance",
+        code,
+        isNotDeployed
+          ? "线上 YCE 服务尚未部署提示词增强端点（HTTP 404）。请等待服务端发布该能力后重试。"
+          : isQuota
+            ? `yce 额度已用尽：${errText}`
+            : errText
       ),
       durationMs,
     };
@@ -148,7 +156,7 @@ async function runYwEnhance({ prompt, history, scriptPath, timeoutMs, noSearch, 
     }
     return {
       enhance,
-      error: buildError("yw-enhance", "PARSE_ERROR", "Failed to parse <enhanced> block from yw-enhance output."),
+      error: buildError("prompt-enhance", "PARSE_ERROR", "Failed to parse <enhanced> block from prompt enhancement output."),
       durationMs,
     };
   }
@@ -157,6 +165,7 @@ async function runYwEnhance({ prompt, history, scriptPath, timeoutMs, noSearch, 
   enhance.success = true;
   enhance.prompt = parsed.prompt;
   enhance.recommended_skills = parsed.recommendedSkills;
+  enhance.task_plan = extractTaskPlanBlock(commandResult.stdout);
 
   if (rawEvents) {
     enhance.raw_events_summary = await captureRawEvents(scriptPath, prompt, { history, noSearch }, timeoutMs, env);
@@ -170,5 +179,5 @@ async function runYwEnhance({ prompt, history, scriptPath, timeoutMs, noSearch, 
 }
 
 module.exports = {
-  runYwEnhance,
+  runPromptEnhance,
 };

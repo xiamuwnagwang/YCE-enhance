@@ -76,13 +76,11 @@ if [[ -d "$HOME/.agents/skills" ]]; then
   )
 fi
 
-INSTALL_FILES=("scripts" "vendor" "SKILL.md" "install.sh" "install.ps1" ".env.example" ".gitignore")
+INSTALL_FILES=("scripts" "vendor" "src" "tests" "Cargo.toml" "Cargo.lock" "SKILL.md" "install.sh" "install.ps1" ".env.example" ".gitignore")
 
-DEFAULT_YOUWEN_SCRIPT="./scripts/youwen.js"
-DEFAULT_YOUWEN_API_URL="https://a.aigy.de"
-DEFAULT_YOUWEN_ENHANCE_MODE="agent"
-DEFAULT_YOUWEN_ENABLE_SEARCH="true"
-DEFAULT_YOUWEN_MGREP_API_KEY=""
+DEFAULT_PROMPT_ENHANCE_SCRIPT="./scripts/prompt-enhance.js"
+DEFAULT_PROMPT_ENHANCE_MODE="agent"
+DEFAULT_PROMPT_ENHANCE_ENABLE_SEARCH="true"
 DEFAULT_YCE_ENGINE_SCRIPT="./vendor/yce-engine/yce-engine.mjs"
 DEFAULT_YCE_ENGINE_MAX_RESULTS="10"
 DEFAULT_YCE_ENGINE_MAX_TURNS="3"
@@ -183,22 +181,6 @@ for raw_line in Path(file_path).read_text(encoding="utf-8").splitlines():
 PY
 }
 
-resolve_youwen_env_file() {
-  local script_path="$1"
-  local expanded
-  expanded="$(resolve_path_from_script_dir "$script_path")"
-  [[ ! -f "$expanded" ]] && return 0
-  python3 - "$expanded" <<'PY'
-import sys
-from pathlib import Path
-
-script_path = Path(sys.argv[1]).resolve()
-env_path = script_path.parent.parent / ".env"
-if env_path.exists():
-    print(str(env_path))
-PY
-}
-
 # Migrate credentials written by mistake into vendor/yce-engine/.env back to skill root.
 migrate_env_from_engine_if_needed() {
   local skill_env="${1:-$ENV_FILE}"
@@ -236,12 +218,9 @@ MERGE_KEYS = (
     "YCE_ENGINE_MAX_RESULTS",
     "YCE_ENGINE_MAX_TURNS",
     "YCE_LOCAL_FALLBACK",
-    "YCE_YOUWEN_TOKEN",
-    "YCE_YOUWEN_API_URL",
-    "YCE_YOUWEN_SCRIPT",
-    "YCE_YOUWEN_ENHANCE_MODE",
-    "YCE_YOUWEN_ENABLE_SEARCH",
-    "YCE_YOUWEN_MGREP_API_KEY",
+    "YCE_PROMPT_ENHANCE_SCRIPT",
+    "YCE_PROMPT_ENHANCE_MODE",
+    "YCE_PROMPT_ENHANCE_ENABLE_SEARCH",
     "YCE_DEFAULT_MODE",
     "YCE_TIMEOUT_ENHANCE_MS",
     "YCE_TIMEOUT_SEARCH_MS",
@@ -286,7 +265,7 @@ for key, value in updates.items():
     if key not in seen:
         new_lines.append(f"{key}={value}")
 
-LEGACY_ENV_PREFIXES = ("YCE_ACE_",)
+LEGACY_ENV_PREFIXES = ("YCE_ACE_", "YCE_YOUWEN_", "YOUWEN_")
 merged_vals = {**target_vals, **updates}
 if merged_vals.get("YCE_ENGINE_SCRIPT") or merged_vals.get("YCE_RELAY_TOKEN"):
     new_lines = [
@@ -616,31 +595,28 @@ pick_sync_targets() {
 }
 
 write_runtime_config() {
-  local youwen_script="${1:-$DEFAULT_YOUWEN_SCRIPT}"
-  local youwen_api_url="${2:-$DEFAULT_YOUWEN_API_URL}"
-  local youwen_token="${3:-}"
-  local youwen_enhance_mode="${4:-$DEFAULT_YOUWEN_ENHANCE_MODE}"
-  local youwen_enable_search="${5:-$DEFAULT_YOUWEN_ENABLE_SEARCH}"
-  local youwen_mgrep_api_key="${6:-$DEFAULT_YOUWEN_MGREP_API_KEY}"
-  local yce_engine_script="${7:-$DEFAULT_YCE_ENGINE_SCRIPT}"
-  local yce_engine_max_results="${8:-$DEFAULT_YCE_ENGINE_MAX_RESULTS}"
-  local yce_engine_max_turns="${9:-$DEFAULT_YCE_ENGINE_MAX_TURNS}"
-  local yce_relay_url="${10:-}"
-  local yce_relay_token="${11:-}"
-  local mode="${12:-$DEFAULT_MODE}"
-  local timeout_enhance_ms="${13:-$DEFAULT_TIMEOUT_ENHANCE_MS}"
-  local timeout_search_ms="${14:-$DEFAULT_TIMEOUT_SEARCH_MS}"
+  local prompt_enhance_script="${1:-$DEFAULT_PROMPT_ENHANCE_SCRIPT}"
+  local prompt_enhance_mode="${2:-$DEFAULT_PROMPT_ENHANCE_MODE}"
+  local prompt_enhance_enable_search="${3:-$DEFAULT_PROMPT_ENHANCE_ENABLE_SEARCH}"
+  local yce_engine_script="${4:-$DEFAULT_YCE_ENGINE_SCRIPT}"
+  local yce_engine_max_results="${5:-$DEFAULT_YCE_ENGINE_MAX_RESULTS}"
+  local yce_engine_max_turns="${6:-$DEFAULT_YCE_ENGINE_MAX_TURNS}"
+  local yce_relay_url="${7:-}"
+  local yce_relay_token="${8:-}"
+  local mode="${9:-$DEFAULT_MODE}"
+  local timeout_enhance_ms="${10:-$DEFAULT_TIMEOUT_ENHANCE_MS}"
+  local timeout_search_ms="${11:-$DEFAULT_TIMEOUT_SEARCH_MS}"
   local local_fallback
-  local_fallback="$(normalize_local_fallback "${15:-$DEFAULT_LOCAL_FALLBACK}")"
+  local_fallback="$(normalize_local_fallback "${12:-$DEFAULT_LOCAL_FALLBACK}")"
 
-  local youwen_abs yce_engine_abs
-  youwen_abs="$(resolve_path_from_script_dir "$youwen_script")"
+  local prompt_enhance_abs yce_engine_abs
+  prompt_enhance_abs="$(resolve_path_from_script_dir "$prompt_enhance_script")"
   yce_engine_abs="$(resolve_path_from_script_dir "$yce_engine_script")"
 
-  if [[ -z "$youwen_script" ]]; then
-    warn "未检测到仓内 yce enhance 脚本：$DEFAULT_YOUWEN_SCRIPT"
-  elif [[ ! -f "$youwen_abs" ]]; then
-    warn "youwen.js not found at $youwen_script"
+  if [[ -z "$prompt_enhance_script" ]]; then
+    warn "未检测到仓内提示词增强脚本：$DEFAULT_PROMPT_ENHANCE_SCRIPT"
+  elif [[ ! -f "$prompt_enhance_abs" ]]; then
+    warn "prompt-enhance.js not found at $prompt_enhance_script"
   fi
   [[ ! -f "$yce_engine_abs" ]] && warn "yce-engine entry not found at $yce_engine_script"
 
@@ -656,16 +632,13 @@ write_runtime_config() {
 # Path contract: this file MUST be at the YCE skill root (next to install.sh / SKILL.md).
 # Do NOT place .env under vendor/yce-engine/.
 
-# yw-enhance adapter
-YCE_YOUWEN_SCRIPT=$youwen_script
-YCE_YOUWEN_API_URL=$youwen_api_url
-YCE_YOUWEN_TOKEN=$youwen_token
-YCE_YOUWEN_ENHANCE_MODE=$youwen_enhance_mode
-YCE_YOUWEN_ENABLE_SEARCH=$youwen_enable_search
-YCE_YOUWEN_MGREP_API_KEY=$youwen_mgrep_api_key
+# Prompt enhancement adapter
+YCE_PROMPT_ENHANCE_SCRIPT=$prompt_enhance_script
+YCE_PROMPT_ENHANCE_MODE=$prompt_enhance_mode
+YCE_PROMPT_ENHANCE_ENABLE_SEARCH=$prompt_enhance_enable_search
 
 # yce-engine adapter (远端优先：默认连接 yce.aigy.de relay)
-# YCE_RELAY_TOKEN 是 YCE 搜索密钥；不要和 YCE_YOUWEN_TOKEN 混用
+# YCE_RELAY_TOKEN 是统一 YCE Key；代码检索、联网检索、提示词增强和 Y-Plan 规划共用
 YCE_ENGINE_SCRIPT=$yce_engine_script
 YCE_ENGINE_MAX_RESULTS=$yce_engine_max_results
 YCE_ENGINE_MAX_TURNS=$yce_engine_max_turns
@@ -679,6 +652,13 @@ YCE_LOCAL_FALLBACK=$local_fallback
 YCE_DEFAULT_MODE=$mode
 YCE_TIMEOUT_ENHANCE_MS=$timeout_enhance_ms
 YCE_TIMEOUT_SEARCH_MS=$timeout_search_ms
+# Y-Plan 规划超时（默认 480000）与 BYOK 自定义模型（服务端放行后才生效）
+# YCE_TIMEOUT_PLAN_MS=480000
+# YCE_YPLAN_PROVIDER=
+# YCE_YPLAN_BASE_URL=
+# YCE_YPLAN_TOKEN=
+# YCE_YPLAN_MODEL=
+# YCE_YPLAN_TEMPERATURE=
 ENVEOF
 
   # Defensive: remove any .env that npm/tools may have left in the engine package dir.
@@ -689,9 +669,9 @@ ENVEOF
 
   ok "配置完成"
   echo "  .env (skill root): $ENV_FILE"
+  echo "  prompt enhancement entry: $prompt_enhance_script"
   echo "  yce-engine entry: $yce_engine_script"
-  [[ -n "$youwen_token" ]] && echo "  Youwen 增强 Token: $(mask_secret "$youwen_token")"
-  [[ -n "$yce_relay_token" ]] && echo "  YCE 搜索密钥: $(mask_secret "$yce_relay_token")"
+  [[ -n "$yce_relay_token" ]] && echo "  YCE Key: $(mask_secret "$yce_relay_token")"
   echo "  本地检索 fallback: $local_fallback"
 }
 
@@ -795,8 +775,7 @@ cmd_install() {
   echo ""
   ok "完成"
   echo ""
-  printf "  配置检索密钥: ${CYAN}bash install.sh --setup --yce-relay-token \"yce_...\"${NC}\n"
-  printf "  配置增强 Token: ${CYAN}bash install.sh --setup --youwen-token \"YW-...\"${NC}（可选）\n"
+  printf "  配置统一 YCE Key: ${CYAN}bash install.sh --setup --yce-relay-token \"yce_...\"${NC}\n"
   printf "  同步到其他目录: ${CYAN}bash install.sh --sync-env${NC}\n"
   printf "  测试: ${CYAN}node scripts/yce.js \"定位 provider 列表获取逻辑\" --mode search${NC}\n"
   echo ""
@@ -812,12 +791,9 @@ cmd_setup() {
   echo ""
 
   local has_direct_args=false
-  local youwen_script=""
-  local youwen_api_url=""
-  local youwen_token=""
-  local youwen_enhance_mode=""
-  local youwen_enable_search=""
-  local youwen_mgrep_api_key=""
+  local prompt_enhance_script=""
+  local prompt_enhance_mode=""
+  local prompt_enhance_enable_search=""
   local yce_engine_script=""
   local yce_engine_max_results=""
   local yce_engine_max_turns=""
@@ -830,12 +806,9 @@ cmd_setup() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --youwen-script) has_direct_args=true; youwen_script="$2"; shift 2 ;;
-      --youwen-api-url) has_direct_args=true; youwen_api_url="$2"; shift 2 ;;
-      --youwen-token) has_direct_args=true; youwen_token="$2"; shift 2 ;;
-      --youwen-enhance-mode) has_direct_args=true; youwen_enhance_mode="$2"; shift 2 ;;
-      --youwen-enable-search) has_direct_args=true; youwen_enable_search="$2"; shift 2 ;;
-      --youwen-mgrep-api-key) has_direct_args=true; youwen_mgrep_api_key="$2"; shift 2 ;;
+      --prompt-enhance-script) has_direct_args=true; prompt_enhance_script="$2"; shift 2 ;;
+      --prompt-enhance-mode) has_direct_args=true; prompt_enhance_mode="$2"; shift 2 ;;
+      --prompt-enhance-enable-search) has_direct_args=true; prompt_enhance_enable_search="$2"; shift 2 ;;
       --yce-engine-script) has_direct_args=true; yce_engine_script="$2"; shift 2 ;;
       --yce-engine-max-results) has_direct_args=true; yce_engine_max_results="$2"; shift 2 ;;
       --yce-engine-max-turns) has_direct_args=true; yce_engine_max_turns="$2"; shift 2 ;;
@@ -853,38 +826,22 @@ cmd_setup() {
     esac
   done
 
-  youwen_script="${youwen_script:-$(read_env_file_value "YCE_YOUWEN_SCRIPT")}"
-  local repo_youwen_abs
-  repo_youwen_abs="$(resolve_path_from_script_dir "$DEFAULT_YOUWEN_SCRIPT")"
-  if [[ -f "$repo_youwen_abs" ]]; then
-    if [[ -n "$youwen_script" && "$youwen_script" != "$DEFAULT_YOUWEN_SCRIPT" ]]; then
-      warn "检测到旧的外部 YCE_YOUWEN_SCRIPT，已切换为仓内脚本: $DEFAULT_YOUWEN_SCRIPT"
+  prompt_enhance_script="${prompt_enhance_script:-$(read_env_file_value "YCE_PROMPT_ENHANCE_SCRIPT")}";
+  local repo_prompt_enhance_abs
+  repo_prompt_enhance_abs="$(resolve_path_from_script_dir "$DEFAULT_PROMPT_ENHANCE_SCRIPT")"
+  if [[ -f "$repo_prompt_enhance_abs" ]]; then
+    if [[ -n "$prompt_enhance_script" && "$prompt_enhance_script" != "$DEFAULT_PROMPT_ENHANCE_SCRIPT" ]]; then
+      warn "检测到外部提示词增强脚本，已切换为仓内脚本: $DEFAULT_PROMPT_ENHANCE_SCRIPT"
     fi
-    youwen_script="$DEFAULT_YOUWEN_SCRIPT"
+    prompt_enhance_script="$DEFAULT_PROMPT_ENHANCE_SCRIPT"
   else
-    [[ -z "$youwen_script" ]] && youwen_script="$DEFAULT_YOUWEN_SCRIPT"
+    [[ -z "$prompt_enhance_script" ]] && prompt_enhance_script="$DEFAULT_PROMPT_ENHANCE_SCRIPT"
   fi
 
-  local upstream_youwen_env
-  upstream_youwen_env="$(resolve_youwen_env_file "$youwen_script")"
-
-  youwen_api_url="${youwen_api_url:-$(read_env_file_value "YCE_YOUWEN_API_URL")}"
-  [[ -z "$youwen_api_url" && -n "$upstream_youwen_env" ]] && youwen_api_url="$(read_env_file_value "YOUWEN_API_URL" "$upstream_youwen_env")"
-  [[ -z "$youwen_api_url" ]] && youwen_api_url="$DEFAULT_YOUWEN_API_URL"
-
-  youwen_token="${youwen_token:-$(read_env_file_value "YCE_YOUWEN_TOKEN")}"
-  [[ -z "$youwen_token" && -n "$upstream_youwen_env" ]] && youwen_token="$(read_env_file_value "YOUWEN_TOKEN" "$upstream_youwen_env")"
-
-  youwen_enhance_mode="${youwen_enhance_mode:-$(read_env_file_value "YCE_YOUWEN_ENHANCE_MODE")}"
-  [[ -z "$youwen_enhance_mode" && -n "$upstream_youwen_env" ]] && youwen_enhance_mode="$(read_env_file_value "YOUWEN_ENHANCE_MODE" "$upstream_youwen_env")"
-  [[ -z "$youwen_enhance_mode" ]] && youwen_enhance_mode="$DEFAULT_YOUWEN_ENHANCE_MODE"
-
-  youwen_enable_search="${youwen_enable_search:-$(read_env_file_value "YCE_YOUWEN_ENABLE_SEARCH")}"
-  [[ -z "$youwen_enable_search" && -n "$upstream_youwen_env" ]] && youwen_enable_search="$(read_env_file_value "YOUWEN_ENABLE_SEARCH" "$upstream_youwen_env")"
-  [[ -z "$youwen_enable_search" ]] && youwen_enable_search="$DEFAULT_YOUWEN_ENABLE_SEARCH"
-
-  youwen_mgrep_api_key="${youwen_mgrep_api_key:-$(read_env_file_value "YCE_YOUWEN_MGREP_API_KEY")}"
-  [[ -z "$youwen_mgrep_api_key" && -n "$upstream_youwen_env" ]] && youwen_mgrep_api_key="$(read_env_file_value "YOUWEN_MGREP_API_KEY" "$upstream_youwen_env")"
+  prompt_enhance_mode="${prompt_enhance_mode:-$(read_env_file_value "YCE_PROMPT_ENHANCE_MODE")}";
+  [[ -z "$prompt_enhance_mode" ]] && prompt_enhance_mode="$DEFAULT_PROMPT_ENHANCE_MODE"
+  prompt_enhance_enable_search="${prompt_enhance_enable_search:-$(read_env_file_value "YCE_PROMPT_ENHANCE_ENABLE_SEARCH")}";
+  [[ -z "$prompt_enhance_enable_search" ]] && prompt_enhance_enable_search="$DEFAULT_PROMPT_ENHANCE_ENABLE_SEARCH"
 
   yce_engine_script="${yce_engine_script:-$(read_env_file_value "YCE_ENGINE_SCRIPT")}"
   [[ -z "$yce_engine_script" ]] && yce_engine_script="$DEFAULT_YCE_ENGINE_SCRIPT"
@@ -917,9 +874,8 @@ cmd_setup() {
   if [[ "$has_direct_args" == false ]]; then
     echo "─── 交互式配置 ───"
     echo ""
-    printf "${CYAN}${BOLD}提示：${NC} YCE 检索默认连接 ${BOLD}${DEFAULT_YCE_RELAY_URL}${NC}。\n"
-    printf "      请把 YCE 搜索密钥写入 ${BOLD}YCE_RELAY_TOKEN${NC}（请求 YCE 服务时使用）。\n"
-    printf "      ${BOLD}YCE_YOUWEN_TOKEN${NC} 只用于提示词增强，不再自动当作 YCE 搜索密钥。\n"
+    printf "${CYAN}${BOLD}提示：${NC} YCE 默认连接 ${BOLD}${DEFAULT_YCE_RELAY_URL}${NC}。\n"
+    printf "      ${BOLD}YCE_RELAY_TOKEN${NC} 是统一 YCE Key，代码检索、联网检索和提示词增强共用。\n"
     echo ""
 
     echo "YCE Relay URL 当前: ${yce_relay_url:-$DEFAULT_YCE_RELAY_URL}"
@@ -927,30 +883,17 @@ cmd_setup() {
     [[ -n "$new_val" ]] && yce_relay_url="$new_val"
     echo ""
 
-    echo "YCE 搜索密钥当前: ${yce_relay_token:+$(mask_secret "$yce_relay_token")}"
-    [[ -z "$yce_relay_token" ]] && echo "YCE 搜索密钥当前: (空，检索会无法租 key，除非设置 YCE_API_KEY)"
-    read -rp "YCE 搜索密钥 / YCE_RELAY_TOKEN（必填，格式 yce_...）: " new_val
+    echo "YCE Key 当前: ${yce_relay_token:+$(mask_secret "$yce_relay_token")}";
+    [[ -z "$yce_relay_token" ]] && echo "YCE Key 当前: (空，远端能力不可用)"
+    read -rp "YCE Key / YCE_RELAY_TOKEN（必填，格式 yce_...）: " new_val
     [[ -n "$new_val" ]] && yce_relay_token="$new_val"
     echo ""
 
-    printf "${CYAN}${BOLD}提示：${NC} Youwen Token 仅用于提示词增强；没有增强需求可留空。\n"
-    echo ""
-    echo "Youwen 增强 Token 当前: ${youwen_token:+$(mask_secret "$youwen_token")}"
-    [[ -z "$youwen_token" ]] && echo "Youwen 增强 Token 当前: (空)"
-    read -rp "Youwen 增强 Token（回车保留）: " new_val
-    [[ -n "$new_val" ]] && youwen_token="$new_val"
-    echo ""
-
-    if [[ -n "$youwen_script" ]]; then
-      echo "yw-enhance 脚本: $youwen_script"
+    if [[ -n "$prompt_enhance_script" ]]; then
+      echo "提示词增强脚本: $prompt_enhance_script"
     else
-      echo "yw-enhance 脚本: 未检测到仓内脚本"
+      echo "提示词增强脚本: 未检测到仓内脚本"
     fi
-    echo ""
-
-    echo "yw-enhance API 当前: $youwen_api_url"
-    read -rp "yw-enhance API（回车保留）: " new_val
-    [[ -n "$new_val" ]] && youwen_api_url="$new_val"
     echo ""
 
     echo "增强超时当前: $timeout_enhance_ms"
@@ -978,12 +921,9 @@ cmd_setup() {
 
   info "生成 .env"
   write_runtime_config \
-    "$youwen_script" \
-    "$youwen_api_url" \
-    "$youwen_token" \
-    "$youwen_enhance_mode" \
-    "$youwen_enable_search" \
-    "$youwen_mgrep_api_key" \
+    "$prompt_enhance_script" \
+    "$prompt_enhance_mode" \
+    "$prompt_enhance_enable_search" \
     "$yce_engine_script" \
     "$yce_engine_max_results" \
     "$yce_engine_max_turns" \
@@ -1198,9 +1138,8 @@ print_help() {
   echo "  bash install.sh                            # 交互式菜单（推荐）"
   echo "  bash install.sh --install                  # 安装或更新（必要时自动下载远程最新版本）"
   echo "  bash install.sh --target agents            # 仅安装到指定工具"
-  echo "  bash install.sh --setup                    # 交互式配置 YCE 搜索密钥 / Youwen 增强 Token"
-  echo "  bash install.sh --setup --yce-relay-token <key>  # 直接写入 YCE 搜索密钥"
-  echo "  bash install.sh --setup --youwen-token <token>   # 仅写入 Youwen 增强 Token"
+  echo "  bash install.sh --setup                    # 交互式配置统一 YCE Key"
+  echo "  bash install.sh --setup --yce-relay-token <key>  # 直接写入统一 YCE Key"
   echo "  bash install.sh --setup --local-fallback true       # 远端失败时启用本地 fast fallback"
   echo "  bash install.sh --setup --no-local-fallback         # 禁用本地 fast fallback"
   echo "  bash install.sh --sync                     # 同步脚本 + 配置到其他已安装目录"
@@ -1212,13 +1151,13 @@ print_help() {
   echo ""
   echo "说明:"
   echo "  - 检索默认连接远端 relay（${DEFAULT_YCE_RELAY_URL}），安装时会写入 YCE_RELAY_URL"
-  echo "  - YCE_RELAY_TOKEN 是 YCE 搜索密钥，请用 --yce-relay-token 或交互项填写；不会再从 YCE_YOUWEN_TOKEN 自动复制"
+  echo "  - YCE_RELAY_TOKEN 是统一 YCE Key，代码检索、联网检索和提示词增强共用"
   echo "  - --setup 可交互选择是否启用 YCE_LOCAL_FALLBACK（远端失败时的本机 rg/heuristic 检索）"
-  echo "  - --setup 会优先复用当前 .env，并优先对齐仓内 scripts/youwen.js 对应的 YCE 根目录配置"
-  echo "  - YCE_YOUWEN_SCRIPT 默认使用仓内脚本: $DEFAULT_YOUWEN_SCRIPT；如需特殊覆盖，仍可通过 --youwen-script 或 .env 指定"
+  echo "  - --setup 会优先复用当前 .env，并对齐仓内 scripts/prompt-enhance.js"
+  echo "  - YCE_PROMPT_ENHANCE_SCRIPT 默认使用仓内脚本: $DEFAULT_PROMPT_ENHANCE_SCRIPT"
   echo "  - 本仓已内置 yce-engine 检索引擎（vendor/yce-engine）与 yce enhance 脚本"
-  echo "  - scripts/lib/* 是内部模块，不应直接配置成 YCE_YOUWEN_SCRIPT"
-  echo "  - yw-enhance 扩展参数: --youwen-api-url --youwen-token --youwen-enhance-mode --youwen-enable-search --youwen-mgrep-api-key"
+  echo "  - scripts/lib/* 是内部模块，不应直接配置成 YCE_PROMPT_ENHANCE_SCRIPT"
+  echo "  - 提示词增强参数: --prompt-enhance-script --prompt-enhance-mode --prompt-enhance-enable-search"
   echo "  - yce-engine 扩展参数: --yce-engine-script --yce-engine-max-results --yce-engine-max-turns --yce-relay-url --yce-relay-token --local-fallback --no-local-fallback --timeout-enhance --timeout-search"
   echo "  - 远程仓地址: $REPO_URL"
 }
@@ -1266,7 +1205,7 @@ main() {
         setup_args+=("$1")
         shift
         ;;
-      --youwen-script|--youwen-api-url|--youwen-token|--youwen-enhance-mode|--youwen-enable-search|--youwen-mgrep-api-key|--yce-engine-script|--yce-engine-max-results|--yce-engine-max-turns|--yce-relay-url|--yce-relay-token|--mode|--timeout-enhance|--timeout-search|--local-fallback)
+      --prompt-enhance-script|--prompt-enhance-mode|--prompt-enhance-enable-search|--yce-engine-script|--yce-engine-max-results|--yce-engine-max-turns|--yce-relay-url|--yce-relay-token|--mode|--timeout-enhance|--timeout-search|--local-fallback)
         setup_args+=("$1")
         shift
         [[ $# -gt 0 ]] && {

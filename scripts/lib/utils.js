@@ -29,16 +29,15 @@ function resolveConfigPath(inputPath) {
   return path.resolve(ROOT_DIR, expanded);
 }
 
-function resolveYouwenScript(configuredValue) {
-  const configuredPath = resolveConfigPath(configuredValue || DEFAULTS.youwenScript);
+function resolvePromptEnhanceScript(configuredValue) {
+  const configuredPath = resolveConfigPath(configuredValue || DEFAULTS.promptEnhanceScript);
   return configuredPath;
 }
 
 const DEFAULTS = {
-  youwenScript: "./scripts/youwen.js",
-  youwenApiUrl: "https://a.aigy.de",
-  youwenEnhanceMode: "agent",
-  youwenEnableSearch: true,
+  promptEnhanceScript: "./scripts/prompt-enhance.js",
+  promptEnhanceMode: "agent",
+  promptEnhanceEnableSearch: true,
   yceEngineScript: "./vendor/yce-engine/yce-engine.mjs",
   yceEngineMaxResults: 10,
   yceEngineMaxTurns: 3,
@@ -59,6 +58,8 @@ const DEFAULTS = {
   timeoutAutoEnhanceMs: 60000,
   timeoutSearchMs: 180000,
   timeoutNetworkMs: 120000,
+  // Relay 侧 y-plan 默认服务端超时为 480s，客户端跟随该预算。
+  timeoutPlanMs: 480000,
 };
 
 function parseEnvFile(filePath) {
@@ -147,41 +148,55 @@ function hasOwn(object, key) {
   return Object.prototype.hasOwnProperty.call(object, key);
 }
 
-function buildYwEnhanceEnv(merged) {
+function buildPromptEnhanceEnv(merged) {
   const childEnv = {};
 
-  if (hasOwn(merged, "YCE_YOUWEN_API_URL") && isNonEmptyString(merged.YCE_YOUWEN_API_URL)) {
-    const apiUrl = String(merged.YCE_YOUWEN_API_URL).trim();
-    if (apiUrl) {
-      childEnv.YOUWEN_API_URL = apiUrl;
-    }
-  }
-
-  if (hasOwn(merged, "YCE_YOUWEN_ENHANCE_MODE") && isNonEmptyString(merged.YCE_YOUWEN_ENHANCE_MODE)) {
-    const enhanceMode = String(merged.YCE_YOUWEN_ENHANCE_MODE).trim();
+  if (hasOwn(merged, "YCE_PROMPT_ENHANCE_MODE") && isNonEmptyString(merged.YCE_PROMPT_ENHANCE_MODE)) {
+    const enhanceMode = String(merged.YCE_PROMPT_ENHANCE_MODE).trim();
     if (enhanceMode) {
-      childEnv.YOUWEN_ENHANCE_MODE = enhanceMode;
+      childEnv.YCE_PROMPT_ENHANCE_MODE = enhanceMode;
     }
   }
 
-  if (hasOwn(merged, "YCE_YOUWEN_ENABLE_SEARCH") && isNonEmptyString(merged.YCE_YOUWEN_ENABLE_SEARCH)) {
-    childEnv.YOUWEN_ENABLE_SEARCH = toBoolean(
-      merged.YCE_YOUWEN_ENABLE_SEARCH,
-      DEFAULTS.youwenEnableSearch
+  if (hasOwn(merged, "YCE_PROMPT_ENHANCE_ENABLE_SEARCH") && isNonEmptyString(merged.YCE_PROMPT_ENHANCE_ENABLE_SEARCH)) {
+    childEnv.YCE_PROMPT_ENHANCE_ENABLE_SEARCH = toBoolean(
+      merged.YCE_PROMPT_ENHANCE_ENABLE_SEARCH,
+      DEFAULTS.promptEnhanceEnableSearch
     )
       ? "true"
       : "false";
   }
 
-  if (hasOwn(merged, "YCE_YOUWEN_TOKEN") && isNonEmptyString(merged.YCE_YOUWEN_TOKEN)) {
-    childEnv.YOUWEN_TOKEN = String(merged.YCE_YOUWEN_TOKEN).trim();
+  if (hasOwn(merged, "YCE_RELAY_URL") && isNonEmptyString(merged.YCE_RELAY_URL)) {
+    childEnv.YCE_RELAY_URL = String(merged.YCE_RELAY_URL).trim();
   }
 
-  if (hasOwn(merged, "YCE_YOUWEN_MGREP_API_KEY") && isNonEmptyString(merged.YCE_YOUWEN_MGREP_API_KEY)) {
-    childEnv.YOUWEN_MGREP_API_KEY = String(merged.YCE_YOUWEN_MGREP_API_KEY).trim();
+  if (hasOwn(merged, "YCE_RELAY_TOKEN") && isNonEmptyString(merged.YCE_RELAY_TOKEN)) {
+    childEnv.YCE_RELAY_TOKEN = String(merged.YCE_RELAY_TOKEN).trim();
   }
 
   return childEnv;
+}
+
+function buildYPlanCustomProvider(merged) {
+  const read = (key) =>
+    hasOwn(merged, key) && isNonEmptyString(merged[key]) ? String(merged[key]).trim() : "";
+  const provider = read("YCE_YPLAN_PROVIDER");
+  const baseUrl = read("YCE_YPLAN_BASE_URL");
+  const token = read("YCE_YPLAN_TOKEN");
+  const model = read("YCE_YPLAN_MODEL");
+  if (!provider && !baseUrl && !token && !model) {
+    return null;
+  }
+  const config = { provider, baseUrl, token, model };
+  const temperature = Number(read("YCE_YPLAN_TEMPERATURE"));
+  if (Number.isFinite(temperature)) {
+    config.temperature = temperature;
+  }
+  if (read("YCE_YPLAN_FORCE_STREAM") === "true") {
+    config.forceStream = true;
+  }
+  return config;
 }
 
 function buildYceEngineEnv(merged) {
@@ -212,14 +227,12 @@ function buildYceEngineEnv(merged) {
 function loadRuntimeConfig() {
   const envFile = parseEnvFile(path.join(ROOT_DIR, ".env"));
   const merged = { ...envFile, ...process.env };
-  const youwenToken = isNonEmptyString(merged.YCE_YOUWEN_TOKEN)
-    ? String(merged.YCE_YOUWEN_TOKEN).trim()
-    : isNonEmptyString(merged.YOUWEN_TOKEN)
-      ? String(merged.YOUWEN_TOKEN).trim()
-      : "";
+  const relayToken = isNonEmptyString(merged.YCE_RELAY_TOKEN)
+    ? String(merged.YCE_RELAY_TOKEN).trim()
+    : "";
   return {
     rootDir: ROOT_DIR,
-    youwenScript: resolveYouwenScript(merged.YCE_YOUWEN_SCRIPT),
+    promptEnhanceScript: resolvePromptEnhanceScript(merged.YCE_PROMPT_ENHANCE_SCRIPT),
     yceEngineScript: resolveConfigPath(merged.YCE_ENGINE_SCRIPT || merged.YCE_FAST_CONTEXT_SCRIPT || DEFAULTS.yceEngineScript),
     yceEngineMaxResults: toPositiveInt(merged.YCE_ENGINE_MAX_RESULTS || merged.YCE_FAST_CONTEXT_MAX_RESULTS, DEFAULTS.yceEngineMaxResults),
     yceEngineMaxTurns: toPositiveInt(merged.YCE_ENGINE_MAX_TURNS || merged.YCE_FAST_CONTEXT_MAX_TURNS, DEFAULTS.yceEngineMaxTurns),
@@ -236,7 +249,7 @@ function loadRuntimeConfig() {
     yceEngineHotspotMaxBytes: toBoundedIntOrFallback(merged.YCE_ENGINE_HOTSPOT_MAX_BYTES, DEFAULTS.yceEngineHotspotMaxBytes, 16 * 1024, 250 * 1024),
     yceEngineBootstrapMaxTurns: toBoundedIntOrFallback(merged.YCE_ENGINE_BOOTSTRAP_MAX_TURNS, DEFAULTS.yceEngineBootstrapMaxTurns, 1, 5),
     yceEngineBootstrapMaxCommands: toBoundedIntOrFallback(merged.YCE_ENGINE_BOOTSTRAP_MAX_COMMANDS, DEFAULTS.yceEngineBootstrapMaxCommands, 1, 20),
-    ywEnhanceEnv: buildYwEnhanceEnv(merged),
+    promptEnhanceEnv: buildPromptEnhanceEnv(merged),
     yceEngineEnv: buildYceEngineEnv(merged),
     yceRelayUrl:
       (isNonEmptyString(merged.YCE_RELAY_URL)
@@ -245,7 +258,7 @@ function loadRuntimeConfig() {
     yceRelayToken: isNonEmptyString(merged.YCE_RELAY_TOKEN)
       ? String(merged.YCE_RELAY_TOKEN).trim()
       : "",
-    hasYouwenToken: Boolean(youwenToken),
+    hasPromptEnhanceToken: Boolean(relayToken),
     defaultMode: merged.YCE_DEFAULT_MODE || DEFAULTS.defaultMode,
     timeoutEnhanceMs: toPositiveInt(merged.YCE_TIMEOUT_ENHANCE_MS, DEFAULTS.timeoutEnhanceMs),
     timeoutAutoEnhanceMs: toPositiveInt(merged.YCE_TIMEOUT_AUTO_ENHANCE_MS, DEFAULTS.timeoutAutoEnhanceMs),
@@ -254,6 +267,8 @@ function loadRuntimeConfig() {
       merged.YCE_TIMEOUT_NETWORK_MS,
       DEFAULTS.timeoutNetworkMs,
     ),
+    timeoutPlanMs: toPositiveInt(merged.YCE_TIMEOUT_PLAN_MS, DEFAULTS.timeoutPlanMs),
+    yPlanCustomProvider: buildYPlanCustomProvider(merged),
   };
 }
 
@@ -272,7 +287,7 @@ function parseArgs(argv) {
     const key = arg.slice(2);
     const next = argv[index + 1];
     if (next && !next.startsWith("--")) {
-      if (key === "exclude") {
+      if (key === "exclude" || key === "accept") {
         result[key] = [...(Array.isArray(result[key]) ? result[key] : []), next];
       } else {
         result[key] = next;
@@ -335,6 +350,32 @@ function extractEnhancedBlock(rawStdout) {
   }
   const match = rawStdout.match(/<enhanced>\s*([\s\S]*?)\s*<\/enhanced>/i);
   return match ? match[1].trim() : null;
+}
+
+/**
+ * 解析增强脚本 stdout 中的 <task-plan> 任务锚点块（JSON：{goal, stages}）。
+ * 块缺省或 JSON 无效时返回 null，不影响增强主结果。
+ */
+function extractTaskPlanBlock(rawStdout) {
+  if (!isNonEmptyString(rawStdout)) {
+    return null;
+  }
+  const match = rawStdout.match(/<task-plan>\s*([\s\S]*?)\s*<\/task-plan>/i);
+  if (!match) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(match[1]);
+    if (!parsed || typeof parsed.goal !== "string" || !parsed.goal.trim()) {
+      return null;
+    }
+    return {
+      goal: parsed.goal.trim(),
+      stages: Array.isArray(parsed.stages) ? parsed.stages : [],
+    };
+  } catch {
+    return null;
+  }
 }
 
 function parseEnhancedContent(content) {
@@ -836,6 +877,9 @@ function serializeForStdout(payload, pretty = false) {
     pushLine(1, `<enhanced ${attrs}>`);
     pushTextTag(2, "prompt", payload.enhance.prompt, { cdata: true, always: true });
     pushStringList(2, "recommended-skills", "skill", payload.enhance.recommended_skills);
+    if (payload.enhance.task_plan && payload.enhance.task_plan.goal) {
+      pushTextTag(2, "task-plan", JSON.stringify(payload.enhance.task_plan), { cdata: true });
+    }
     pushTextTag(2, "raw-stdout", payload.enhance.raw_stdout, { cdata: true });
     pushStringList(2, "stderr-summary", "line", payload.enhance.stderr_summary);
 
@@ -974,6 +1018,60 @@ function serializeForStdout(payload, pretty = false) {
     );
   }
 
+  if (payload.task_context && payload.task_context.card) {
+    const card = payload.task_context.card;
+    const createdNow = payload.task_context.created_now === true;
+    pushLine(1, `<task-context present="true" created-now="${createdNow ? "true" : "false"}">`);
+    pushTextTag(2, "id", card.id);
+    pushTextTag(2, "goal", card.goal, { cdata: true });
+    pushTextTag(2, "status", card.status);
+    const stages = Array.isArray(card.stages) ? card.stages : [];
+    if (stages.length > 0) {
+      pushLine(2, `<stages>`);
+      for (const stage of stages) {
+        pushLine(
+          3,
+          `<stage n="${xmlEscapeAttr(String(stage.n))}" done="${stage.done === true ? "true" : "false"}">`,
+        );
+        pushTextTag(4, "title", stage.title || "", { cdata: true, always: true });
+        pushStringList(4, "accept", "item", stage.accept);
+        pushLine(3, `</stage>`);
+      }
+      pushLine(2, `</stages>`);
+    }
+    pushTextTag(
+      2,
+      "recite",
+      createdNow
+        ? `已自动建卡 ${card.id}。请把 goal 与阶段验收记入你的计划/todo；中途调用带 --task ${card.id}，压缩后第一步执行 task show。`
+        : `当前活跃任务卡 ${card.id}。上下文若被压缩过，以本卡 goal 与验收为准；完成前执行 task done 对照验收。`,
+      { cdata: true },
+    );
+    pushLine(1, `</task-context>`);
+  } else {
+    pushLine(1, `<task-context present="false"/>`);
+  }
+
+  if (payload.plan) {
+    const planResult = payload.plan;
+    const attrs = [
+      `executed="${xmlEscapeAttr(planResult.executed === true ? "true" : "false")}"`,
+      `success="${xmlEscapeAttr(planResult.success === true ? "true" : "false")}"`,
+      `result-present="${xmlEscapeAttr(planResult.result_present === true ? "true" : "false")}"`,
+    ];
+    pushLine(1, `<y-plan ${attrs.join(" ")}>`);
+    pushTextTag(2, "request-id", planResult.request_id, { always: true });
+    pushTextTag(2, "task", planResult.task, { cdata: true, always: true });
+    pushTextTag(2, "plan", planResult.plan, { cdata: true, always: true });
+    pushTextTag(2, "saved-path", planResult.saved_path, { cdata: true });
+    pushTextTag(2, "search-used", planResult.search_used === true ? "true" : "false");
+    pushTextTag(2, "custom-model", planResult.custom_model === true ? "true" : "false");
+    pushTextTag(2, "status", planResult.status, { always: true });
+    pushLine(1, `</y-plan>`);
+  } else {
+    pushLine(1, `<y-plan executed="false" success="false" result-present="false"/>`);
+  }
+
   if (Array.isArray(payload.errors) && payload.errors.length > 0) {
     pushLine(1, `<errors>`);
     for (const error of payload.errors) {
@@ -998,13 +1096,14 @@ function serializeForStdout(payload, pretty = false) {
       pushTextTag(3, "enhance", payload.meta.durations_ms.enhance ?? 0);
       pushTextTag(3, "search", payload.meta.durations_ms.search ?? 0);
       pushTextTag(3, "network", payload.meta.durations_ms.network ?? 0);
+      pushTextTag(3, "plan", payload.meta.durations_ms.plan ?? 0);
       pushTextTag(3, "total", payload.meta.durations_ms.total ?? 0);
       pushLine(2, `</durations-ms>`);
     }
 
     if (payload.meta.dependency_paths) {
       pushLine(2, `<dependency-paths>`);
-      pushTextTag(3, "yw-enhance-script", payload.meta.dependency_paths.yw_enhance_script, { cdata: true, always: true });
+      pushTextTag(3, "prompt-enhance-script", payload.meta.dependency_paths.prompt_enhance_script, { cdata: true, always: true });
       pushTextTag(3, "yce-engine-script", payload.meta.dependency_paths.yce_engine_script, { cdata: true, always: true });
       pushLine(2, `</dependency-paths>`);
     }
@@ -1089,6 +1188,7 @@ module.exports = {
   ensureAbsolutePath,
   expandHomePath,
   extractEnhancedBlock,
+  extractTaskPlanBlock,
   fileExists,
   isDirectory,
   isNonEmptyString,
@@ -1099,7 +1199,7 @@ module.exports = {
   parseArgs,
   parseEnhancedContent,
   resolveConfigPath,
-  resolveYouwenScript,
+  resolvePromptEnhanceScript,
   runLocalSearch,
   runCommand,
   serializeForStdout,

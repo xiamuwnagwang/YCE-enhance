@@ -79,7 +79,7 @@ writeFileSync(
 writeFileSync(
   forbiddenEnhancer,
   [
-    "console.error('enhance should not be called without YOUWEN token');",
+    "console.error('enhance should not be called without a YCE Key');",
     "process.exit(99);",
   ].join("\n")
 );
@@ -96,11 +96,8 @@ function baseEnv(overrides = {}) {
 
   // Explicit empty string must win over vendor/yce/.env so no-token tests stay deterministic.
   // Do not delete the keys: loadRuntimeConfig merges `.env` first, then process.env.
-  if (Object.prototype.hasOwnProperty.call(overrides, "YCE_YOUWEN_TOKEN")) {
-    env.YCE_YOUWEN_TOKEN = overrides.YCE_YOUWEN_TOKEN == null ? "" : String(overrides.YCE_YOUWEN_TOKEN);
-  }
-  if (Object.prototype.hasOwnProperty.call(overrides, "YOUWEN_TOKEN")) {
-    env.YOUWEN_TOKEN = overrides.YOUWEN_TOKEN == null ? "" : String(overrides.YOUWEN_TOKEN);
+  if (Object.prototype.hasOwnProperty.call(overrides, "YCE_RELAY_TOKEN")) {
+    env.YCE_RELAY_TOKEN = overrides.YCE_RELAY_TOKEN == null ? "" : String(overrides.YCE_RELAY_TOKEN);
   }
   return env;
 }
@@ -113,8 +110,8 @@ function runCli({ mode, query, enhancerScript, envOverrides = {}, extraArgs = []
       cwd: repoRoot,
       encoding: "utf8",
       env: baseEnv({
-        YCE_YOUWEN_SCRIPT: enhancerScript,
-        YCE_YOUWEN_TOKEN: "fixture-youwen-token",
+        YCE_PROMPT_ENHANCE_SCRIPT: enhancerScript,
+        YCE_RELAY_TOKEN: "fixture-yce-key",
         ...envOverrides,
       }),
     }
@@ -146,38 +143,36 @@ test("auto 在增强失败后使用原始 query 执行 search", () => {
   assert.match(result.stdout, /<resolved-action>enhance_then_search<\/resolved-action>/);
   assert.match(result.stdout, /<search executed="true" success="true" result-present="true"/);
   assert.match(result.stdout, new RegExp(`<query><!\\[CDATA\\[${originalQuery}\\]\\]><\\/query>`));
-  assert.match(result.stdout, /<error source="yw-enhance" code="EXEC_ERROR">/);
+  assert.match(result.stdout, /<error source="prompt-enhance" code="EXEC_ERROR">/);
 });
 
-test("auto 在缺少 YOUWEN token 时跳过 enhance 并直接 search", () => {
+test("auto 在缺少 YCE Key 时跳过 enhance 并直接 search", () => {
   const originalQuery = "整理需求：发布策略";
   const result = runCli({
     mode: "auto",
     query: originalQuery,
     enhancerScript: forbiddenEnhancer,
     envOverrides: {
-      YCE_YOUWEN_TOKEN: "",
-      YOUWEN_TOKEN: "",
+      YCE_RELAY_TOKEN: "",
     },
   });
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /<resolved-action>search<\/resolved-action>/);
   assert.match(result.stdout, /<enhanced\/>/);
-  assert.doesNotMatch(result.stdout, /enhance should not be called without YOUWEN token/);
+  assert.doesNotMatch(result.stdout, /enhance should not be called without a YCE Key/);
   assert.match(result.stdout, /<search executed="true" success="true" result-present="true"/);
   assert.match(result.stdout, new RegExp(`<query><!\\[CDATA\\[${originalQuery}\\]\\]><\\/query>`));
-  assert.doesNotMatch(result.stdout, /<error source="yw-enhance"/);
+  assert.doesNotMatch(result.stdout, /<error source="prompt-enhance"/);
 });
 
-test("enhance 在缺少 YOUWEN token 时拒绝执行", () => {
+test("enhance 在缺少 YCE Key 时拒绝执行", () => {
   const result = runCli({
     mode: "enhance",
     query: "优化这个任务描述",
     enhancerScript: forbiddenEnhancer,
     envOverrides: {
-      YCE_YOUWEN_TOKEN: "",
-      YOUWEN_TOKEN: "",
+      YCE_RELAY_TOKEN: "",
     },
   });
 
@@ -185,8 +180,8 @@ test("enhance 在缺少 YOUWEN token 时拒绝执行", () => {
   assert.match(result.stdout, /<resolved-action>enhance<\/resolved-action>/);
   assert.match(result.stdout, /<enhanced executed="false" success="false"/);
   assert.match(result.stdout, /code="AUTH_ERROR"/);
-  assert.match(result.stdout, /YCE_YOUWEN_TOKEN/);
-  assert.doesNotMatch(result.stdout, /enhance should not be called without YOUWEN token/);
+  assert.match(result.stdout, /YCE_RELAY_TOKEN/);
+  assert.doesNotMatch(result.stdout, /enhance should not be called without a YCE Key/);
 });
 
 test("search 参数完整透传到 engine 并输出结构化诊断", () => {
@@ -318,7 +313,7 @@ test("network adapter 使用 Bearer token 并返回独立用量", async () => {
   }
 });
 
-test("enhance 显式附加联网时即使缺少 Youwen token 也继续联网", async () => {
+test("enhance 显式附加联网时即使缺少 YCE Key 也继续联网", async () => {
   const originalFetch = global.fetch;
   global.fetch = async () => ({
     ok: true,
@@ -348,11 +343,11 @@ test("enhance 显式附加联网时即使缺少 Youwen token 也继续联网", a
       timeoutNetworkMs: 5000,
       networkOptions: { profile: "balanced", library: "", repo: "" },
       config: {
-        hasYouwenToken: false,
-        ywEnhanceEnv: {},
+        hasPromptEnhanceToken: false,
+        promptEnhanceEnv: {},
         yceRelayUrl: "https://relay.example",
         yceRelayToken: "fixture-relay-token",
-        youwenScript: forbiddenEnhancer,
+        promptEnhanceScript: forbiddenEnhancer,
         yceEngineScript: engineScript,
       },
     });
@@ -362,7 +357,7 @@ test("enhance 显式附加联网时即使缺少 Youwen token 也继续联网", a
     assert.equal(result.network_search.result_present, true);
     assert.equal(
       result.errors.some(
-        (error) => error.source === "yw-enhance" && error.code === "AUTH_ERROR",
+        (error) => error.source === "prompt-enhance" && error.code === "AUTH_ERROR",
       ),
       true,
     );
@@ -392,11 +387,11 @@ test("auto 不会因 query 含最新/官方文档等字样自动联网", async (
       timeoutNetworkMs: 5000,
       networkOptions: { profile: "balanced", library: "", repo: "" },
       config: {
-        hasYouwenToken: false,
-        ywEnhanceEnv: {},
+        hasPromptEnhanceToken: false,
+        promptEnhanceEnv: {},
         yceRelayUrl: "https://relay.example",
         yceRelayToken: "fixture-relay-token",
-        youwenScript: forbiddenEnhancer,
+        promptEnhanceScript: forbiddenEnhancer,
         yceEngineScript: engineScript,
       },
     });
@@ -445,11 +440,11 @@ test("AI 显式 --with-network 时在代码检索上叠加联网", async () => {
       networkOptions: { profile: "balanced", library: "", repo: "" },
       searchOptions: { maxResults: 3, maxTurns: 1, maxCommands: 2 },
       config: {
-        hasYouwenToken: false,
-        ywEnhanceEnv: {},
+        hasPromptEnhanceToken: false,
+        promptEnhanceEnv: {},
         yceRelayUrl: "https://relay.example",
         yceRelayToken: "fixture-relay-token",
-        youwenScript: forbiddenEnhancer,
+        promptEnhanceScript: forbiddenEnhancer,
         yceEngineScript: engineScript,
         yceEngineEnv: {},
       },
@@ -498,11 +493,11 @@ test("mode=network 只做联网不作代码检索", async () => {
       timeoutNetworkMs: 5000,
       networkOptions: { profile: "balanced", library: "", repo: "" },
       config: {
-        hasYouwenToken: false,
-        ywEnhanceEnv: {},
+        hasPromptEnhanceToken: false,
+        promptEnhanceEnv: {},
         yceRelayUrl: "https://relay.example",
         yceRelayToken: "fixture-relay-token",
-        youwenScript: forbiddenEnhancer,
+        promptEnhanceScript: forbiddenEnhancer,
         yceEngineScript: engineScript,
       },
     });
@@ -539,11 +534,11 @@ test("auto 纯代码意图默认不联网", async () => {
       networkOptions: { profile: "balanced", library: "", repo: "" },
       searchOptions: { maxResults: 3, maxTurns: 1, maxCommands: 2 },
       config: {
-        hasYouwenToken: false,
-        ywEnhanceEnv: {},
+        hasPromptEnhanceToken: false,
+        promptEnhanceEnv: {},
         yceRelayUrl: "https://relay.example",
         yceRelayToken: "fixture-relay-token",
-        youwenScript: forbiddenEnhancer,
+        promptEnhanceScript: forbiddenEnhancer,
         yceEngineScript: engineScript,
         yceEngineEnv: {},
       },

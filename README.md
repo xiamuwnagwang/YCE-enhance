@@ -1,7 +1,7 @@
 # YCE Skill
 
-YCE（Youwen Code Enhance）是面向 AI Agent 的 **提示词增强 + 语义代码检索 + 联网检索** skill。  
-当前版本：**2.1.0**。
+YCE 是面向 AI Agent 的 **提示词增强 + 语义代码检索 + 联网检索 + Y-Plan 规划** skill。
+当前版本：**3.0.0**。
 
 ## License
 
@@ -35,13 +35,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 ## 功能概览
 
-- **enhance**：把模糊任务整理成可执行提示词（**无增强密钥时不要调用**；`auto` 会自动跳过 enhance 直接 search）
+- **enhance**：把模糊任务整理成可执行提示词；与检索、联网、规划共用 `YCE_RELAY_TOKEN`
 - **search**：在本地项目内做语义代码定位（远端只做推理，不上传源码建索引）；问题已够具体时优先用这个
 - **network**：外部联网检索（事实依据 / 调研 / 官方文档 / 竞品等），结果在 XML `<network-search>`
-- **auto**：增强后在同一次调用内强制收口到 search；无增强密钥时跳过 enhance 直接 search（**不会**自动联网）
+- **plan**：Y-Plan 结构化规划（只规划不执行），结果在 XML `<y-plan><plan>`；`--with-search` 可先做代码检索让计划贴合真实代码，支持 BYOK 自定义模型（服务端放行时）
+- **auto**：增强后在同一次调用内强制收口到 search；无 YCE Key 时跳过 enhance 直接 search（**不会**自动联网）
 - **`--with-network`**：由 Agent 判断后，在任意模式上显式附加联网
+- **任务锚点**：增强产出目标与阶段验收时自动建卡到项目 `.yce/tasks/`，`task show/check/done/new` 子命令 + 每次调用复述活跃卡，防止上下文压缩后目标漂移（与 MCP 形态共享任务卡）
+- **BYOK 自备模型**：增强与 Y-Plan 均支持请求级自定义模型（`YCE_ENHANCE_*` / `YCE_YPLAN_*`），服务端开关放行后生效，密钥不落库
 
-默认经公共 **YCE 服务**（`https://yce.aigy.de`）完成鉴权、代码语义检索与联网检索；具体请求路径由 skill 内部处理，使用时只需配置 `YCE_RELAY_TOKEN` 即可。联网是否触发由 Agent 在调用时判断，CLI 不做关键词自动猜测。
+默认经公共 **YCE 服务**（`https://yce.aigy.de`）完成鉴权、代码语义检索、联网检索与 Y-Plan 规划；具体请求路径由 skill 内部处理，使用时只需配置 `YCE_RELAY_TOKEN` 即可。联网是否触发由 Agent 在调用时判断，CLI 不做关键词自动猜测。
 
 ## 快速开始
 
@@ -64,7 +67,10 @@ node ./scripts/yce.js "Locate the provider list retrieval logic" \
 | 路径 | 说明 |
 |------|------|
 | `scripts/yce.js` | 对外 CLI |
-| `scripts/youwen.js` | 仓内增强入口 |
+| `scripts/prompt-enhance.js` | 仓内提示词增强入口 |
+| `src/` / `Cargo.toml` | 原生 YCE MCP 的 Rust 源码；代码检索、联网检索、提示词增强和 Y-Plan 规划共用同一个 YCE Key |
+| `scripts/yce-mcp-native.sh` / `scripts/yce-mcp-native.ps1` | 原生 YCE MCP 启动入口 |
+| `scripts/build-native-mcp.sh` | 为当前平台构建原生 YCE MCP |
 | `vendor/yce-engine/` | 语义检索引擎 |
 | `install.sh` / `install.ps1` | 安装脚本 |
 | `SKILL.md` | Agent 调用契约与完整文档 |
@@ -77,6 +83,16 @@ bash ./scripts/build-release.sh
 ```
 
 产物在 `dist/`（不会提交密钥或 `.env`）。
+
+## 构建原生 MCP（可选）
+
+原生 MCP 的唯一源码也在本仓库，不再依赖安装目录中的独立副本。需要先安装 Rust 工具链，然后执行：
+
+```bash
+bash ./scripts/build-native-mcp.sh
+```
+
+脚本会把当前平台的二进制写入 `bin/<platform>/yce-mcp`。启动脚本只读取仓库根目录的 `.env`，并把根目录作为 `--runtime-root` 传给原生 MCP；代码检索、联网检索和提示词增强统一读取 `YCE_RELAY_TOKEN`。
 
 ## 贡献与分发
 

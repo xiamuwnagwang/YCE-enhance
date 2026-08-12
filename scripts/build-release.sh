@@ -63,6 +63,10 @@ main() {
   local items=(
     "scripts"
     "vendor"
+    "src"
+    "tests"
+    "Cargo.toml"
+    "Cargo.lock"
     "SKILL.md"
     "install.sh"
     "install.ps1"
@@ -103,7 +107,7 @@ token_re = re.compile(r"\byce_[0-9a-f]{16,}\b", re.IGNORECASE)
 for p in root.rglob("*"):
     if not p.is_file():
         continue
-    if p.suffix.lower() not in {".sh", ".ps1", ".json", ".md", ".js", ".mjs", ".cjs"}:
+    if p.suffix.lower() not in {".sh", ".ps1", ".json", ".md", ".js", ".mjs", ".cjs", ".rs", ".toml"}:
         continue
     try:
         data = p.read_text(encoding="utf-8", errors="replace")

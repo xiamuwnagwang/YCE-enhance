@@ -17,8 +17,7 @@ function resolveVersionEndpoint() {
 
   const relay =
     (process.env.YCE_RELAY_URL || "").trim() ||
-    (process.env.YCE_API_URL || "").trim() ||
-    (process.env.YCE_YOUWEN_API_URL || "").trim();
+    (process.env.YCE_API_URL || "").trim();
   if (relay) {
     try {
       const u = new URL(relay);
