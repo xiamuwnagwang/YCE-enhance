@@ -136,7 +136,8 @@ impl YceService {
     ) -> Option<TaskContext> {
         let cwd = cwd?;
         if let Some(task_plan) = task_plan {
-            if let Some(card) = task_store::create_card_from_task_plan(cwd, task_plan, original_query)
+            if let Some(card) =
+                task_store::create_card_from_task_plan(cwd, task_plan, original_query)
             {
                 self.remember_session_card(cwd, &card.id);
                 return Some(TaskContext {
@@ -209,9 +210,8 @@ impl YceService {
                 self.remember_session_card(&cwd, &card.id);
             }
             let success = card.is_some() || !cards.is_empty();
-            let error = (!success).then(|| {
-                ErrorItem::new("task", "NOT_FOUND", "当前项目没有任务卡。")
-            });
+            let error =
+                (!success).then(|| ErrorItem::new("task", "NOT_FOUND", "当前项目没有任务卡。"));
             let text = task_result_xml(&TaskResult {
                 success,
                 action: "show",
@@ -236,9 +236,8 @@ impl YceService {
         if let Some(card) = &card {
             self.remember_session_card(&cwd, &card.id);
         }
-        let error = (!success).then(|| {
-            ErrorItem::new("task", "NOT_FOUND", format!("任务卡不存在：{id}"))
-        });
+        let error =
+            (!success).then(|| ErrorItem::new("task", "NOT_FOUND", format!("任务卡不存在：{id}")));
         let text = task_result_xml(&TaskResult {
             success,
             action: "show",
@@ -260,56 +259,58 @@ impl YceService {
         default_cwd: Option<&Path>,
     ) -> Result<ExecuteOutput, YceError> {
         let cwd = resolve_project_dir(arguments.cwd.as_deref(), default_cwd)?;
-        let outcome: Result<(bool, task_store::TaskCard, Vec<task_store::TaskStage>, bool), String> =
-            match arguments.action.as_str() {
-                "new" => {
-                    // 与 CLI task new 对齐：没给验收判据就不造空阶段。
-                    let stages = if arguments.accept.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![task_store::TaskStage {
-                            n: 1,
-                            title: "验收".into(),
-                            accept: arguments.accept.clone(),
-                            done: false,
-                            evidence: None,
-                            checked_at: None,
-                        }]
-                    };
-                    task_store::create_card(
+        let outcome: Result<
+            (bool, task_store::TaskCard, Vec<task_store::TaskStage>, bool),
+            String,
+        > = match arguments.action.as_str() {
+            "new" => {
+                // 与 CLI task new 对齐：没给验收判据就不造空阶段。
+                let stages = if arguments.accept.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![task_store::TaskStage {
+                        n: 1,
+                        title: "验收".into(),
+                        accept: arguments.accept.clone(),
+                        done: false,
+                        evidence: None,
+                        checked_at: None,
+                    }]
+                };
+                task_store::create_card(
+                    &cwd,
+                    arguments.goal.as_deref().unwrap_or_default(),
+                    stages,
+                    arguments.goal.as_deref().unwrap_or_default(),
+                    "manual",
+                )
+                .map(|card| (true, card, Vec::new(), true))
+            }
+            "check" => {
+                let resolved = self
+                    .resolve_task_card(&cwd, arguments.id.as_deref())
+                    .ok_or_else(|| "找不到任务卡：请传 id 或先建卡。".to_string());
+                resolved.and_then(|card| {
+                    task_store::check_stage(
                         &cwd,
-                        arguments.goal.as_deref().unwrap_or_default(),
-                        stages,
-                        arguments.goal.as_deref().unwrap_or_default(),
-                        "manual",
+                        &card.id,
+                        arguments.stage.unwrap_or(0),
+                        arguments.evidence.as_deref().unwrap_or_default(),
                     )
-                    .map(|card| (true, card, Vec::new(), true))
-                }
-                "check" => {
-                    let resolved = self
-                        .resolve_task_card(&cwd, arguments.id.as_deref())
-                        .ok_or_else(|| "找不到任务卡：请传 id 或先建卡。".to_string());
-                    resolved.and_then(|card| {
-                        task_store::check_stage(
-                            &cwd,
-                            &card.id,
-                            arguments.stage.unwrap_or(0),
-                            arguments.evidence.as_deref().unwrap_or_default(),
-                        )
-                        .map(|card| (true, card, Vec::new(), false))
-                    })
-                }
-                "done" => {
-                    let resolved = self
-                        .resolve_task_card(&cwd, arguments.id.as_deref())
-                        .ok_or_else(|| "找不到任务卡：请传 id 或先建卡。".to_string());
-                    resolved.and_then(|card| {
-                        task_store::complete_card(&cwd, &card.id, arguments.force)
-                            .map(|outcome| (outcome.ok, outcome.card, outcome.unmet, false))
-                    })
-                }
-                other => Err(format!("未知 action：{other}")),
-            };
+                    .map(|card| (true, card, Vec::new(), false))
+                })
+            }
+            "done" => {
+                let resolved = self
+                    .resolve_task_card(&cwd, arguments.id.as_deref())
+                    .ok_or_else(|| "找不到任务卡：请传 id 或先建卡。".to_string());
+                resolved.and_then(|card| {
+                    task_store::complete_card(&cwd, &card.id, arguments.force)
+                        .map(|outcome| (outcome.ok, outcome.card, outcome.unmet, false))
+                })
+            }
+            other => Err(format!("未知 action：{other}")),
+        };
 
         match outcome {
             Ok((ok, card, unmet, created_now)) => {

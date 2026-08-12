@@ -231,8 +231,8 @@ impl PlanClient {
                 if !accumulated.trim().is_empty() {
                     result.plan = Some(accumulated);
                 }
-                let message =
-                    error_message.unwrap_or_else(|| "Y-Plan SSE 流意外结束，未收到终止事件。".into());
+                let message = error_message
+                    .unwrap_or_else(|| "Y-Plan SSE 流意外结束，未收到终止事件。".into());
                 let code = if contains_quota(&message) {
                     "QUOTA_EXCEEDED"
                 } else {
@@ -276,7 +276,11 @@ impl PlanClient {
         let mut events = Vec::new();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|error| {
-                ErrorItem::new("y-plan", "EXEC_ERROR", format!("读取 Y-Plan SSE 失败：{error}"))
+                ErrorItem::new(
+                    "y-plan",
+                    "EXEC_ERROR",
+                    format!("读取 Y-Plan SSE 失败：{error}"),
+                )
             })?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
             while let Some(newline) = buffer.find('\n') {
@@ -342,9 +346,7 @@ fn map_plan_http_error(status: reqwest::StatusCode, body: &str, token: &str) -> 
 }
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 /// 按对接契约拼落盘文件名：y-plan-<任务摘要>-<yyyyMMdd-HHmmss>.md。
@@ -391,8 +393,7 @@ pub fn save_plan_to_file(
     }
     if let Some(parent) = resolved.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("创建目录失败：{error}"))?;
+            std::fs::create_dir_all(parent).map_err(|error| format!("创建目录失败：{error}"))?;
         }
     }
     let front_matter = format!(
@@ -437,10 +438,7 @@ mod tests {
     #[test]
     fn plan_filename_follows_the_integration_contract() {
         let name = build_plan_filename("给 Go 服务增加限流中间件!!");
-        assert!(
-            regex_lite_match(&name),
-            "unexpected filename: {name}"
-        );
+        assert!(regex_lite_match(&name), "unexpected filename: {name}");
         assert!(name.starts_with("y-plan-给-go-服务增加限流中间件"));
 
         let fallback = build_plan_filename("!!!");
@@ -466,8 +464,8 @@ mod tests {
 
         // 显式 .md 路径：原样使用
         let explicit = dir.path().join("nested").join("my-plan.md");
-        let saved = save_plan_to_file("body", "explicit", explicit.to_str().unwrap())
-            .expect("saved");
+        let saved =
+            save_plan_to_file("body", "explicit", explicit.to_str().unwrap()).expect("saved");
         assert_eq!(saved, explicit);
     }
 

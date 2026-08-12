@@ -96,13 +96,9 @@ fn write_card(cwd: &Path, card: &TaskCard) -> Result<(), String> {
     let dir = tasks_dir(cwd);
     std::fs::create_dir_all(&dir).map_err(|error| format!("创建任务卡目录失败：{error}"))?;
     let target = card_path(cwd, &card.id);
-    let temp = dir.join(format!(
-        "{}.{}.tmp",
-        card.id,
-        uuid::Uuid::new_v4().simple()
-    ));
-    let payload = serde_json::to_string_pretty(card)
-        .map_err(|error| format!("序列化任务卡失败：{error}"))?;
+    let temp = dir.join(format!("{}.{}.tmp", card.id, uuid::Uuid::new_v4().simple()));
+    let payload =
+        serde_json::to_string_pretty(card).map_err(|error| format!("序列化任务卡失败：{error}"))?;
     std::fs::write(&temp, format!("{payload}\n"))
         .map_err(|error| format!("写任务卡失败：{error}"))?;
     std::fs::rename(&temp, &target).map_err(|error| format!("落盘任务卡失败：{error}"))?;
@@ -208,7 +204,12 @@ pub fn create_card(
         task: task.chars().take(TASK_PREVIEW_MAX_CHARS).collect(),
         stages: normalized,
         status: "active".into(),
-        source: if source == "manual" { "manual" } else { "enhance" }.into(),
+        source: if source == "manual" {
+            "manual"
+        } else {
+            "enhance"
+        }
+        .into(),
         created_at: now.clone(),
         updated_at: now,
         done_at: None,
@@ -257,12 +258,7 @@ pub fn create_card_from_task_plan(cwd: &Path, task_plan: &Value, task: &str) -> 
     create_card(cwd, goal, stages, task, "enhance").ok()
 }
 
-pub fn check_stage(
-    cwd: &Path,
-    id: &str,
-    stage_n: u32,
-    evidence: &str,
-) -> Result<TaskCard, String> {
+pub fn check_stage(cwd: &Path, id: &str, stage_n: u32, evidence: &str) -> Result<TaskCard, String> {
     let mut card = read_card(cwd, id).ok_or_else(|| format!("任务卡不存在：{id}"))?;
     if card.status != "active" {
         return Err(format!("任务卡状态为 {}，不能勾阶段。", card.status));

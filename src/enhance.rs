@@ -760,8 +760,8 @@ fn filter_recommended_skills(
 /// 正文兜底：解析开头的 <plan>...</plan> 锚点块（后端未升级时留在正文里）。
 /// 返回（解析出的 plan JSON, 剥离锚点后的正文）；块缺省或无 goal 时原样返回。
 fn extract_inline_plan(answer: &str) -> (Option<Value>, String) {
-    let pattern = regex::Regex::new(r"(?is)^\s*<plan>(.*?)</plan>\s*")
-        .expect("plan block regex is valid");
+    let pattern =
+        regex::Regex::new(r"(?is)^\s*<plan>(.*?)</plan>\s*").expect("plan block regex is valid");
     let Some(captures) = pattern.captures(answer) else {
         return (None, answer.to_string());
     };
@@ -964,7 +964,8 @@ mod tests {
 
     #[test]
     fn inline_plan_supports_full_tags_and_requires_goal() {
-        let full = "<plan><goal>目标</goal><stage><title>T</title><done>D1</done></stage></plan>正文";
+        let full =
+            "<plan><goal>目标</goal><stage><title>T</title><done>D1</done></stage></plan>正文";
         let (plan, body) = extract_inline_plan(full);
         assert_eq!(plan.expect("parsed")["stages"][0]["accept"][0], "D1");
         assert_eq!(body, "正文");

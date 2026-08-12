@@ -189,9 +189,7 @@ impl ToolCall {
                 Self::Network(serde_json::from_value(arguments).map_err(decode_error)?)
             }
             "y_plan" => Self::Plan(serde_json::from_value(arguments).map_err(decode_error)?),
-            "task_show" => {
-                Self::TaskShow(serde_json::from_value(arguments).map_err(decode_error)?)
-            }
+            "task_show" => Self::TaskShow(serde_json::from_value(arguments).map_err(decode_error)?),
             "task_update" => {
                 Self::TaskUpdate(serde_json::from_value(arguments).map_err(decode_error)?)
             }
@@ -370,7 +368,10 @@ pub fn tool_definitions() -> Vec<Value> {
         "mode",
         json!({"type":"string","enum":["agent","direct"],"description":"agent（默认，多 Agent 流水线，带技能推荐与任务锚点）或 direct（单次 JSON，最快，无推荐）。"}),
     );
-    enhance.insert("language", json!({"type":"string","enum":["zh-CN","en-US"]}));
+    enhance.insert(
+        "language",
+        json!({"type":"string","enum":["zh-CN","en-US"]}),
+    );
     enhance.extend(enhance_properties());
     enhance.extend(network_fields);
 
@@ -394,7 +395,10 @@ pub fn tool_definitions() -> Vec<Value> {
         "enable_web_search",
         json!({"type":"boolean","description":"是否让 Y-Plan 服务端在规划前联网调研；省略时使用服务端默认值。"}),
     );
-    plan.insert("language", json!({"type":"string","enum":["zh-CN","en-US"]}));
+    plan.insert(
+        "language",
+        json!({"type":"string","enum":["zh-CN","en-US"]}),
+    );
     plan.insert(
         "save_path",
         string_schema(
@@ -453,11 +457,15 @@ fn task_show_properties() -> BTreeSetMap {
     let mut map = BTreeSetMap::new();
     map.insert(
         "cwd",
-        string_schema("项目绝对路径；支持 MCP roots/list 的客户端可省略。任务卡存放在 <cwd>/.yce/tasks/。"),
+        string_schema(
+            "项目绝对路径；支持 MCP roots/list 的客户端可省略。任务卡存放在 <cwd>/.yce/tasks/。",
+        ),
     );
     map.insert(
         "id",
-        string_schema("任务卡 id（形如 t-20260812-ab12cd）；省略时返回最近活跃卡（压缩恢复入口）。"),
+        string_schema(
+            "任务卡 id（形如 t-20260812-ab12cd）；省略时返回最近活跃卡（压缩恢复入口）。",
+        ),
     );
     map.insert(
         "status",
@@ -482,7 +490,10 @@ fn task_update_properties() -> BTreeSetMap {
         "evidence",
         string_schema("action=check 必填：说明该阶段验收判据如何满足（命令输出、可观察结果等）。"),
     );
-    map.insert("force", json!({"type":"boolean","description":"action=done 时跳过未勾阶段强制完成。"}));
+    map.insert(
+        "force",
+        json!({"type":"boolean","description":"action=done 时跳过未勾阶段强制完成。"}),
+    );
     map.insert("goal", string_schema("action=new 必填：一句话总目标。"));
     map.insert(
         "accept",
@@ -493,12 +504,7 @@ fn task_update_properties() -> BTreeSetMap {
 
 type BTreeSetMap = std::collections::BTreeMap<&'static str, Value>;
 
-fn definition(
-    name: &str,
-    description: &str,
-    properties: BTreeSetMap,
-    required: &[&str],
-) -> Value {
+fn definition(name: &str, description: &str, properties: BTreeSetMap, required: &[&str]) -> Value {
     json!({
         "name": name,
         "description": description,
