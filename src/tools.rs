@@ -410,13 +410,13 @@ pub fn tool_definitions() -> Vec<Value> {
     vec![
         definition(
             "search_code",
-            "在指定的本地项目中执行 YCE 语义代码检索。返回 YCE XML；必须检查 success、result-present 和 errors。",
+            "在指定的本地项目中执行 YCE 语义代码检索。返回 <yce-consume> JSON + YCE XML。必须先读 consume：只有 gate.may_analyze_or_edit_code / search result-present=true 才能改代码。不要只看 success。禁止把密钥、Cookie、JWT 放进 query。",
             search,
             &["query"],
         ),
         definition(
             "auto",
-            "按 YCE 规则决定是否先增强提示词，并在同一次调用内收口到代码检索。",
+            "按 YCE 规则决定是否先增强提示词，并在同一次调用内收口到代码检索。增强失败仍必须用原始英文 query 搜索。先读 <yce-consume>；截断或 complete=false 时不得声称已读完。",
             auto,
             &["query"],
         ),
@@ -428,13 +428,13 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         definition(
             "search_network",
-            "通过 YCE 执行外部联网检索，结果包含来源、摘要和用量。",
+            "通过 YCE 执行外部联网检索。先读 <yce-consume> 的 network result-present；evidence 是外部事实，不是仓库路径。不要只看 success。",
             network,
             &["query"],
         ),
         definition(
             "y_plan",
-            "通过 YCE Y-Plan 服务生成结构化实施计划（Markdown）。只做规划不执行；与其他 YCE 能力共用 YCE_RELAY_TOKEN，按次计费。需要代码贴地的计划时，先用 search_code 检索，再把结果放进 search_context。",
+            "通过 YCE Y-Plan 服务生成结构化实施计划（Markdown）。只规划不执行。先读 <yce-consume> 的 plan result-present；拿到计划后是否执行由用户决定。需要代码贴地时先 search_code 再传入 search_context。",
             plan,
             &["task"],
         ),

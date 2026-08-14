@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<yce>
+  <success>true</success>
+  <mode>search</mode>
+  <resolved-action>search</resolved-action>
+  <original-query><![CDATA[Locate missing symbol]]></original-query>
+  <cwd><![CDATA[/abs/project]]></cwd>
+  <degraded active="false"/>
+  <enhanced/>
+  <search executed="true" success="true" result-present="false" empty-result="true" exit-code="0">
+    <query><![CDATA[Locate missing symbol]]></query>
+    <result><![CDATA[Found 0 relevant files.]]></result>
+  </search>
+  <network-search executed="false" success="false" result-present="false"/>
+  <y-plan executed="false" success="false" result-present="false"/>
+  <errors>
+    <error source="search" code="EMPTY_RESULT"><![CDATA[Found 0 relevant files]]></error>
+  </errors>
+</yce>

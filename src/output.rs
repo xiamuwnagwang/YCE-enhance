@@ -7,6 +7,10 @@ use crate::model::{
 };
 use crate::task_store::{TaskCard, TaskStage};
 
+pub fn to_tool_text(payload: &YceResponse, pretty: bool) -> String {
+    crate::consume::wrap_xml(&to_xml(payload, pretty), payload)
+}
+
 pub fn to_xml(payload: &YceResponse, pretty: bool) -> String {
     let mut xml = XmlWriter::new(pretty);
     xml.raw(0, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>");

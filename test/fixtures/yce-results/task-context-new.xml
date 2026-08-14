@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<yce>
+  <success>true</success>
+  <mode>auto</mode>
+  <resolved-action>enhance_then_search</resolved-action>
+  <original-query><![CDATA[Locate session store]]></original-query>
+  <cwd><![CDATA[/abs/project]]></cwd>
+  <degraded active="false"/>
+  <enhanced executed="true" success="true" used-history="true">
+    <prompt><![CDATA[Locate the session store write path]]></prompt>
+    <task-plan><![CDATA[{"goal":"Migrate sessions","stages":[{"n":1,"title":"Find writers","accept":["list files"]}]}]]></task-plan>
+  </enhanced>
+  <search executed="true" success="true" result-present="true" empty-result="false" exit-code="0">
+    <query><![CDATA[Locate the session store write path]]></query>
+    <result><![CDATA[Path: src/session.ts]]></result>
+  </search>
+  <network-search executed="false" success="false" result-present="false"/>
+  <y-plan executed="false" success="false" result-present="false"/>
+  <task-context present="true" created-now="true">
+    <id>t-20260814-ab12cd</id>
+    <goal><![CDATA[Migrate sessions]]></goal>
+    <status>active</status>
+    <recite><![CDATA[已自动建卡 t-20260814-ab12cd。]]></recite>
+  </task-context>
+  <errors/>
+</yce>

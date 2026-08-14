@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<yce>
+  <success>true</success>
+  <mode>search</mode>
+  <resolved-action>search</resolved-action>
+  <original-query><![CDATA[Locate auth middleware]]></original-query>
+  <cwd><![CDATA[/abs/project]]></cwd>
+  <degraded active="false"/>
+  <enhanced/>
+  <search executed="true" success="true" result-present="true" empty-result="false" exit-code="0">
+    <query><![CDATA[Locate auth middleware]]></query>
+    <result><![CDATA[Path: src/auth.ts (L8-80)
+... (lines truncated) ...]]></result>
+  </search>
+  <network-search executed="false" success="false" result-present="false"/>
+  <y-plan executed="false" success="false" result-present="false"/>
+  <errors>
+    <error source="search" code="UPSTREAM_ERROR"><![CDATA[partial upstream warning]]></error>
+  </errors>
+</yce>

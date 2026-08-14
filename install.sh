@@ -76,7 +76,7 @@ if [[ -d "$HOME/.agents/skills" ]]; then
   )
 fi
 
-INSTALL_FILES=("scripts" "vendor" "src" "tests" "Cargo.toml" "Cargo.lock" "SKILL.md" "install.sh" "install.ps1" ".env.example" ".gitignore")
+INSTALL_FILES=("scripts" "vendor" "src" "test" "tests" "references" "Cargo.toml" "Cargo.lock" "SKILL.md" "install.sh" "install.ps1" ".env.example" ".gitignore")
 
 DEFAULT_PROMPT_ENHANCE_SCRIPT="./scripts/prompt-enhance.js"
 DEFAULT_PROMPT_ENHANCE_MODE="agent"

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<yce>
+  <success>true</success>
+  <mode>auto</mode>
+  <resolved-action>enhance_then_search</resolved-action>
+  <original-query><![CDATA[Locate the publish policy]]></original-query>
+  <cwd><![CDATA[/abs/project]]></cwd>
+  <degraded active="true">
+    <summary><![CDATA[enhance failed; search used original query]]></summary>
+    <failed-stage>enhance</failed-stage>
+    <search-query-source>original-query</search-query-source>
+    <fallback-query><![CDATA[Locate the publish policy]]></fallback-query>
+  </degraded>
+  <enhanced executed="true" success="false" used-history="false">
+    <prompt/>
+  </enhanced>
+  <search executed="true" success="true" result-present="true" empty-result="false" exit-code="0">
+    <query><![CDATA[Locate the publish policy]]></query>
+    <result><![CDATA[Path: src/publish.ts (L1-20)]]></result>
+  </search>
+  <network-search executed="false" success="false" result-present="false"/>
+  <y-plan executed="false" success="false" result-present="false"/>
+  <errors>
+    <error source="prompt-enhance" code="EXEC_ERROR"><![CDATA[fixture enhancement failed]]></error>
+  </errors>
+</yce>

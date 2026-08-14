@@ -272,7 +272,7 @@ impl McpServer {
                             "name": SERVER_NAME,
                             "version": env!("CARGO_PKG_VERSION")
                         },
-                        "instructions": "代码检索可以省略 cwd；支持 roots 的客户端会自动提供唯一工作区。客户端提供多个工作区时必须明确传 cwd。结果是 YCE XML，不能只看 success，还要检查 result-present 和 errors。"
+                        "instructions": crate::consume::MCP_INSTRUCTIONS
                     }),
                 ))?])
             }

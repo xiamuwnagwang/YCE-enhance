@@ -67,7 +67,7 @@ $DefaultTimeoutEnhance = "300000"
 $DefaultTimeoutSearch = "180000"
 $DefaultLocalFallback = "false"
 $DefaultPromptEnhanceScript = ".\scripts\prompt-enhance.js"
-$InstallFiles = @("scripts", "vendor", "src", "tests", "Cargo.toml", "Cargo.lock", "SKILL.md", "install.sh", "install.ps1", ".env.example", ".gitignore")
+$InstallFiles = @("scripts", "vendor", "src", "test", "tests", "references", "Cargo.toml", "Cargo.lock", "SKILL.md", "install.sh", "install.ps1", ".env.example", ".gitignore")
 
 function Initialize-NetworkDefaults {
   try {

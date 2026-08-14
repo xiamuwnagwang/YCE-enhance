@@ -1,4 +1,5 @@
 pub mod config;
+pub mod consume;
 pub mod enhance;
 pub mod error;
 pub mod model;

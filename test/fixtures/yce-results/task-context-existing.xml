@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<yce>
+  <success>true</success>
+  <mode>search</mode>
+  <resolved-action>search</resolved-action>
+  <original-query><![CDATA[Locate session store]]></original-query>
+  <cwd><![CDATA[/abs/project]]></cwd>
+  <degraded active="false"/>
+  <enhanced/>
+  <search executed="true" success="true" result-present="true" empty-result="false" exit-code="0">
+    <query><![CDATA[Locate session store]]></query>
+    <result><![CDATA[Path: src/session.ts]]></result>
+  </search>
+  <network-search executed="false" success="false" result-present="false"/>
+  <y-plan executed="false" success="false" result-present="false"/>
+  <task-context present="true" created-now="false">
+    <id>t-20260814-ab12cd</id>
+    <goal><![CDATA[Migrate sessions]]></goal>
+    <status>active</status>
+    <recite><![CDATA[当前活跃任务卡 t-20260814-ab12cd。]]></recite>
+  </task-context>
+  <errors/>
+</yce>

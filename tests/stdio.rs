@@ -372,6 +372,8 @@ fn y_plan_tool_streams_a_plan_from_the_relay() {
         .as_str()
         .expect("tool call returns text");
     assert!(messages[1]["result"]["isError"] != serde_json::json!(true));
+    assert!(text.contains("<yce-consume>"), "missing consume envelope: {text}");
+    assert!(text.contains("\"xml_bytes\""), "missing xml_bytes: {text}");
     assert!(text.contains("<mode>plan</mode>"), "unexpected XML: {text}");
     assert!(
         text.contains("<y-plan executed=\"true\" success=\"true\" result-present=\"true\">"),

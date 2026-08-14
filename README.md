@@ -1,7 +1,7 @@
 # YCE Skill
 
 YCE 是面向 AI Agent 的 **提示词增强 + 语义代码检索 + 联网检索 + Y-Plan 规划** skill。
-当前版本：**3.0.0**。
+当前版本：**3.1.0**。
 
 ## License
 
@@ -60,20 +60,25 @@ node ./scripts/yce.js "Locate the provider list retrieval logic" \
   --xml-pretty
 ```
 
-配置检索密钥（`YCE_RELAY_TOKEN`）等环境变量，详见 `SKILL.md`。
+配置检索密钥（`YCE_RELAY_TOKEN`）等环境变量，详见 [`SKILL.md`](./SKILL.md) 与 [`references/modes.md`](./references/modes.md)。
+
+调用后必须把 stdout 存文件并用 `node ./scripts/validate-yce-result.mjs` 校验；不要把截断的终端输出当成完整结果。
 
 ## 仓库内容
 
 | 路径 | 说明 |
 |------|------|
 | `scripts/yce.js` | 对外 CLI |
+| `scripts/validate-yce-result.mjs` | 校验 YCE XML 是否完整、是否有 result-present |
+| `scripts/quick_validate.py` | skill 协议质量门（行数、引用、fixture） |
+| `references/` | 模式、XML 契约、锚点、联网、Windows、排障、示例 |
+| `SKILL.md` | Agent 执行协议（短）；细节见 `references/` |
 | `scripts/prompt-enhance.js` | 仓内提示词增强入口 |
 | `src/` / `Cargo.toml` | 原生 YCE MCP 的 Rust 源码；代码检索、联网检索、提示词增强和 Y-Plan 规划共用同一个 YCE Key |
 | `scripts/yce-mcp-native.sh` / `scripts/yce-mcp-native.ps1` | 原生 YCE MCP 启动入口 |
 | `scripts/build-native-mcp.sh` | 为当前平台构建原生 YCE MCP |
 | `vendor/yce-engine/` | 语义检索引擎 |
 | `install.sh` / `install.ps1` | 安装脚本 |
-| `SKILL.md` | Agent 调用契约与完整文档 |
 | `LICENSE` | GPL-3.0 全文 |
 
 ## 构建发布包（可选）

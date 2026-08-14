@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<yce>
+  <success>true</success>
+  <mode>search</mode>
+  <resolved-action>search</resolved-action>
+  <search executed="true" success="true" result-present="true" empty-result="false">
+    <query><![CDATA[Locate auth middleware]]></query>
+    <result><![CDATA[Path: src/auth.ts
+[truncated]
+token limit exceeded

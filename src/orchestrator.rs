@@ -10,7 +10,7 @@ use crate::enhance::EnhanceClient;
 use crate::error::{ErrorItem, YceError};
 use crate::model::{Degradation, Durations, Mode, TaskContext, YceResponse};
 use crate::network::NetworkClient;
-use crate::output::{task_result_xml, to_xml, TaskResult};
+use crate::output::{task_result_xml, to_tool_text, TaskResult};
 use crate::plan::{save_plan_to_file, PlanClient, PlanRequest};
 use crate::search::SearchEngine;
 use crate::task_store;
@@ -165,7 +165,7 @@ impl YceService {
             Err(_) => {
                 let response = timeout_response(name, self.tool_timeout);
                 Ok(ExecuteOutput {
-                    text: to_xml(&response, true),
+                    text: to_tool_text(&response, true),
                     is_error: true,
                 })
             }
@@ -192,7 +192,7 @@ impl YceService {
         };
         Ok(ExecuteOutput {
             is_error: !response.success,
-            text: to_xml(&response, true),
+            text: to_tool_text(&response, true),
         })
     }
 
