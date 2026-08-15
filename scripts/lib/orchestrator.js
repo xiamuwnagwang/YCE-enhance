@@ -52,8 +52,11 @@ function resolveAction(mode, query) {
 }
 
 function hasPromptEnhanceToken(config) {
-  if (config && config.hasPromptEnhanceToken === true) {
-    return true;
+  // loadRuntimeConfig always resolves this from .env + process.env, so an
+  // explicit boolean is authoritative — including an explicit false. Falling
+  // back to process.env here would let an ambient token override the caller.
+  if (config && typeof config.hasPromptEnhanceToken === "boolean") {
+    return config.hasPromptEnhanceToken;
   }
   const env = config && config.promptEnhanceEnv ? config.promptEnhanceEnv : {};
   return Boolean(
