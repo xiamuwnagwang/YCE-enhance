@@ -9,6 +9,7 @@
  * carries a tail sentinel so any reader can prove it read the whole thing.
  */
 
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -21,6 +22,11 @@ const {
 
 const RECEIPT_SCHEMA = "yce-receipt/1";
 const MAX_ERROR_MESSAGE = 300;
+const MAX_ERRORS = 5;
+const MAX_REASONS = 10;
+const MAX_REASON_LENGTH = 200;
+// The receipt's whole point is being too small to truncate, so cap it.
+const MAX_RECEIPT_BYTES = 4096;
 const STALE_RESULT_MS = 3 * 24 * 60 * 60 * 1000;
 
 function defaultResultDir() {
@@ -49,7 +55,10 @@ function looksLikeDirectory(target) {
 function resolveResultPath(options = {}) {
   const outArg = String(options.outArg || "").trim();
   const mode = String(options.mode || "yce").toLowerCase();
-  const fileName = `yce-${mode}-${timestampSlug()}-${process.pid}.xml`;
+  // Random suffix: pid + second-resolution timestamp collide when one process
+  // writes twice in the same second.
+  const unique = `${process.pid}-${crypto.randomBytes(3).toString("hex")}`;
+  const fileName = `yce-${mode}-${timestampSlug()}-${unique}.xml`;
 
   if (!outArg) {
     return path.join(defaultResultDir(), fileName);
@@ -95,7 +104,7 @@ function writeResultFile(body, filePath) {
 
 function trimErrors(errors) {
   if (!Array.isArray(errors)) return [];
-  return errors.slice(0, 5).map((item) => {
+  const kept = errors.slice(0, MAX_ERRORS).map((item) => {
     const message = String((item && item.message) || "");
     return {
       source: (item && item.source) || null,
@@ -106,6 +115,29 @@ function trimErrors(errors) {
           : message,
     };
   });
+  if (errors.length > MAX_ERRORS) {
+    kept.push({
+      source: "receipt",
+      code: "MORE_ERRORS",
+      message: `${errors.length - MAX_ERRORS} more error(s) in result_file`,
+    });
+  }
+  return kept;
+}
+
+function trimReasons(reasons) {
+  if (!Array.isArray(reasons)) return [];
+  const kept = reasons
+    .slice(0, MAX_REASONS)
+    .map((reason) =>
+      String(reason).length > MAX_REASON_LENGTH
+        ? `${String(reason).slice(0, MAX_REASON_LENGTH)}…`
+        : String(reason),
+    );
+  if (reasons.length > MAX_REASONS) {
+    kept.push(`… ${reasons.length - MAX_REASONS} more reason(s)`);
+  }
+  return kept;
 }
 
 function nextStepFor(summary, written) {
@@ -115,7 +147,7 @@ function nextStepFor(summary, written) {
   if (!summary.ok) {
     return "No usable primary result. Fix the errors below before touching code.";
   }
-  return `Read ${written.path} in full (paged reads are fine); the last line is the yce:eof sentinel. Re-check anytime with: node ./scripts/validate-yce-result.mjs "${written.path}"`;
+  return `Read ${written.path} in full (paged reads are fine); the LAST line of the file is the yce:eof sentinel — a sentinel seen mid-file is quoted result content, not the end. Re-check with: node ./scripts/validate-yce-result.mjs "${written.path}" --expect-sha256 ${written.sha256} --expect-bytes ${written.bytes}`;
 }
 
 /**
@@ -137,9 +169,21 @@ function buildReceipt(summary, written, exitCode) {
     next_step: nextStepFor(summary, written),
     task_context: summary.task_context,
     errors: trimErrors(summary.errors),
-    reasons: summary.reasons,
+    reasons: trimReasons(summary.reasons),
   };
-  return `<yce-receipt>\n${JSON.stringify(receipt, null, 2)}\n</yce-receipt>`;
+
+  let text = `<yce-receipt>\n${JSON.stringify(receipt, null, 2)}\n</yce-receipt>`;
+  if (byteLength(text) > MAX_RECEIPT_BYTES) {
+    // Last resort: keep the gate and the pointer, drop the prose.
+    receipt.errors = (receipt.errors || []).map((item) => ({
+      source: item.source,
+      code: item.code,
+      message: "(omitted to keep the receipt small; see result_file)",
+    }));
+    receipt.reasons = [`${(summary.reasons || []).length} reason(s) omitted; see result_file`];
+    text = `<yce-receipt>\n${JSON.stringify(receipt, null, 2)}\n</yce-receipt>`;
+  }
+  return text;
 }
 
 module.exports = {

@@ -21,7 +21,10 @@
 | `UPSTREAM_ERROR` / resource_exhausted | 远端资源耗尽 | 可开 `YCE_LOCAL_FALLBACK=true` |
 | `--help` 被当成成功 | exit 0 且是 XML | 空 resolved-action + `INVALID_ARGS` |
 | `integrity: "mismatch"` | 文件被改写、读到半写文件、中段被省略 | 重跑 YCE；不要用这份文件 |
+| `reasons` 出现 `receipt sha256 mismatch` | 文件与收据不是同一份 | 用收据里的 `result_file`；必要时重跑 |
 | `reasons` 出现 `structure:` | 标签栈不平衡，内容有缺失 | 同上，重跑 |
+| `integrity: "unverified"` + `sentinel_ambiguous` | 正文引用了哨兵（如检索到 YCE 自身源码） | 不是故障；要确定性就带 `--expect-sha256` |
+| 读到哨兵却还有后续内容 | 那是正文引用的文本，不是文件结尾 | 继续往下读到最后一行 |
 | 找不到 `result_file` | 临时目录被清理（超过 3 天自动删） | 重跑；要长期留存用 `--out <path>` |
 | stderr 提示无法写入结果文件 | 目标目录不可写 | 设 `YCE_RESULT_DIR` 或 `--out` 到可写路径 |
 | 调完 plan 直接改代码 | 误解 Y-Plan | 只呈现 `<plan>`，用户确认后再执行 |

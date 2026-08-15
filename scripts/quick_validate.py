@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +36,7 @@ REQUIRED_IN_SKILL = (
     "yce-receipt",
     "yce:eof",
     "result_file",
+    "--expect-sha256",
 )
 
 
@@ -73,9 +76,9 @@ def check_skill() -> None:
     print("OK references present and linked")
 
 
-def run_validator(path: Path) -> tuple[int, dict]:
+def run_validator(path: Path, extra: list[str] | None = None) -> tuple[int, dict]:
     proc = subprocess.run(
-        ["node", str(VALIDATOR), str(path)],
+        ["node", str(VALIDATOR), str(path), *(extra or [])],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -102,6 +105,8 @@ def check_fixtures() -> None:
         ("sentinel-mismatch.xml", 2, False, False, "mismatch"),
         # 首尾都在、无任何截断字样：只能靠标签配对抓出来
         ("middle-elided.xml", 2, False, False, "unverified"),
+        # 正文合法地引用了哨兵：降级为 unverified，但不得判文件损坏
+        ("sentinel-quoted.xml", 0, True, True, "unverified"),
     ]
     for name, expected_code, complete, ok, integrity in cases:
         path = FIXTURES / name
@@ -115,6 +120,46 @@ def check_fixtures() -> None:
         if integrity and payload.get("integrity") != integrity:
             fail(f"{name}: integrity {payload.get('integrity')!r}, expected {integrity!r}")
         print(f"OK fixture {name} exit={code}")
+
+
+def check_receipt_truth() -> None:
+    """The receipt's digest must outrank the file's own sentinel."""
+    path = FIXTURES / "sentinel-verified.xml"
+    raw = path.read_text(encoding="utf-8")
+    matches = list(re.finditer(r"<!--\s*yce:eof[^>]*-->", raw))
+    if not matches:
+        fail(f"{path.name} lost its sentinel")
+    body = raw[: matches[-1].start()]
+    body = body[:-2] if body.endswith("\r\n") else body.removesuffix("\n")
+    real_sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+    code, payload = run_validator(path, ["--expect-sha256", real_sha])
+    if code != 0 or payload.get("integrity") != "verified":
+        fail(f"matching receipt digest was rejected: exit {code}, {payload}")
+
+    code, payload = run_validator(path, ["--expect-sha256", "c" * 64])
+    if code != 2 or payload.get("integrity") != "mismatch":
+        fail(f"wrong receipt digest was accepted: exit {code}, {payload}")
+
+    # Usage errors go to stderr with no JSON, so bypass the JSON-expecting helper.
+    proc = subprocess.run(
+        ["node", str(VALIDATOR), str(path), "--expect-sha256", "not-a-digest"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 1:
+        fail(f"malformed --expect-sha256 should be a usage error, got exit {proc.returncode}")
+    if proc.stdout.strip():
+        fail("usage error must not print a summary that could be mistaken for a pass")
+    print("OK receipt digest outranks the in-file sentinel")
+
+
+def check_adversarial_suite() -> None:
+    suite = ROOT / "test" / "result-receipt.adversarial.test.cjs"
+    if not suite.is_file():
+        fail(f"missing adversarial suite: {suite}")
+    print("OK adversarial suite present")
 
 
 def check_gate_shared() -> None:
@@ -137,7 +182,9 @@ def main() -> None:
         fail(f"missing validator: {VALIDATOR}")
     check_skill()
     check_gate_shared()
+    check_adversarial_suite()
     check_fixtures()
+    check_receipt_truth()
     print("quick_validate: all checks passed")
 
 

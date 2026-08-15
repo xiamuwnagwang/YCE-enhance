@@ -1,6 +1,6 @@
 ---
 name: yce
-version: 3.2.1
+version: 3.2.2
 description: |
   当任务既需要把模糊需求说清楚，又需要去代码库里把实现找出来时使用。适用于"帮我看看这块逻辑在哪""优化任务后再搜代码""增强后检索""auto search""YCE"等场景。
   需要当前外部信息、官方库文档、竞品/行业调研时用 `--mode network` 或 `--with-network`。
@@ -29,10 +29,10 @@ node ./scripts/yce.js "<english query>" --mode search --cwd "/absolute/path/to/p
    - `2` = 输出不完整，重跑，不得使用
    - `3` = 完整但无主结果，先看 `errors` 排障，不要改代码
 6. 读收据 `<yce-receipt>` 的 `gate`、`result_file`、`xml_bytes`、`errors`、`reasons`、`task_context`。**只有** `gate.may_analyze_or_edit_code === true`（即 `<search result-present="true">`）才能分析或修改代码。`success=true` 不能代替 `result-present=true`。
-7. 需要结果细节时 `Read` 收据里的 `result_file`（可分段读）。文件最后一行是 `<!-- yce:eof v=1 bytes=… sha256=… -->`；**没读到这一行就是没读完**，不得声称已读完。随时可复核：
+7. 需要结果细节时 `Read` 收据里的 `result_file`（可分段读）。**文件最后一行**是 `<!-- yce:eof v=1 bytes=… sha256=… -->`；没读到这一行就是没读完，不得声称已读完。读到的哨兵若不在文件末尾，那是结果正文引用的文本，不是结尾。复核时把收据里的值带上（收据不来自文件，能识破自洽的伪造）：
 
 ```bash
-node ./scripts/validate-yce-result.mjs "<result_file>"
+node ./scripts/validate-yce-result.mjs "<result_file>" --expect-sha256 <xml_sha256> --expect-bytes <xml_bytes>
 ```
 
 8. 出现 `truncated`、`token limit`、`integrity` 不是 `verified`、退出码 `2` 时：**不得声明读取或检索完成**，重读文件或重跑 YCE。引擎结果内部的 `(lines truncated)` / `(tree truncated)` 不算主机截断；以退出码为准。

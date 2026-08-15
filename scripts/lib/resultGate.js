@@ -47,28 +47,49 @@ function attachSentinel(body) {
 
 /**
  * Split a saved result into body + declared integrity.
- * Uses the LAST sentinel so a sentinel quoted inside a result cannot spoof it.
+ *
+ * A result can legitimately quote a sentinel — searching this repo returns
+ * resultGate.js itself — so a match only counts when it is the single match in
+ * the file AND nothing but whitespace follows it. Anything else degrades to
+ * "unverified" rather than trusting an embedded sentinel, which would otherwise
+ * let a quoted sentinel vouch for a prefix of the real result.
  */
 function parseSentinel(raw) {
   SENTINEL_RE.lastIndex = 0;
+  const matches = [];
   let match = null;
-  let last = null;
   while ((match = SENTINEL_RE.exec(raw))) {
-    last = match;
+    matches.push(match);
   }
-  if (!last) {
-    return { body: raw, sentinel: null };
+  if (matches.length === 0) {
+    return { body: raw, sentinel: null, ambiguous: false, atEnd: false };
   }
-  let body = raw.slice(0, last.index);
-  if (body.endsWith("\r\n")) body = body.slice(0, -2);
-  else if (body.endsWith("\n")) body = body.slice(0, -1);
+
+  const last = matches[matches.length - 1];
+  const atEnd = raw.slice(last.index + last[0].length).trim() === "";
+  const ambiguous = matches.length > 1;
+
+  // Strip a trailing sentinel line regardless of trust, so receipt comparison
+  // sees the same bytes the CLI hashed even when the result quotes a sentinel.
+  let body = raw;
+  if (atEnd) {
+    body = raw.slice(0, last.index);
+    if (body.endsWith("\r\n")) body = body.slice(0, -2);
+    else if (body.endsWith("\n")) body = body.slice(0, -1);
+  }
+
   return {
     body,
-    sentinel: {
-      version: Number(last[1]),
-      bytes: Number(last[2]),
-      sha256: last[3],
-    },
+    sentinel:
+      atEnd && !ambiguous
+        ? {
+            version: Number(last[1]),
+            bytes: Number(last[2]),
+            sha256: last[3],
+          }
+        : null,
+    ambiguous,
+    atEnd,
   };
 }
 
@@ -318,14 +339,17 @@ function taskContextSummary(xml) {
 
 /**
  * @param {string} raw full text of a saved result (or piped stdout)
+ * @param {{ expectSha256?: string, expectBytes?: number }} [expected]
+ *   Values from the CLI receipt. The receipt never travels inside the result,
+ *   so passing them makes the check immune to any self-consistent forgery.
  * @returns {object} consumption summary; feed to exitCodeFor()
  */
-function buildSummary(raw) {
+function buildSummary(raw, expected = {}) {
   const reasons = [];
 
   // Layer 1: tail sentinel. Present only for CLI-written files, and it is the
   // only check that catches a middle chunk being elided without a marker.
-  const { body: afterSentinel, sentinel } = parseSentinel(raw);
+  const { body: afterSentinel, sentinel, ambiguous } = parseSentinel(raw);
   let integrity = "unverified";
   if (sentinel) {
     if (sentinel.version !== SENTINEL_VERSION) {
@@ -345,6 +369,42 @@ function buildSummary(raw) {
       } else {
         integrity = "verified";
       }
+    }
+  }
+  // An ambiguous or mid-file sentinel is not a defect: a result that quotes a
+  // sentinel is legitimate content. Withhold "verified" instead of failing the
+  // document, and let the structural checks judge completeness.
+  const sentinelAmbiguous = !sentinel && ambiguous;
+
+  // Layer 0: receipt-supplied truth. Outranks the sentinel because it does not
+  // come from the file.
+  const expectSha = String(expected.expectSha256 || "").trim().toLowerCase();
+  const expectBytes = Number.isFinite(expected.expectBytes)
+    ? Number(expected.expectBytes)
+    : null;
+  if (expectSha || expectBytes !== null) {
+    // afterSentinel already has a trailing sentinel line removed; the trimmed
+    // variant covers piped stdout that has no sentinel at all.
+    const candidates = [afterSentinel];
+    const trimmed = afterSentinel.replace(/\s+$/, "");
+    if (trimmed !== afterSentinel) candidates.push(trimmed);
+
+    const bytesOk =
+      expectBytes === null || candidates.some((text) => byteLength(text) === expectBytes);
+    const shaOk = !expectSha || candidates.some((text) => sha256(text) === expectSha);
+
+    if (!bytesOk) {
+      integrity = "mismatch";
+      reasons.push(
+        `receipt byte mismatch (read ${byteLength(afterSentinel)}, receipt says ${expectBytes})`,
+      );
+    }
+    if (!shaOk) {
+      integrity = "mismatch";
+      reasons.push("receipt sha256 mismatch");
+    }
+    if (bytesOk && shaOk && expectSha && integrity !== "mismatch") {
+      integrity = "verified";
     }
   }
 
@@ -430,6 +490,7 @@ function buildSummary(raw) {
     complete,
     parse_ok: parseOk,
     integrity,
+    sentinel_ambiguous: sentinelAmbiguous,
     // Broken nesting means content is missing even when no marker survived,
     // so it must read as "did not get the whole thing".
     truncation_detected:

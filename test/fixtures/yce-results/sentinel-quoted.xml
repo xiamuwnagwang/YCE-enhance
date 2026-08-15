@@ -1,0 +1,12 @@
+<yce>
+  <success>true</success>
+  <mode>search</mode>
+  <resolved-action>search</resolved-action>
+  <search executed="true" success="true" result-present="true" empty-result="false">
+    <query>auth</query>
+    <result><![CDATA[源码片段:
+<!-- yce:eof v=1 bytes=123 sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->
+const x = 1;]]></result>
+  </search>
+</yce>
+<!-- yce:eof v=1 bytes=388 sha256=d34586520be653cb049c1e392e7a1a1b1cb553dc63cfc69b6fef88bd2c884013 -->

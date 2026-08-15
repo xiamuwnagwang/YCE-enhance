@@ -23,14 +23,35 @@ function usage(message) {
     message || "Missing input.",
     "Usage:",
     "  node ./scripts/validate-yce-result.mjs <file.xml>",
+    "  node ./scripts/validate-yce-result.mjs <file.xml> --expect-sha256 <hex> [--expect-bytes <n>]",
     "  node ./scripts/validate-yce-result.mjs -",
     "  ... | node ./scripts/validate-yce-result.mjs",
+    "",
+    "Pass the receipt's xml_sha256 / xml_bytes to check against a value that",
+    "does not come from the file itself.",
   ].join("\n");
   process.stderr.write(`${text}\n`);
 }
 
-function readInput(argv) {
-  const target = argv[2];
+function parseFlags(argv) {
+  const positional = [];
+  const expected = {};
+  for (let index = 2; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--expect-sha256") {
+      expected.expectSha256 = argv[index + 1];
+      index += 1;
+    } else if (arg === "--expect-bytes") {
+      expected.expectBytes = Number(argv[index + 1]);
+      index += 1;
+    } else {
+      positional.push(arg);
+    }
+  }
+  return { target: positional[0], expected };
+}
+
+function readInput(target) {
   if (!target || target === "-") {
     return readFileSync(0, "utf8");
   }
@@ -38,9 +59,19 @@ function readInput(argv) {
 }
 
 function main() {
+  const { target, expected } = parseFlags(process.argv);
+  if (expected.expectBytes !== undefined && !Number.isFinite(expected.expectBytes)) {
+    usage("--expect-bytes needs a number.");
+    process.exit(EXIT_USAGE);
+  }
+  if (expected.expectSha256 !== undefined && !/^[0-9a-f]{64}$/i.test(String(expected.expectSha256 || ""))) {
+    usage("--expect-sha256 needs a 64-char hex digest.");
+    process.exit(EXIT_USAGE);
+  }
+
   let raw;
   try {
-    raw = readInput(process.argv);
+    raw = readInput(target);
   } catch (error) {
     usage(error instanceof Error ? error.message : String(error));
     process.exit(EXIT_USAGE);
@@ -51,7 +82,7 @@ function main() {
     process.exit(EXIT_USAGE);
   }
 
-  const summary = buildSummary(raw);
+  const summary = buildSummary(raw, expected);
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
   process.exit(exitCodeFor(summary));
 }
