@@ -63,7 +63,9 @@ Y-Plan 只规划不执行。默认超时 480s（`YCE_TIMEOUT_PLAN_MS`）。按�
 | `--cwd` | 不在目标项目目录时必须传 |
 | `--with-search` / `--search-context` / `--save` | 仅 plan |
 | `--task` / `--no-task` | 任务锚点绑定 / 关闭 |
-| `--xml-pretty` | 美化 XML。`--json-pretty` 只是它的旧别名，不会输出 JSON |
+| `--out <file\|dir>` | 指定结果落盘位置；缺省写系统临时目录（见 `YCE_RESULT_DIR`） |
+| `--stdout-xml` | 回到旧行为：完整 XML 打 stdout、不落盘、无哨兵保护，仅管道场景用 |
+| `--xml-pretty` | 美化 stdout XML（落盘文件始终美化）。`--json-pretty` 只是旧别名，不会输出 JSON |
 | `--no-search` | 只关闭增强阶段的外部搜索，**不会**阻止后续代码检索 |
 
 超时默认：search 180s、network 120s、plan 480s、auto enhance 60s、explicit enhance 300s。
@@ -71,5 +73,7 @@ Y-Plan 只规划不执行。默认超时 480s（`YCE_TIMEOUT_PLAN_MS`）。按�
 ## 环境变量（摘要）
 
 唯一公网密钥是 `YCE_RELAY_TOKEN`，服务根默认 `YCE_RELAY_URL=https://yce.aigy.de`。代码检索走仓内 `vendor/yce-engine`；增强走 `scripts/prompt-enhance.js`。不要把 `scripts/lib/*` 配成入口路径。
+
+`YCE_RESULT_DIR` 改结果落盘目录，缺省是系统临时目录下的 `yce-results/`，其中超过 3 天的 `yce-*.xml` 会在下次调用时自动清理。
 
 BYOK：`YCE_ENHANCE_*` / `YCE_YPLAN_*`，仅当次请求使用、不落库，需服务端放行。

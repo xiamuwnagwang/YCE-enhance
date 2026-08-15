@@ -105,7 +105,9 @@ function baseEnv(overrides = {}) {
 function runCli({ mode, query, enhancerScript, envOverrides = {}, extraArgs = [] }) {
   return spawnSync(
     process.execPath,
-    ["scripts/yce.js", query, "--mode", mode, "--cwd", repoRoot, "--xml-pretty", ...extraArgs],
+    // 这些用例断言 XML 内容本身，走 --stdout-xml 旧通道；
+    // 默认落盘 + 收据通道由 test/result-receipt.test.cjs 覆盖。
+    ["scripts/yce.js", query, "--mode", mode, "--cwd", repoRoot, "--xml-pretty", "--stdout-xml", ...extraArgs],
     {
       cwd: repoRoot,
       encoding: "utf8",

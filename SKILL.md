@@ -1,11 +1,11 @@
 ---
 name: yce
-version: 3.1.0
+version: 3.2.0
 description: |
   当任务既需要把模糊需求说清楚，又需要去代码库里把实现找出来时使用。适用于"帮我看看这块逻辑在哪""优化任务后再搜代码""增强后检索""auto search""YCE"等场景。
   需要当前外部信息、官方库文档、竞品/行业调研时用 `--mode network` 或 `--with-network`。
   只要规划不要执行时用 `--mode plan` / Y-Plan。
-  代码任务必须先 yce 检索，并用 validate-yce-result 确认 result-present="true" 后才能改代码。终端出现 truncated / token limit / XML 不完整时不得声称已读完。
+  代码任务必须先 yce 检索：CLI 退出码 0 且收据 gate.may_analyze_or_edit_code=true 才能改代码。结果在 result_file 里，不在终端；没读到文件末尾的 yce:eof 哨兵就不算读完。
 user-invocable: true
 ---
 
@@ -18,22 +18,24 @@ user-invocable: true
 1. 确认目标项目绝对路径，不在该目录时必须传 `--cwd`。
 2. 凡最终会进入 search 的调用，先把自然语言检索意图转成准确、简洁的英文 query。代码标识符、路径、命令、报错原文和字符串字面量保持不变。YCE 不会自动翻译。
 3. 按下表选择 **一种** 模式，发起 **一次** YCE 调用，外层阻塞等待完成（search/auto/network ≥ 120s，plan ≥ 300s）。禁止短 timeout 轮询。
-4. 把 stdout **整份写入文件**，再跑校验，不要用肉眼扫终端 XML：
+4. 直接调用即可。结果自动落盘，stdout 只回一份小收据，**不要**再自己重定向 stdout：
 
 ```bash
-OUT="$TMPDIR/yce-result.xml"
-node ./scripts/yce.js "<english query>" --mode search --cwd "/absolute/path/to/project" --xml-pretty > "$OUT"
-node ./scripts/validate-yce-result.mjs "$OUT"
+node ./scripts/yce.js "<english query>" --mode search --cwd "/absolute/path/to/project"
 ```
 
-5. 必须消费校验 JSON，并核对这些字段（脚本已解析，无需手读 XML）：
-   - `resolved_action`
-   - `search.result_present` / `network.result_present` / `plan.result_present`
-   - `errors`
-   - `task_context`
-6. **只有** `gate.may_analyze_or_edit_code === true`（即 `<search result-present="true">`）才能继续分析或修改代码。
-7. 终端、工具回传或保存文件里出现 `truncated`、`token limit`、不完整 XML、校验 `complete=false` / 退出码 `2` 时：**不得声明读取或检索完成**。必须分段 `Read` 该 XML 文件，或重新执行 YCE。引擎结果内部的 `(lines truncated)` / `(tree truncated)` 不算主机截断；以校验脚本为准。
-8. `success=true` 不能代替 `result-present=true`。校验退出码 `3` 表示 XML 完整但没有可用主结果，先排障，不要改代码。
+5. **退出码就是闸门**，不需要额外一步校验：
+   - `0` = 完整且拿到主结果，按收据 `gate` 继续
+   - `2` = 输出不完整，重跑，不得使用
+   - `3` = 完整但无主结果，先看 `errors` 排障，不要改代码
+6. 读收据 `<yce-receipt>` 的 `gate`、`result_file`、`xml_bytes`、`errors`、`reasons`、`task_context`。**只有** `gate.may_analyze_or_edit_code === true`（即 `<search result-present="true">`）才能分析或修改代码。`success=true` 不能代替 `result-present=true`。
+7. 需要结果细节时 `Read` 收据里的 `result_file`（可分段读）。文件最后一行是 `<!-- yce:eof v=1 bytes=… sha256=… -->`；**没读到这一行就是没读完**，不得声称已读完。随时可复核：
+
+```bash
+node ./scripts/validate-yce-result.mjs "<result_file>"
+```
+
+8. 出现 `truncated`、`token limit`、`integrity` 不是 `verified`、退出码 `2` 时：**不得声明读取或检索完成**，重读文件或重跑 YCE。引擎结果内部的 `(lines truncated)` / `(tree truncated)` 不算主机截断；以退出码为准。
 
 ## 模式决策（唯一权威）
 
@@ -71,24 +73,26 @@ node ./scripts/validate-yce-result.mjs "$OUT"
 
 ```bash
 # 定位
-node ./scripts/yce.js "Locate the provider list retrieval logic" --mode search --cwd "/abs/project" --xml-pretty
+node ./scripts/yce.js "Locate the provider list retrieval logic" --mode search --cwd "/abs/project"
 
 # 模糊需求 + 定位（auto 若 enhance 失败，仍用原始英文 query 搜索）
-node ./scripts/yce.js "Help me find where this provider is handled" --mode auto --history "User: ...\nAI: ..." --cwd "/abs/project" --xml-pretty
+node ./scripts/yce.js "Help me find where this provider is handled" --mode auto --history "User: ...\nAI: ..." --cwd "/abs/project"
 
 # 外部事实
-node ./scripts/yce.js "What is the latest official React useEffect guidance" --mode network --xml-pretty
+node ./scripts/yce.js "What is the latest official React useEffect guidance" --mode network
 
 # 只规划
-node ./scripts/yce.js "Migrate login sessions to Redis with backward compatibility" --mode plan --with-search --cwd "/abs/project" --language zh-CN --xml-pretty
+node ./scripts/yce.js "Migrate login sessions to Redis with backward compatibility" --mode plan --with-search --cwd "/abs/project" --language zh-CN
 ```
+
+指定落盘位置用 `--out <file|dir>`；只有需要管道时才用 `--stdout-xml`（此时主机可能截断，风险自负）。
 
 更多示例：[examples.md](references/examples.md)
 
 ## 消费规则
 
-- 校验脚本：`scripts/validate-yce-result.mjs`。退出 `0` 才允许按 `gate` 继续；`2` = 未读完；`3` = 无主结果。
-- 大 XML 必须按文件分段读取，禁止把截断终端输出当成完整结果。
+- CLI 退出码与 `scripts/validate-yce-result.mjs` 同一套语义：`0` 放行，`2` 未读完，`3` 无主结果。
+- 完整结果只在 `result_file`。按文件分段读，读到 `yce:eof` 哨兵为止；禁止把终端内容当完整结果。
 - MCP 结果先核对 `<yce-consume>` 的 `xml_bytes` 与收到 XML 是否一致；服务端 `complete=true` 不能代替这一步。
 - `--help` 也是 XML 且 exit 0，但 `resolved-action` 为空、`INVALID_ARGS`，不是检索成功。
 - 契约与标签：[xml-contract.md](references/xml-contract.md)

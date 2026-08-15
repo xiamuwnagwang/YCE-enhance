@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<yce>
+  <success>ture</success>
+  <mode>search</mode>
+  <resolved-action>search</resolved-action>
+  <original-query><![CDATA[Locate the provider list retrieval logic]]></original-query>
+  <cwd><![CDATA[/abs/project]]></cwd>
+  <degraded active="false"/>
+  <enhanced/>
+  <search executed="true" success="true" result-present="true" empty-result="false" exit-code="0">
+    <query><![CDATA[Locate the provider list retrieval logic]]></query>
+    <result><![CDATA[Path: src/providers.ts (L10-40)]]></result>
+  </search>
+  <network-search executed="false" success="false" result-present="false"/>
+  <y-plan executed="false" success="false" result-present="false"/>
+  <errors/>
+</yce>
+<!-- yce:eof v=1 bytes=716 sha256=a7bb7d0673fbdff538a99d27f3ba959eaf247ec82aeb82d2012ec5da3ef76e5f -->

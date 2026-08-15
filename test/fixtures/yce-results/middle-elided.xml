@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<yce>
+  <success>true</success>
+  <mode>search</mode>
+  <resolved-action>search</resolved-action>
+  <original-query><![CDATA[Locate the provider list retrieval logic]]></original-query>
+  <cwd><![CDA   <result><![CDATA[Path: src/providers.ts (L10-40)]]></result>
+  </search>
+  <network-search executed="false" success="false" result-present="false"/>
+  <y-plan executed="false" success="false" result-present="false"/>
+  <errors/>
+</yce>

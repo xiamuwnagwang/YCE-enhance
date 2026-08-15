@@ -1,6 +1,31 @@
 # XML 契约
 
-YCE stdout 固定是 XML，不再输出 JSON。消费前必须跑 `scripts/validate-yce-result.mjs`，不要只看 `<success>`。
+结果是 XML，默认写入文件；stdout 只回 `<yce-receipt>` 小收据。不要只看 `<success>`。
+
+## 收据 `<yce-receipt>`（stdout，schema `yce-receipt/1`）
+
+小到主机不会截断，因此它本身可以信任。字段：
+
+| 字段 | 含义 |
+|------|------|
+| `ok` / `exit_code` | 与 CLI 退出码一致：`0` 放行 / `2` 不完整 / `3` 无主结果 |
+| `gate` | `may_analyze_or_edit_code` / `may_use_network_facts` / `may_present_plan` |
+| `result_file` | 完整 XML 的绝对路径，细节只能从这里读 |
+| `xml_bytes` / `xml_sha256` | 正文字节数与摘要，与文件尾部哨兵一致 |
+| `errors` / `reasons` | 收据里的 message 可能被截短，全文在 `result_file` |
+| `task_context` | 任务锚点摘要 |
+
+## 尾部哨兵
+
+落盘文件最后一行固定为：
+
+```
+<!-- yce:eof v=1 bytes=<正文字节数> sha256=<正文 sha256> -->
+```
+
+`bytes` / `sha256` 覆盖哨兵行之前的正文（不含分隔换行）。没读到这一行就是没读完。校验脚本会重算并比对，因此中间被省略、被改写、读到半写文件都会判 `integrity: "mismatch"`。
+
+`--out <file|dir>` 指定落盘位置，`YCE_RESULT_DIR` 改默认目录（缺省在系统临时目录 `yce-results/`，超过 3 天自动清理）。`--stdout-xml` 回到旧的 stdout 管道行为，此时没有哨兵保护。
 
 | 标签 / 属性 | 含义 |
 |------------|------|
@@ -16,17 +41,25 @@ YCE stdout 固定是 XML，不再输出 JSON。消费前必须跑 `scripts/valid
 
 ## 校验 JSON 与闸门
 
-`validate-yce-result.mjs` 输出：
+`validate-yce-result.mjs` 用的是与 CLI 相同的实现（`scripts/lib/resultGate.js`），所以收据和事后复核不会互相矛盾。输出：
 
-- `ok` / `complete` / `truncation_detected` / `resolved_action` / `errors`
+- `ok` / `complete` / `integrity` / `truncation_detected` / `resolved_action` / `errors`
 - `search.result_present` / `network.result_present` / `plan.result_present`
 - `gate.may_analyze_or_edit_code`：仅当 XML 完整且 search result-present=true
 - 退出码 `0` 通过；`2` 未读完；`3` 无主结果
 
-终端出现 `truncated`、`token limit` 或不完整 XML 时，`complete` 必为 false。不得声称已读取或检索完成。主机截断标记只认 `<yce>` 文档外侧；CDATA 内的 `token limit` / `[truncated]` / `(lines truncated)` 不算截断。MCP 的 `<yce-consume>` 带 `xml_bytes`，与收到 XML 字节数不一致视为未读完。
+`integrity` 三态：`verified`（哨兵重算一致）、`mismatch`（字节数或摘要不符）、`unverified`（没有哨兵，例如 `--stdout-xml` 或 MCP 结果）。
 
-## `--help`
+完整性判定按三层叠加，任一层不过即 exit 2：
 
-仍是 XML、强制 pretty、exit 0，但 payload 是帮助结构：空 mode、空 resolved-action、`INVALID_ARGS`。不要当成检索成功。
+1. **哨兵**：重算 `bytes` / `sha256`。唯一能发现"中段被省略但首尾都在"的强校验。
+2. **标签配对**：扫描 CDATA / 注释之外的标签栈。首尾都在、中段丢失时栈必然不平衡，因此**即使一个截断标记都没留下**也能抓到。
+3. **截断标记**：`truncated` / `token limit` 等字样，扫 `<yce>` 外侧以及 root 内 CDATA 之外。引擎结果里的 `(lines truncated)` / `(tree truncated)` 在 CDATA 内，不算主机截断。
+
+MCP 的 `<yce-consume>` 带 `xml_bytes`，与收到 XML 字节数不一致视为未读完。
+
+## `--help` 与参数错误
+
+`--help` 和参数错误仍直接打 stdout（内容很短，不存在截断风险），不落盘、不出收据。`--help` 是 XML、强制 pretty、exit 0，但 payload 是帮助结构：空 mode、空 resolved-action、`INVALID_ARGS`。不要当成检索成功。
 
 手工调用 `vendor/yce-engine/yce-engine.mjs` 或 `scripts/prompt-enhance.js` **不会**返回 YCE XML。

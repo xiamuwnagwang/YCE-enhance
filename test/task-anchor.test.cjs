@@ -56,8 +56,10 @@ after(() => {
 });
 
 function runYce(cliArgs) {
+  // 断言 XML 内容，故走 --stdout-xml；task 子命令本来就直接输出，不需要。
+  const args = cliArgs[0] === "task" ? cliArgs : [...cliArgs, "--stdout-xml"];
   return new Promise((resolveRun) => {
-    const child = spawn(process.execPath, ["scripts/yce.js", ...cliArgs], {
+    const child = spawn(process.execPath, ["scripts/yce.js", ...args], {
       cwd: repoRoot,
       env: {
         ...process.env,

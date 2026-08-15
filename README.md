@@ -56,20 +56,25 @@ bash ./install.sh --setup
 # 检索（先 cd 到目标项目，或传 --cwd）
 node ./scripts/yce.js "Locate the provider list retrieval logic" \
   --mode search \
-  --cwd "/absolute/path/to/project" \
-  --xml-pretty
+  --cwd "/absolute/path/to/project"
 ```
 
 配置检索密钥（`YCE_RELAY_TOKEN`）等环境变量，详见 [`SKILL.md`](./SKILL.md) 与 [`references/modes.md`](./references/modes.md)。
 
-调用后必须把 stdout 存文件并用 `node ./scripts/validate-yce-result.mjs` 校验；不要把截断的终端输出当成完整结果。
+结果默认写入文件，stdout 只回一份小收据（`<yce-receipt>`），因为长 stdout 会被宿主静默截断、而截断后的文本无法自证。退出码本身就是闸门：`0` 可用，`2` 输出不完整，`3` 完整但没有可用主结果。细节从收据里的 `result_file` 读，文件最后一行是 `<!-- yce:eof … -->` 哨兵，没读到它就说明没读完。任何时候可复核：
+
+```bash
+node ./scripts/validate-yce-result.mjs "<result_file>"
+```
 
 ## 仓库内容
 
 | 路径 | 说明 |
 |------|------|
 | `scripts/yce.js` | 对外 CLI |
-| `scripts/validate-yce-result.mjs` | 校验 YCE XML 是否完整、是否有 result-present |
+| `scripts/lib/resultGate.js` | 完整性与闸门的唯一实现（CLI 与校验器共用） |
+| `scripts/lib/resultSink.js` | 结果原子落盘、尾部哨兵、stdout 收据 |
+| `scripts/validate-yce-result.mjs` | 事后复核结果文件是否完整、是否有 result-present |
 | `scripts/quick_validate.py` | skill 协议质量门（行数、引用、fixture） |
 | `references/` | 模式、XML 契约、锚点、联网、Windows、排障、示例 |
 | `SKILL.md` | Agent 执行协议（短）；细节见 `references/` |

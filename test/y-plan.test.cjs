@@ -201,7 +201,8 @@ function runCli(query, extraArgs = [], envOverrides = {}) {
   return new Promise((resolveRun) => {
     const child = spawn(
       process.execPath,
-      ["scripts/yce.js", query, "--mode", "plan", "--cwd", repoRoot, "--xml-pretty", ...extraArgs],
+      // 断言 XML 内容，故走 --stdout-xml；默认收据通道见 result-receipt 测试。
+      ["scripts/yce.js", query, "--mode", "plan", "--cwd", repoRoot, "--xml-pretty", "--stdout-xml", ...extraArgs],
       {
         cwd: repoRoot,
         env: {

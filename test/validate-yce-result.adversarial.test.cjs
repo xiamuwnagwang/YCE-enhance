@@ -310,7 +310,8 @@ test("对抗：CLI search 落盘后再校验，不得把 stdout 当肉眼结果"
         "search",
         "--cwd",
         repoRoot,
-        "--xml-pretty",
+        "--out",
+        out,
       ],
       {
         cwd: repoRoot,
@@ -324,13 +325,16 @@ test("对抗：CLI search 落盘后再校验，不得把 stdout 当肉眼结果"
       },
     );
     assert.equal(cli.status, 0, cli.stderr);
-    writeFileSync(out, cli.stdout);
+    // stdout 只有小收据，完整 XML 只在文件里
+    assert.match(cli.stdout, /<yce-receipt>/);
+    assert.doesNotMatch(cli.stdout, /<yce[\s>]/);
     const checked = spawnSync(process.execPath, [validator, out], {
       cwd: repoRoot,
       encoding: "utf8",
     });
     const payload = JSON.parse(checked.stdout);
     assert.equal(checked.status, 0, JSON.stringify(payload, null, 2));
+    assert.equal(payload.integrity, "verified");
     assert.equal(payload.search.result_present, true);
     assert.equal(payload.gate.may_analyze_or_edit_code, true);
   } finally {

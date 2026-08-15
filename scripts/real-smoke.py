@@ -84,6 +84,7 @@ def summarize(name: str, code: int, payload: dict) -> None:
                 "exit": code,
                 "ok": payload.get("ok"),
                 "complete": payload.get("complete"),
+                "integrity": payload.get("integrity"),
                 "truncation_detected": payload.get("truncation_detected"),
                 "success": payload.get("success"),
                 "resolved_action": payload.get("resolved_action"),
@@ -99,20 +100,42 @@ def summarize(name: str, code: int, payload: dict) -> None:
     )
 
 
+def parse_receipt(stdout: str) -> dict:
+    start = stdout.find("<yce-receipt>")
+    end = stdout.find("</yce-receipt>")
+    if start < 0 or end < 0:
+        fail(f"cli stdout has no receipt: {stdout[:300]}")
+    try:
+        return json.loads(stdout[start + len("<yce-receipt>") : end].strip())
+    except json.JSONDecodeError as error:
+        fail(f"receipt is not JSON ({error})")
+
+
 def run_cli(token: str, args: list[str], timeout: int) -> str:
-    proc = subprocess.run(
-        ["node", str(CLI), *args],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        env=child_env(token),
-        timeout=timeout,
-    )
-    if proc.returncode not in (0, 1):
-        fail(f"cli crashed rc={proc.returncode} stderr={proc.stderr[-500:]}")
-    if not proc.stdout.strip():
-        fail(f"cli produced empty stdout stderr={proc.stderr[-500:]}")
-    return proc.stdout
+    """Exercise the default path: results land in a file, stdout is a receipt."""
+    with tempfile.TemporaryDirectory(prefix="yce-smoke-cli-") as staging:
+        out_path = Path(staging) / "result.xml"
+        proc = subprocess.run(
+            ["node", str(CLI), *args, "--out", str(out_path)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            env=child_env(token),
+            timeout=timeout,
+        )
+        if proc.returncode not in (0, 1, 2, 3):
+            fail(f"cli crashed rc={proc.returncode} stderr={proc.stderr[-500:]}")
+        receipt = parse_receipt(proc.stdout)
+        if receipt.get("exit_code") != proc.returncode:
+            fail(
+                f"receipt exit_code={receipt.get('exit_code')} but process rc={proc.returncode}"
+            )
+        if receipt.get("result_file") != str(out_path):
+            fail(f"receipt result_file={receipt.get('result_file')!r}, expected {out_path}")
+        if not out_path.is_file():
+            fail(f"cli did not write the result file: {out_path}")
+        # Full text includes the yce:eof sentinel, so the caller re-validates it.
+        return out_path.read_text(encoding="utf-8")
 
 
 def expect(name: str, xml: str, out_dir: Path, allowed: set[int], require: dict) -> dict:

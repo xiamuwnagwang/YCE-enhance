@@ -1,6 +1,13 @@
 # 排障
 
-先看校验 JSON 的 `resolved_action`、`errors`、`search.result_present`，以及 XML 里的 `<search><query>` 和 `<meta><dependency-paths>`。不要凭感觉猜链路。
+先看收据的 `exit_code`、`reasons`、`errors`、`resolved_action`，再按需读 `result_file` 里的 `<search><query>` 和 `<meta><dependency-paths>`。不要凭感觉猜链路。
+
+| 退出码 | 含义 | 处理 |
+|--------|------|------|
+| `0` | 完整且有主结果 | 按 `gate` 继续 |
+| `1` | 参数或执行错误 | 看 stdout 的 `INVALID_ARGS` / `EXEC_ERROR` |
+| `2` | 输出不完整 | 重读 `result_file` 或重跑；看 `reasons` 里的 `structure:` / `sentinel` |
+| `3` | 完整但无主结果 | 先排 `errors`，不要改代码 |
 
 | 症状 | 原因 | 处理 |
 |------|------|------|
@@ -13,6 +20,10 @@
 | `AUTH_ERROR` | 未配 `YCE_RELAY_TOKEN` 或 relay 不可用 | `install.sh --setup`；`yce-engine.mjs --check-key` |
 | `UPSTREAM_ERROR` / resource_exhausted | 远端资源耗尽 | 可开 `YCE_LOCAL_FALLBACK=true` |
 | `--help` 被当成成功 | exit 0 且是 XML | 空 resolved-action + `INVALID_ARGS` |
+| `integrity: "mismatch"` | 文件被改写、读到半写文件、中段被省略 | 重跑 YCE；不要用这份文件 |
+| `reasons` 出现 `structure:` | 标签栈不平衡，内容有缺失 | 同上，重跑 |
+| 找不到 `result_file` | 临时目录被清理（超过 3 天自动删） | 重跑；要长期留存用 `--out <path>` |
+| stderr 提示无法写入结果文件 | 目标目录不可写 | 设 `YCE_RESULT_DIR` 或 `--out` 到可写路径 |
 | 调完 plan 直接改代码 | 误解 Y-Plan | 只呈现 `<plan>`，用户确认后再执行 |
 | `NOT_DEPLOYED` | 线上还没有 enhance / plan 端点 | 不是客户端故障；search/network 仍可用 |
 | stderr 提示 skill 有新版本 | 本地 version 落后 | 在**本机 yce 根目录**执行 `bash ./install.sh --install` |

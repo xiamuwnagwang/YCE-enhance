@@ -14,6 +14,38 @@ const {
 } = require("./lib/utils");
 const { orchestrate } = require("./lib/orchestrator");
 const { checkForUpdate, formatUpdateBanner } = require("./lib/versionCheck");
+const { buildSummary, exitCodeFor } = require("./lib/resultGate");
+const { buildReceipt, resolveResultPath, writeResultFile } = require("./lib/resultSink");
+
+/**
+ * Results go to a file and stdout gets a small receipt, because a host can
+ * truncate long stdout before the agent sees it and the truncated text gives
+ * the reader no way to notice. --stdout-xml restores the old piping behaviour.
+ */
+function emitResult(result, { pretty, stdoutXml, outArg, mode }) {
+  const xml = serializeForStdout(result, stdoutXml ? pretty : true);
+  const summary = buildSummary(xml);
+  const exitCode = exitCodeFor(summary);
+
+  if (stdoutXml) {
+    console.log(xml);
+    return exitCode;
+  }
+
+  let written;
+  try {
+    written = writeResultFile(xml, resolveResultPath({ outArg, mode }));
+  } catch (error) {
+    console.error(
+      `⚠ 无法写入结果文件（${error && error.message ? error.message : error}），回退到 stdout；请注意主机可能截断。`,
+    );
+    console.log(xml);
+    return exitCode;
+  }
+
+  console.log(buildReceipt(summary, written, exitCode));
+  return exitCode;
+}
 
 function buildInvalidArgsResponse(message, config, cwd) {
   return {
@@ -103,7 +135,7 @@ async function main() {
 
   if (args.help === true || args.h === true) {
     const payload = buildInvalidArgsResponse(
-      "Usage: node scripts/yce.js \"<query>\" [--mode auto|enhance|search|network|plan] [--task <id>|--no-task] [--with-network] [--network-profile quick|balanced|exhaustive] [--library <name>] [--repo <owner/name>] [--history <text>] [--cwd <path>] [--xml-pretty] [--timeout-enhance-ms <n>] [--timeout-search-ms <n>] [--timeout-network-ms <n>] [--timeout-plan-ms <n>] [--with-search (plan)] [--search-context <text> (plan)] [--save <dir|file.md> (plan)] [--enable-web-search|--no-web-search (plan)] [--language zh-CN|en-US (plan)] [--plan-provider claude|openai|openai-responses|gemini] [--plan-base-url <url>] [--plan-token <token>] [--plan-model <model>] [--plan-temperature <n>] [--max-turns 1-5] [--max-commands 1-20] [--max-results 1-30] [--tree-depth 0-6] [--exclude <glob[,glob]>] [--repo-map-mode classic|bootstrap_hotspot] [--bootstrap-enabled true|false|--no-bootstrap] [--bootstrap-tree-depth 1-3] [--hotspot-top-k 0-8] [--hotspot-tree-depth 1-4] [--hotspot-max-bytes 16384-256000] [--bootstrap-max-turns 1-5] [--bootstrap-max-commands 1-20] [--no-search] [--raw-events] [--json-pretty (legacy alias)] | node scripts/yce.js task <show [id]|list|check <n> --evidence <text>|done [--force]|new --goal <text> [--accept <text>]...> [--task <id>] [--cwd <path>]",
+      "Usage: node scripts/yce.js \"<query>\" [--mode auto|enhance|search|network|plan] [--task <id>|--no-task] [--with-network] [--network-profile quick|balanced|exhaustive] [--library <name>] [--repo <owner/name>] [--history <text>] [--cwd <path>] [--out <file|dir>] [--stdout-xml] [--xml-pretty] [--timeout-enhance-ms <n>] [--timeout-search-ms <n>] [--timeout-network-ms <n>] [--timeout-plan-ms <n>] [--with-search (plan)] [--search-context <text> (plan)] [--save <dir|file.md> (plan)] [--enable-web-search|--no-web-search (plan)] [--language zh-CN|en-US (plan)] [--plan-provider claude|openai|openai-responses|gemini] [--plan-base-url <url>] [--plan-token <token>] [--plan-model <model>] [--plan-temperature <n>] [--max-turns 1-5] [--max-commands 1-20] [--max-results 1-30] [--tree-depth 0-6] [--exclude <glob[,glob]>] [--repo-map-mode classic|bootstrap_hotspot] [--bootstrap-enabled true|false|--no-bootstrap] [--bootstrap-tree-depth 1-3] [--hotspot-top-k 0-8] [--hotspot-tree-depth 1-4] [--hotspot-max-bytes 16384-256000] [--bootstrap-max-turns 1-5] [--bootstrap-max-commands 1-20] [--no-search] [--raw-events] [--json-pretty (legacy alias)] | node scripts/yce.js task <show [id]|list|check <n> --evidence <text>|done [--force]|new --goal <text> [--accept <text>]...> [--task <id>] [--cwd <path>]",
       config,
       cwd
     );
@@ -276,8 +308,14 @@ async function main() {
       } catch {}
     }
 
-    console.log(serializeForStdout(result, pretty));
-    process.exit(result.success ? 0 : 1);
+    process.exit(
+      emitResult(result, {
+        pretty,
+        stdoutXml: args["stdout-xml"] === true,
+        outArg: typeof args.out === "string" ? args.out : "",
+        mode,
+      }),
+    );
   } catch (error) {
     const payload = {
       success: false,

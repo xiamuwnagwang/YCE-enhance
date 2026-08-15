@@ -31,6 +31,9 @@ REQUIRED_IN_SKILL = (
     "truncated",
     "token limit",
     "敏感信息",
+    "yce-receipt",
+    "yce:eof",
+    "result_file",
 )
 
 
@@ -85,17 +88,22 @@ def run_validator(path: Path) -> tuple[int, dict]:
 
 
 def check_fixtures() -> None:
+    # name, exit code, complete, ok, expected integrity ("" = don't care)
     cases = [
-        ("search-present.xml", 0, True, True),
-        ("success-without-result.xml", 3, True, False),
-        ("auto-enhance-fail-then-search.xml", 0, True, True),
-        ("parse-fail.xml", 2, False, False),
-        ("truncated.xml", 2, False, False),
-        ("search-with-errors.xml", 0, True, True),
-        ("task-context-new.xml", 0, True, True),
-        ("task-context-existing.xml", 0, True, True),
+        ("search-present.xml", 0, True, True, "unverified"),
+        ("success-without-result.xml", 3, True, False, ""),
+        ("auto-enhance-fail-then-search.xml", 0, True, True, ""),
+        ("parse-fail.xml", 2, False, False, ""),
+        ("truncated.xml", 2, False, False, ""),
+        ("search-with-errors.xml", 0, True, True, ""),
+        ("task-context-new.xml", 0, True, True, ""),
+        ("task-context-existing.xml", 0, True, True, ""),
+        ("sentinel-verified.xml", 0, True, True, "verified"),
+        ("sentinel-mismatch.xml", 2, False, False, "mismatch"),
+        # 首尾都在、无任何截断字样：只能靠标签配对抓出来
+        ("middle-elided.xml", 2, False, False, "unverified"),
     ]
-    for name, expected_code, complete, ok in cases:
+    for name, expected_code, complete, ok, integrity in cases:
         path = FIXTURES / name
         if not path.is_file():
             fail(f"missing fixture: {path}")
@@ -104,13 +112,31 @@ def check_fixtures() -> None:
             fail(f"{name}: exit {code}, expected {expected_code}; summary={payload}")
         if payload.get("complete") is not complete or payload.get("ok") is not ok:
             fail(f"{name}: complete/ok mismatch: {payload}")
+        if integrity and payload.get("integrity") != integrity:
+            fail(f"{name}: integrity {payload.get('integrity')!r}, expected {integrity!r}")
         print(f"OK fixture {name} exit={code}")
+
+
+def check_gate_shared() -> None:
+    """CLI receipt and the validator must never disagree: one implementation."""
+    shared = ROOT / "scripts" / "lib" / "resultGate.js"
+    if not shared.is_file():
+        fail(f"missing shared gate module: {shared}")
+    validator_text = VALIDATOR.read_text(encoding="utf-8")
+    if "resultGate" not in validator_text:
+        fail("validate-yce-result.mjs no longer reuses scripts/lib/resultGate.js")
+    cli_text = (ROOT / "scripts" / "yce.js").read_text(encoding="utf-8")
+    for needle in ("resultGate", "resultSink", "buildReceipt"):
+        if needle not in cli_text:
+            fail(f"scripts/yce.js no longer wires {needle}")
+    print("OK CLI and validator share one gate implementation")
 
 
 def main() -> None:
     if not VALIDATOR.is_file():
         fail(f"missing validator: {VALIDATOR}")
     check_skill()
+    check_gate_shared()
     check_fixtures()
     print("quick_validate: all checks passed")
 
