@@ -353,7 +353,10 @@ impl SearchArgs {
     }
 }
 
-pub fn tool_definitions() -> Vec<Value> {
+pub const PLAN_DISABLED_MESSAGE: &str =
+    "Y-Plan 规划能力已关闭。请在 .env 设置 YCE_ENABLE_PLAN=true，或运行安装脚本 --setup --enable-plan true。";
+
+pub fn tool_definitions(enable_plan: bool) -> Vec<Value> {
     let search_properties = search_properties();
     let network_fields = network_properties(true);
     let mut search = search_properties.clone();
@@ -407,7 +410,7 @@ pub fn tool_definitions() -> Vec<Value> {
     );
     plan.insert("timeout_plan_ms", integer_schema(1, None));
 
-    vec![
+    let mut tools = vec![
         definition(
             "search_code",
             "在指定的本地项目中执行 YCE 语义代码检索。返回 <yce-consume> JSON + YCE XML。必须先读 consume：只有 gate.may_analyze_or_edit_code / search result-present=true 才能改代码。不要只看 success。禁止把密钥、Cookie、JWT 放进 query。",
@@ -432,25 +435,28 @@ pub fn tool_definitions() -> Vec<Value> {
             network,
             &["query"],
         ),
-        definition(
+    ];
+    if enable_plan {
+        tools.push(definition(
             "y_plan",
             "通过 YCE Y-Plan 服务生成结构化实施计划（Markdown）。只规划不执行。先读 <yce-consume> 的 plan result-present；拿到计划后是否执行由用户决定。需要代码贴地时先 search_code 再传入 search_context。",
             plan,
             &["task"],
-        ),
-        definition(
-            "task_show",
-            "读取项目任务卡（任务锚点）。上下文被压缩或摘要后，第一个动作必须是调用本工具找回当前任务的 goal 与验收；省略 id 时返回最近活跃卡。纯本地操作，不消耗额度。",
-            task_show_properties(),
-            &[],
-        ),
-        definition(
-            "task_update",
-            "推进项目任务卡：action=check 勾掉一个阶段（必须带 evidence 证据）；action=done 宣称任务完成前逐条对照验收（未过会列 unmet）；action=new 手动建卡（goal 必填）。纯本地操作，不消耗额度。",
-            task_update_properties(),
-            &["action"],
-        ),
-    ]
+        ));
+    }
+    tools.push(definition(
+        "task_show",
+        "读取项目任务卡（任务锚点）。上下文被压缩或摘要后，第一个动作必须是调用本工具找回当前任务的 goal 与验收；省略 id 时返回最近活跃卡。纯本地操作，不消耗额度。",
+        task_show_properties(),
+        &[],
+    ));
+    tools.push(definition(
+        "task_update",
+        "推进项目任务卡：action=check 勾掉一个阶段（必须带 evidence 证据）；action=done 宣称任务完成前逐条对照验收（未过会列 unmet）；action=new 手动建卡（goal 必填）。纯本地操作，不消耗额度。",
+        task_update_properties(),
+        &["action"],
+    ));
+    tools
 }
 
 fn task_show_properties() -> BTreeSetMap {
@@ -727,5 +733,43 @@ mod tests {
         let error =
             ToolCall::decode("search_code", json!({"query":"x","unexpected":true})).unwrap_err();
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    fn tool_names(enable_plan: bool) -> Vec<String> {
+        tool_definitions(enable_plan)
+            .into_iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn plan_tool_is_listed_by_default() {
+        assert_eq!(
+            tool_names(true),
+            [
+                "search_code",
+                "auto",
+                "enhance_prompt",
+                "search_network",
+                "y_plan",
+                "task_show",
+                "task_update"
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_tool_is_omitted_when_disabled() {
+        assert_eq!(
+            tool_names(false),
+            [
+                "search_code",
+                "auto",
+                "enhance_prompt",
+                "search_network",
+                "task_show",
+                "task_update"
+            ]
+        );
     }
 }

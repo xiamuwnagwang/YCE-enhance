@@ -11,6 +11,7 @@ const {
   toBoolean,
   toBoundedInt,
   toPositiveInt,
+  PLAN_DISABLED_MESSAGE,
 } = require("./lib/utils");
 const { orchestrate } = require("./lib/orchestrator");
 const { checkForUpdate, formatUpdateBanner } = require("./lib/versionCheck");
@@ -145,6 +146,15 @@ async function main() {
 
   if (!["auto", "enhance", "search", "network", "plan"].includes(mode)) {
     const payload = buildInvalidArgsResponse(`Unsupported mode: ${mode}`, config, cwd);
+    console.log(serializeForStdout(payload, pretty));
+    process.exit(1);
+  }
+
+  if (mode === "plan" && config.enablePlan === false) {
+    const payload = buildInvalidArgsResponse(PLAN_DISABLED_MESSAGE, config, cwd);
+    payload.mode = "plan";
+    payload.errors[0].source = "y-plan";
+    payload.errors[0].code = "DISABLED";
     console.log(serializeForStdout(payload, pretty));
     process.exit(1);
   }

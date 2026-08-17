@@ -42,6 +42,8 @@ param(
   [string]$TimeoutSearch,
   [string]$LocalFallback,
   [switch]$NoLocalFallback,
+  [string]$EnablePlan,
+  [switch]$NoPlan,
   [switch]$Help
 )
 
@@ -66,6 +68,7 @@ $DefaultMode = "auto"
 $DefaultTimeoutEnhance = "300000"
 $DefaultTimeoutSearch = "180000"
 $DefaultLocalFallback = "false"
+$DefaultEnablePlan = "true"
 $DefaultPromptEnhanceScript = ".\scripts\prompt-enhance.js"
 $InstallFiles = @("scripts", "vendor", "src", "test", "tests", "references", "Cargo.toml", "Cargo.lock", "SKILL.md", "install.sh", "install.ps1", ".env.example", ".gitignore")
 
@@ -124,6 +127,14 @@ function Normalize-LocalFallback {
   switch -Regex ($Value.Trim().ToLower()) {
     '^(true|yes|y|1|on)$' { return 'true' }
     default { return 'false' }
+  }
+}
+
+function Normalize-EnablePlan {
+  param([string]$Value = 'true')
+  switch -Regex ($Value.Trim().ToLower()) {
+    '^(false|no|n|0|off)$' { return 'false' }
+    default { return 'true' }
   }
 }
 function Write-Fail([string]$Message) { Write-Host "$([char]0x2718) $Message" -ForegroundColor Red }
@@ -200,7 +211,8 @@ function Merge-EnvMissingKeys {
     'YCE_RELAY_TOKEN', 'YCE_RELAY_URL', 'YCE_API_KEY',
     'YCE_ENGINE_SCRIPT', 'YCE_ENGINE_MAX_RESULTS', 'YCE_ENGINE_MAX_TURNS', 'YCE_LOCAL_FALLBACK',
     'YCE_PROMPT_ENHANCE_SCRIPT', 'YCE_PROMPT_ENHANCE_MODE', 'YCE_PROMPT_ENHANCE_ENABLE_SEARCH',
-    'YCE_DEFAULT_MODE', 'YCE_TIMEOUT_ENHANCE_MS', 'YCE_TIMEOUT_SEARCH_MS'
+    'YCE_DEFAULT_MODE', 'YCE_TIMEOUT_ENHANCE_MS', 'YCE_TIMEOUT_SEARCH_MS',
+    'YCE_ENABLE_PLAN'
   )
 
   $sourceVals = Read-EnvMapFromFile $SourceEnv
@@ -615,7 +627,8 @@ function Write-RuntimeConfig {
     [string]$RuntimeMode,
     [string]$RuntimeTimeoutEnhance,
     [string]$RuntimeTimeoutSearch,
-    [string]$RuntimeLocalFallback
+    [string]$RuntimeLocalFallback,
+    [string]$RuntimeEnablePlan
   )
 
   $resolvedPromptEnhance = Resolve-YcePath $RuntimePromptEnhanceScript
@@ -630,6 +643,7 @@ function Write-RuntimeConfig {
 
   if (-not $RuntimeYceRelayUrl) { $RuntimeYceRelayUrl = $DefaultYceRelayUrl }
   $RuntimeLocalFallback = Normalize-LocalFallback $(if ($RuntimeLocalFallback) { $RuntimeLocalFallback } else { $DefaultLocalFallback })
+  $RuntimeEnablePlan = Normalize-EnablePlan $(if ($RuntimeEnablePlan) { $RuntimeEnablePlan } else { $DefaultEnablePlan })
 
   if ($DryRun) {
     Write-DryRun "将生成 .env"
@@ -646,6 +660,7 @@ function Write-RuntimeConfig {
     Write-DryRun "  YCE_TIMEOUT_ENHANCE_MS = $RuntimeTimeoutEnhance"
     Write-DryRun "  YCE_TIMEOUT_SEARCH_MS = $RuntimeTimeoutSearch"
     Write-DryRun "  YCE_LOCAL_FALLBACK = $RuntimeLocalFallback"
+    Write-DryRun "  YCE_ENABLE_PLAN = $RuntimeEnablePlan"
     return
   }
 
@@ -677,6 +692,8 @@ function Write-RuntimeConfig {
     "YCE_DEFAULT_MODE=$RuntimeMode"
     "YCE_TIMEOUT_ENHANCE_MS=$RuntimeTimeoutEnhance"
     "YCE_TIMEOUT_SEARCH_MS=$RuntimeTimeoutSearch"
+    "# Y-Plan 规划能力（默认开启；设为 false 后 --mode plan 与 MCP y_plan 都不可用）"
+    "YCE_ENABLE_PLAN=$RuntimeEnablePlan"
     "# Y-Plan 规划超时（默认 480000）与 BYOK 自定义模型（服务端放行后才生效）"
     "# YCE_TIMEOUT_PLAN_MS=480000"
     "# YCE_YPLAN_PROVIDER="
@@ -697,6 +714,7 @@ function Write-RuntimeConfig {
   Write-Host "  yce-engine entry: $RuntimeYceEngineScript"
   if ($RuntimeYceRelayToken) { Write-Host "  YCE Key: $(Get-MaskedValue $RuntimeYceRelayToken)" }
   Write-Host "  本地检索 fallback: $RuntimeLocalFallback"
+  Write-Host "  Y-Plan 规划: $RuntimeEnablePlan"
 }
 
 function Invoke-Check {
@@ -994,7 +1012,17 @@ function Invoke-Setup {
     $runtimeLocalFallback = $DefaultLocalFallback
   }
 
-  $hasDirectArgs = $PromptEnhanceScript -or $PromptEnhanceMode -or $PromptEnhanceEnableSearch -or $YceEngineScript -or $YceEngineMaxResults -or $YceEngineMaxTurns -or $YceRelayUrl -or $YceRelayToken -or $Mode -or $TimeoutEnhance -or $TimeoutSearch -or $LocalFallback -or $NoLocalFallback
+  if ($NoPlan) {
+    $runtimeEnablePlan = 'false'
+  } elseif ($EnablePlan) {
+    $runtimeEnablePlan = Normalize-EnablePlan $EnablePlan
+  } elseif ($currentVars.ContainsKey('YCE_ENABLE_PLAN')) {
+    $runtimeEnablePlan = Normalize-EnablePlan $currentVars['YCE_ENABLE_PLAN']
+  } else {
+    $runtimeEnablePlan = $DefaultEnablePlan
+  }
+
+  $hasDirectArgs = $PromptEnhanceScript -or $PromptEnhanceMode -or $PromptEnhanceEnableSearch -or $YceEngineScript -or $YceEngineMaxResults -or $YceEngineMaxTurns -or $YceRelayUrl -or $YceRelayToken -or $Mode -or $TimeoutEnhance -or $TimeoutSearch -or $LocalFallback -or $NoLocalFallback -or $EnablePlan -or $NoPlan
 
   if (-not $hasDirectArgs -or $Edit -or $Reset) {
     Write-Host '--- 交互式配置 ---'
@@ -1055,9 +1083,20 @@ function Invoke-Setup {
         $runtimeLocalFallback = 'false'
       }
     }
+
+    Write-Host '提示：Y-Plan 规划默认开启。关闭后 --mode plan 和 MCP y_plan 都不可用。' -ForegroundColor Cyan
+    Write-Host "Y-Plan 规划能力当前: $runtimeEnablePlan"
+    $newEnablePlan = Read-Host '启用 Y-Plan 规划？(Y/n，回车保留)'
+    if ($newEnablePlan) {
+      if ($newEnablePlan -match '^[Yy]|^true$|^1$') {
+        $runtimeEnablePlan = 'true'
+      } elseif ($newEnablePlan -match '^[Nn]|^false$|^0$') {
+        $runtimeEnablePlan = 'false'
+      }
+    }
   }
 
-  Write-RuntimeConfig -RuntimePromptEnhanceScript $runtimePromptEnhance -RuntimePromptEnhanceMode $runtimePromptEnhanceMode -RuntimePromptEnhanceEnableSearch $runtimePromptEnhanceEnableSearch -RuntimeYceEngineScript $runtimeYceEngineScript -RuntimeYceEngineMaxResults $runtimeYceEngineMaxResults -RuntimeYceEngineMaxTurns $runtimeYceEngineMaxTurns -RuntimeYceRelayUrl $runtimeYceRelayUrl -RuntimeYceRelayToken $runtimeYceRelayToken -RuntimeMode $runtimeMode -RuntimeTimeoutEnhance $runtimeTimeoutEnhance -RuntimeTimeoutSearch $runtimeTimeoutSearch -RuntimeLocalFallback $runtimeLocalFallback
+  Write-RuntimeConfig -RuntimePromptEnhanceScript $runtimePromptEnhance -RuntimePromptEnhanceMode $runtimePromptEnhanceMode -RuntimePromptEnhanceEnableSearch $runtimePromptEnhanceEnableSearch -RuntimeYceEngineScript $runtimeYceEngineScript -RuntimeYceEngineMaxResults $runtimeYceEngineMaxResults -RuntimeYceEngineMaxTurns $runtimeYceEngineMaxTurns -RuntimeYceRelayUrl $runtimeYceRelayUrl -RuntimeYceRelayToken $runtimeYceRelayToken -RuntimeMode $runtimeMode -RuntimeTimeoutEnhance $runtimeTimeoutEnhance -RuntimeTimeoutSearch $runtimeTimeoutSearch -RuntimeLocalFallback $runtimeLocalFallback -RuntimeEnablePlan $runtimeEnablePlan
 
   Sync-EnvToOtherInstallsAuto
 
@@ -1142,6 +1181,8 @@ if ($Help) {
   Write-Host '  .\install.ps1 -Target agents             # 仅安装到指定工具'
   Write-Host '  .\install.ps1 -Setup                     # 交互式配置统一 YCE Key'
   Write-Host '  .\install.ps1 -Setup -YceRelayToken <key> # 直接写入统一 YCE Key'
+  Write-Host '  .\install.ps1 -Setup -EnablePlan true     # 开启 Y-Plan 规划（默认）'
+  Write-Host '  .\install.ps1 -Setup -NoPlan              # 关闭 Y-Plan 规划'
   Write-Host '  .\install.ps1 -Sync                      # 同步脚本 + 配置到其他已安装目录'
   Write-Host '  .\install.ps1 -SyncEnv                   # 仅同步 .env'
   Write-Host '  .\install.ps1 -Check                     # 检查安装状态'
@@ -1154,6 +1195,7 @@ if ($Help) {
   Write-Host '  - 检索默认连接远端 relay（https://yce.aigy.de），安装时会写入 YCE_RELAY_URL'
   Write-Host '  - YCE_RELAY_TOKEN 是统一 YCE Key，代码检索、联网检索和提示词增强共用'
   Write-Host '  - -Setup 可交互选择 YCE_LOCAL_FALLBACK；也可用 -LocalFallback true/false 或 -NoLocalFallback'
+  Write-Host '  - -Setup 可开关 Y-Plan 规划（默认开启；-NoPlan 或 -EnablePlan false 关闭）'
   Write-Host '  - -Setup 会优先复用当前 .env，并对齐仓内 scripts\prompt-enhance.js'
   Write-Host "  - YCE_PROMPT_ENHANCE_SCRIPT 默认使用仓内脚本: $DefaultPromptEnhanceScript"
   Write-Host '  - 本仓已内置 yce-engine 检索引擎（vendor\yce-engine）与 yce enhance 脚本'

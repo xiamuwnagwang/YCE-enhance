@@ -23,6 +23,7 @@ pub struct RuntimeConfig {
     pub timeout_auto_enhance: Duration,
     pub timeout_network: Duration,
     pub timeout_plan: Duration,
+    pub enable_plan: bool,
     pub y_plan_custom_provider: PlanCustomProvider,
     pub enhance_custom_provider: PlanCustomProvider,
 }
@@ -97,6 +98,7 @@ impl RuntimeConfig {
                 480_000,
                 "YCE_TIMEOUT_PLAN_MS",
             )?,
+            enable_plan: parse_bool(get("YCE_ENABLE_PLAN").as_deref(), true)?,
             // BYOK 是可选增值配置：单个值写错只警告并忽略，
             // 不能让整个 MCP 拒绝启动（与 skill CLI 的容错行为一致）。
             y_plan_custom_provider: PlanCustomProvider {

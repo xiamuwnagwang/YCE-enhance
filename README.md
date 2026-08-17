@@ -1,7 +1,7 @@
 # YCE Skill
 
 YCE 是面向 AI Agent 的 **提示词增强 + 语义代码检索 + 联网检索 + Y-Plan 规划** skill。
-当前版本：**3.1.0**。
+当前版本：**3.3.0**。
 
 ## License
 
@@ -38,7 +38,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 - **enhance**：把模糊任务整理成可执行提示词；与检索、联网、规划共用 `YCE_RELAY_TOKEN`
 - **search**：在本地项目内做语义代码定位（远端只做推理，不上传源码建索引）；问题已够具体时优先用这个
 - **network**：外部联网检索（事实依据 / 调研 / 官方文档 / 竞品等），结果在 XML `<network-search>`
-- **plan**：Y-Plan 结构化规划（只规划不执行），结果在 XML `<y-plan><plan>`；`--with-search` 可先做代码检索让计划贴合真实代码，支持 BYOK 自定义模型（服务端放行时）
+- **plan**：Y-Plan 结构化规划（只规划不执行），结果在 XML `<y-plan><plan>`；`--with-search` 可先做代码检索让计划贴合真实代码，支持 BYOK 自定义模型（服务端放行时）。默认开启，可在 `.env` 设 `YCE_ENABLE_PLAN=false`，或 `bash install.sh --setup --no-plan` / `.\install.ps1 -Setup -NoPlan` 关闭
 - **auto**：增强后在同一次调用内强制收口到 search；无 YCE Key 时跳过 enhance 直接 search（**不会**自动联网）
 - **`--with-network`**：由 Agent 判断后，在任意模式上显式附加联网
 - **任务锚点**：增强产出目标与阶段验收时自动建卡到项目 `.yce/tasks/`，`task show/check/done/new` 子命令 + 每次调用复述活跃卡，防止上下文压缩后目标漂移（与 MCP 形态共享任务卡）

@@ -1,6 +1,6 @@
 [package]
 name = "yce-mcp"
-version = "1.2.0"
+version = "1.3.0"
 edition = "2021"
 description = "Native Rust MCP server for YCE code search, prompt enhancement, Y-Plan planning, and network research"
 license = "GPL-3.0-only"

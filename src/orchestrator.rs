@@ -96,6 +96,10 @@ impl YceService {
         })
     }
 
+    pub fn enable_plan(&self) -> bool {
+        self.config.enable_plan
+    }
+
     fn remember_session_card(&self, cwd: &Path, id: &str) {
         if let Ok(mut guard) = self.session_active_card.lock() {
             *guard = Some((cwd.to_path_buf(), id.to_string()));
@@ -737,6 +741,28 @@ impl YceService {
     }
 
     async fn execute_plan(&self, arguments: PlanArgs) -> YceResponse {
+        if !self.config.enable_plan {
+            return YceResponse {
+                success: false,
+                mode: Mode::Plan,
+                resolved_action: "plan".into(),
+                original_query: arguments.task,
+                cwd: None,
+                enhance: None,
+                search: None,
+                network_search: None,
+                plan: None,
+                task_context: None,
+                errors: vec![ErrorItem::new(
+                    "y-plan",
+                    "DISABLED",
+                    crate::tools::PLAN_DISABLED_MESSAGE,
+                )],
+                durations: Durations::default(),
+                degradation: Degradation::default(),
+                timestamp: timestamp(),
+            };
+        }
         let started = Instant::now();
         let outcome = self
             .plan

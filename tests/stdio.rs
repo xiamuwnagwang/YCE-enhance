@@ -117,6 +117,56 @@ fn initialize_ping_and_tools_list_follow_mcp_contract() {
 }
 
 #[test]
+fn tools_list_omits_y_plan_when_plan_is_disabled() {
+    let requests = format!(
+        "{}{}\n",
+        initialize_request(),
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#
+    );
+    let (stdout, _) = run_binary_with_env(&requests, &[("YCE_ENABLE_PLAN", "false")]);
+    let messages = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(messages.len(), 2);
+    let tools = messages[1]["result"]["tools"].as_array().unwrap();
+    let names = tools
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [
+            "search_code",
+            "auto",
+            "enhance_prompt",
+            "search_network",
+            "task_show",
+            "task_update"
+        ]
+    );
+}
+
+#[test]
+fn y_plan_tool_call_is_unknown_when_plan_is_disabled() {
+    let requests = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"y_plan","arguments":{"task":"Plan anything"}}}"#,
+        "\n"
+    );
+    let (stdout, _) = run_binary_with_env(requests, &[("YCE_ENABLE_PLAN", "false")]);
+    let messages = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["error"]["code"], -32602);
+    assert!(messages[0]["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Unknown tool: y_plan"));
+}
+
+#[test]
 fn malformed_input_is_answered_without_killing_session() {
     let requests = format!(
         "{}not json\n{}\n",

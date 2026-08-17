@@ -60,7 +60,12 @@ const DEFAULTS = {
   timeoutNetworkMs: 120000,
   // Relay 侧 y-plan 默认服务端超时为 480s，客户端跟随该预算。
   timeoutPlanMs: 480000,
+  // Y-Plan 规划能力默认开启；用户可通过 .env / 安装脚本关闭。
+  enablePlan: true,
 };
+
+const PLAN_DISABLED_MESSAGE =
+  "Y-Plan 规划能力已关闭。请在 .env 设置 YCE_ENABLE_PLAN=true，或运行安装脚本 --setup --enable-plan true。";
 
 function parseEnvFile(filePath) {
   if (!fs.existsSync(filePath)) {
@@ -268,6 +273,7 @@ function loadRuntimeConfig() {
       DEFAULTS.timeoutNetworkMs,
     ),
     timeoutPlanMs: toPositiveInt(merged.YCE_TIMEOUT_PLAN_MS, DEFAULTS.timeoutPlanMs),
+    enablePlan: toBoolean(merged.YCE_ENABLE_PLAN, DEFAULTS.enablePlan),
     yPlanCustomProvider: buildYPlanCustomProvider(merged),
   };
 }
@@ -1208,4 +1214,5 @@ module.exports = {
   toBoundedInt,
   normalizeExcludePaths,
   toPositiveInt,
+  PLAN_DISABLED_MESSAGE,
 };

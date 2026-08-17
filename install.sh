@@ -89,6 +89,7 @@ DEFAULT_MODE="auto"
 DEFAULT_TIMEOUT_ENHANCE_MS="300000"
 DEFAULT_TIMEOUT_SEARCH_MS="180000"
 DEFAULT_LOCAL_FALLBACK="false"
+DEFAULT_ENABLE_PLAN="true"
 
 normalize_local_fallback() {
   local value="${1:-false}"
@@ -96,6 +97,15 @@ normalize_local_fallback() {
   case "$value" in
     true|yes|y|1|on) echo "true" ;;
     *) echo "false" ;;
+  esac
+}
+
+normalize_enable_plan() {
+  local value="${1:-true}"
+  value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+  case "$value" in
+    false|no|n|0|off) echo "false" ;;
+    *) echo "true" ;;
   esac
 }
 
@@ -224,6 +234,7 @@ MERGE_KEYS = (
     "YCE_DEFAULT_MODE",
     "YCE_TIMEOUT_ENHANCE_MS",
     "YCE_TIMEOUT_SEARCH_MS",
+    "YCE_ENABLE_PLAN",
 )
 
 def parse_env(path: Path) -> dict[str, str]:
@@ -608,6 +619,8 @@ write_runtime_config() {
   local timeout_search_ms="${11:-$DEFAULT_TIMEOUT_SEARCH_MS}"
   local local_fallback
   local_fallback="$(normalize_local_fallback "${12:-$DEFAULT_LOCAL_FALLBACK}")"
+  local enable_plan
+  enable_plan="$(normalize_enable_plan "${13:-$DEFAULT_ENABLE_PLAN}")"
 
   local prompt_enhance_abs yce_engine_abs
   prompt_enhance_abs="$(resolve_path_from_script_dir "$prompt_enhance_script")"
@@ -652,6 +665,8 @@ YCE_LOCAL_FALLBACK=$local_fallback
 YCE_DEFAULT_MODE=$mode
 YCE_TIMEOUT_ENHANCE_MS=$timeout_enhance_ms
 YCE_TIMEOUT_SEARCH_MS=$timeout_search_ms
+# Y-Plan 规划能力（默认开启；设为 false 后 --mode plan 与 MCP y_plan 都不可用）
+YCE_ENABLE_PLAN=$enable_plan
 # Y-Plan 规划超时（默认 480000）与 BYOK 自定义模型（服务端放行后才生效）
 # YCE_TIMEOUT_PLAN_MS=480000
 # YCE_YPLAN_PROVIDER=
@@ -673,6 +688,7 @@ ENVEOF
   echo "  yce-engine entry: $yce_engine_script"
   [[ -n "$yce_relay_token" ]] && echo "  YCE Key: $(mask_secret "$yce_relay_token")"
   echo "  本地检索 fallback: $local_fallback"
+  echo "  Y-Plan 规划: $enable_plan"
 }
 
 cmd_install() {
@@ -803,6 +819,7 @@ cmd_setup() {
   local timeout_enhance_ms=""
   local timeout_search_ms=""
   local local_fallback=""
+  local enable_plan=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -819,6 +836,8 @@ cmd_setup() {
       --timeout-search) has_direct_args=true; timeout_search_ms="$2"; shift 2 ;;
       --local-fallback) has_direct_args=true; local_fallback="$(normalize_local_fallback "$2")"; shift 2 ;;
       --no-local-fallback) has_direct_args=true; local_fallback="false"; shift ;;
+      --enable-plan) has_direct_args=true; enable_plan="$(normalize_enable_plan "$2")"; shift 2 ;;
+      --no-plan) has_direct_args=true; enable_plan="false"; shift ;;
       *)
         fail "未知参数: $1"
         exit 1
@@ -871,6 +890,10 @@ cmd_setup() {
   [[ -z "$local_fallback" ]] && local_fallback="$DEFAULT_LOCAL_FALLBACK"
   local_fallback="$(normalize_local_fallback "$local_fallback")"
 
+  enable_plan="${enable_plan:-$(read_env_file_value "YCE_ENABLE_PLAN")}"
+  [[ -z "$enable_plan" ]] && enable_plan="$DEFAULT_ENABLE_PLAN"
+  enable_plan="$(normalize_enable_plan "$enable_plan")"
+
   if [[ "$has_direct_args" == false ]]; then
     echo "─── 交互式配置 ───"
     echo ""
@@ -917,6 +940,18 @@ cmd_setup() {
       esac
     fi
     echo ""
+
+    printf "${CYAN}${BOLD}提示：${NC} Y-Plan 规划默认开启。关闭后 --mode plan 和 MCP y_plan 都不可用。\n"
+    echo "Y-Plan 规划能力当前: $enable_plan"
+    read -rp "启用 Y-Plan 规划？(Y/n，回车保留): " new_val
+    if [[ -n "$new_val" ]]; then
+      new_val="$(printf '%s' "$new_val" | tr '[:upper:]' '[:lower:]')"
+      case "$new_val" in
+        y|yes|true|1) enable_plan="true" ;;
+        n|no|false|0) enable_plan="false" ;;
+      esac
+    fi
+    echo ""
   fi
 
   info "生成 .env"
@@ -932,7 +967,8 @@ cmd_setup() {
     "$mode" \
     "$timeout_enhance_ms" \
     "$timeout_search_ms" \
-    "$local_fallback"
+    "$local_fallback" \
+    "$enable_plan"
 
   auto_sync_env_to_other_installs
   echo ""
@@ -1142,6 +1178,8 @@ print_help() {
   echo "  bash install.sh --setup --yce-relay-token <key>  # 直接写入统一 YCE Key"
   echo "  bash install.sh --setup --local-fallback true       # 远端失败时启用本地 fast fallback"
   echo "  bash install.sh --setup --no-local-fallback         # 禁用本地 fast fallback"
+  echo "  bash install.sh --setup --enable-plan true          # 开启 Y-Plan 规划（默认）"
+  echo "  bash install.sh --setup --no-plan                   # 关闭 Y-Plan 规划"
   echo "  bash install.sh --sync                     # 同步脚本 + 配置到其他已安装目录"
   echo "  bash install.sh --sync-env                 # 仅同步 .env"
   echo "  bash install.sh --check                    # 检查安装状态"
@@ -1153,6 +1191,7 @@ print_help() {
   echo "  - 检索默认连接远端 relay（${DEFAULT_YCE_RELAY_URL}），安装时会写入 YCE_RELAY_URL"
   echo "  - YCE_RELAY_TOKEN 是统一 YCE Key，代码检索、联网检索和提示词增强共用"
   echo "  - --setup 可交互选择是否启用 YCE_LOCAL_FALLBACK（远端失败时的本机 rg/heuristic 检索）"
+  echo "  - --setup 可开关 Y-Plan 规划（默认开启；--no-plan 或 --enable-plan false 关闭）"
   echo "  - --setup 会优先复用当前 .env，并对齐仓内 scripts/prompt-enhance.js"
   echo "  - YCE_PROMPT_ENHANCE_SCRIPT 默认使用仓内脚本: $DEFAULT_PROMPT_ENHANCE_SCRIPT"
   echo "  - 本仓已内置 yce-engine 检索引擎（vendor/yce-engine）与 yce enhance 脚本"
@@ -1201,11 +1240,11 @@ main() {
         cmd="help"
         shift
         ;;
-      --no-local-fallback)
+      --no-local-fallback|--no-plan)
         setup_args+=("$1")
         shift
         ;;
-      --prompt-enhance-script|--prompt-enhance-mode|--prompt-enhance-enable-search|--yce-engine-script|--yce-engine-max-results|--yce-engine-max-turns|--yce-relay-url|--yce-relay-token|--mode|--timeout-enhance|--timeout-search|--local-fallback)
+      --prompt-enhance-script|--prompt-enhance-mode|--prompt-enhance-enable-search|--yce-engine-script|--yce-engine-max-results|--yce-engine-max-turns|--yce-relay-url|--yce-relay-token|--mode|--timeout-enhance|--timeout-search|--local-fallback|--enable-plan)
         setup_args+=("$1")
         shift
         [[ $# -gt 0 ]] && {

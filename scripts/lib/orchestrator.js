@@ -3,7 +3,7 @@ const { runYceEngineSearch } = require("./adapters/yceEngineSearch");
 const { runNetworkSearch } = require("./adapters/networkSearch");
 const { runYPlan, savePlanToFile, MAX_SEARCH_CONTEXT_CHARS } = require("./adapters/yPlan");
 const { createCardFromTaskPlan, resolveCard } = require("./taskCard");
-const { buildError, isNonEmptyString, normalizeSearchQuery, nowIso } = require("./utils");
+const { buildError, isNonEmptyString, normalizeSearchQuery, nowIso, PLAN_DISABLED_MESSAGE } = require("./utils");
 
 const SEARCH_KEYWORDS = [
   "搜索代码", "找文件", "定位实现", "在哪", "哪里", "函数", "类", "接口", "api", "组件", "模块",
@@ -234,7 +234,16 @@ async function orchestrate(input) {
     }
   }
 
-  if (resolvedAction === "plan") {
+  if (resolvedAction === "plan" && config.enablePlan === false) {
+    plan = {
+      executed: false,
+      success: false,
+      result_present: false,
+      plan: null,
+      stderr_summary: ["skipped: YCE_ENABLE_PLAN=false"],
+    };
+    errors.push(buildError("y-plan", "DISABLED", PLAN_DISABLED_MESSAGE));
+  } else if (resolvedAction === "plan") {
     const planOptions = input.planOptions || {};
     let searchContext = isNonEmptyString(planOptions.searchContext)
       ? String(planOptions.searchContext)

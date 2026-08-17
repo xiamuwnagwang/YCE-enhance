@@ -1,6 +1,6 @@
 ---
 name: yce
-version: 3.2.2
+version: 3.3.0
 description: |
   当任务既需要把模糊需求说清楚，又需要去代码库里把实现找出来时使用。适用于"帮我看看这块逻辑在哪""优化任务后再搜代码""增强后检索""auto search""YCE"等场景。
   需要当前外部信息、官方库文档、竞品/行业调研时用 `--mode network` 或 `--with-network`。

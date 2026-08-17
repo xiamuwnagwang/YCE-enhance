@@ -251,6 +251,15 @@ test("CLI plan mode rejects an invalid language", async () => {
   assert.match(outcome.stdout, /language must be zh-CN or en-US/);
 });
 
+test("CLI plan mode is refused when YCE_ENABLE_PLAN is false", async () => {
+  const previousRequest = lastRequest;
+  const outcome = await runCli("Plan anything", [], { YCE_ENABLE_PLAN: "false" });
+  assert.equal(outcome.status, 1);
+  assert.match(outcome.stdout, /<error source="y-plan" code="DISABLED">/);
+  assert.match(outcome.stdout, /Y-Plan 规划能力已关闭/);
+  assert.equal(lastRequest, previousRequest);
+});
+
 test("CLI plan mode saves the plan to disk with --save", async () => {
   const saveDir = join(fixtureDir, "plans");
   const outcome = await runCli("Save the checkout plan", ["--save", saveDir]);

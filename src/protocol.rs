@@ -282,7 +282,7 @@ impl McpServer {
             ))?]),
             "tools/list" => Ok(vec![encode_response(JsonRpcResponse::success(
                 id,
-                json!({"tools": tool_definitions()}),
+                json!({"tools": tool_definitions(self.service.enable_plan())}),
             ))?]),
             "tools/call" => self.handle_tool_call(id, params).await,
             _ => Ok(vec![encode_response(JsonRpcResponse::error(
@@ -315,17 +315,18 @@ impl McpServer {
                 ))?]);
             }
         };
-        if ![
+        let mut known_tools = vec![
             "search_code",
             "auto",
             "enhance_prompt",
             "search_network",
-            "y_plan",
             "task_show",
             "task_update",
-        ]
-        .contains(&call.name.as_str())
-        {
+        ];
+        if self.service.enable_plan() {
+            known_tools.insert(4, "y_plan");
+        }
+        if !known_tools.contains(&call.name.as_str()) {
             return Ok(vec![encode_response(JsonRpcResponse::error(
                 id,
                 -32602,
