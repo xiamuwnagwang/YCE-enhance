@@ -1,7 +1,7 @@
 # YCE Skill
 
 YCE 是面向 AI Agent 的 **提示词增强 + 语义代码检索 + 联网检索 + Y-Plan 规划** skill。
-当前版本：**3.3.0**。
+当前版本：**3.4.0**。
 
 ## License
 
