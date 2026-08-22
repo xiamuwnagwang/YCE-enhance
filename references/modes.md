@@ -84,7 +84,7 @@ Y-Plan 只规划不执行。默认超时 480s（`YCE_TIMEOUT_PLAN_MS`）。网�
 
 唯一公网密钥是 `YCE_RELAY_TOKEN`，服务根默认 `YCE_RELAY_URL=https://yce.aigy.de`。代码检索走仓内 `vendor/yce-engine`；增强走 `scripts/prompt-enhance.js`。不要把 `scripts/lib/*` 配成入口路径。
 
-`YCE_ENABLE_PLAN` 控制是否开放 plan 能力，默认 `true`。设为 `false` 后，`--mode plan` 和 MCP `y_plan` 都不可用；安装脚本默认写入开启，可用 `bash install.sh --setup --no-plan` 或 `.\install.ps1 -Setup -NoPlan` 关闭。
+`YCE_ENABLE_PLAN` 控制是否开放 plan 能力，默认 `true`。设为 `false` 后，`--mode plan` 不可用；安装脚本默认写入开启，可用 `bash install.sh --setup --no-plan` 或 `.\install.ps1 -Setup -NoPlan` 关闭。
 
 `YCE_RESULT_DIR` 改结果落盘目录，缺省是系统临时目录下的 `yce-results/`，其中超过 3 天的 `yce-*.xml` 会在下次调用时自动清理。
 

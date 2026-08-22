@@ -1177,7 +1177,7 @@ function Invoke-Setup {
       }
     }
 
-    Write-Host '提示：Y-Plan 规划默认开启。关闭后 --mode plan 和 MCP y_plan 都不可用。' -ForegroundColor Cyan
+    Write-Host '提示：Y-Plan 规划默认开启。关闭后 --mode plan 不可用。' -ForegroundColor Cyan
     Write-Host "Y-Plan 规划能力当前: $runtimeEnablePlan"
     $newEnablePlan = Read-Host '启用 Y-Plan 规划？(Y/n，回车保留)'
     if ($newEnablePlan) {

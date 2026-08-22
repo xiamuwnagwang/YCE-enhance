@@ -1,6 +1,6 @@
 # 任务锚点
 
-任务卡存放在项目 `.yce/tasks/<id>.json`（goal 一经建卡不可变；active 卡 7 天未更新自动归档；与 MCP 共享同一目录）。
+任务卡存放在项目 `.yce/tasks/<id>.json`（goal 一经建卡不可变；active 卡 7 天未更新自动归档）。
 
 ## 开工
 

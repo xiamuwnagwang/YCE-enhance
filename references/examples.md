@@ -31,6 +31,12 @@ node ./scripts/yce.js "Locate provider list logic and compare with latest offici
 node ./scripts/yce.js "Migrate login sessions to Redis with backward compatibility" \
   --mode plan --with-search --cwd "/absolute/path/to/project" --language zh-CN
 
+# plan（网页搜索不是默认唯一来源；可叠加仓库代码/手工上下文）
+node ./scripts/yce.js "Review this plan using the supplied context" \
+  --mode plan --search-context "Existing constraints: sessions expire after 30 minutes" \
+  --history "User: preserve backward compatibility" \
+  --no-web-search
+
 # plan 落盘（--save 存 Markdown 计划，--out 存 YCE XML，互不影响）
 node ./scripts/yce.js "Add rate limiting middleware to the Go service" \
   --mode plan --save "./docs/plans"

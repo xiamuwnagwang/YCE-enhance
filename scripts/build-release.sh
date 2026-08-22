@@ -63,12 +63,8 @@ main() {
   local items=(
     "scripts"
     "vendor"
-    "src"
     "test"
-    "tests"
     "references"
-    "Cargo.toml"
-    "Cargo.lock"
     "SKILL.md"
     "install.sh"
     "install.ps1"

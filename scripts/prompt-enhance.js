@@ -57,7 +57,7 @@ function loadConfig() {
   }
 
   // 进程环境用于一次性覆盖当前调用，优先级必须高于仓内 .env。
-  // 这样测试、本地 Relay 和 MCP 启动器无需改写持久化密钥配置。
+  // 这样测试和本地 Relay 无需改写持久化密钥配置。
   apiUrl = firstNonEmpty(process.env.YCE_RELAY_URL, apiUrl) || DEFAULT_API_URL;
   token = firstNonEmpty(process.env.YCE_RELAY_TOKEN, token);
   enhanceMode = firstNonEmpty(process.env.YCE_PROMPT_ENHANCE_MODE, enhanceMode) || "agent";
