@@ -49,7 +49,16 @@ plan + --search-context  → 手工传入已有上下文（可与 --with-search 
 plan + --with-network    → 额外客户端联网（与 Y-Plan 服务端 web search 独立）
 ```
 
-Y-Plan 只规划不执行。默认超时 480s（`YCE_TIMEOUT_PLAN_MS`）。按次计费，共用 `YCE_RELAY_TOKEN`。BYOK：`--plan-provider` + `--plan-base-url` + `--plan-token` + `--plan-model`。
+Y-Plan 只规划不执行。默认超时 480s（`YCE_TIMEOUT_PLAN_MS`）。网页端 relay 只是一个调用方，不等于“只读取网页”：计划可以同时使用任务描述、会话历史、调用方传入的 `search_context` / 文件上下文、`--with-search` 产生的仓库代码上下文，以及显式启用的外部 web search。
+
+模型后端二选一：
+
+- `--plan-backend relay`（默认，也可写 `yce`）：规划模型走远端 YCE
+- `--plan-backend local`（也可写 `cli`）：规划模型走本机 y-plan CLI / 自备模型
+
+提示词增强同样二选一：`--enhance-backend relay|local`。
+
+检索和联网始终走 YCE，不跟模型后端走。自备模型（`--plan-provider` / `YCE_YPLAN_*`）两种后端都能用：relay 送给远端 YCE，local 由本机 CLI 或直连 API 调用。走 local 时不需要单独配置增强 Key。
 
 ## 常用参数
 
@@ -62,6 +71,7 @@ Y-Plan 只规划不执行。默认超时 480s（`YCE_TIMEOUT_PLAN_MS`）。按�
 | `--history` | 增强 / 规划强烈建议传 |
 | `--cwd` | 不在目标项目目录时必须传 |
 | `--with-search` / `--search-context` / `--save` | 仅 plan |
+| `--plan-backend` / `--enhance-backend` | `relay`/`yce` 或 `local`/`cli`；默认读 `YCE_YPLAN_BACKEND` / `YCE_ENHANCE_BACKEND` |
 | `--task` / `--no-task` | 任务锚点绑定 / 关闭 |
 | `--out <file\|dir>` | 指定结果落盘位置；缺省写系统临时目录（见 `YCE_RESULT_DIR`） |
 | `--stdout-xml` | 回到旧行为：完整 XML 打 stdout、不落盘、无哨兵保护，仅管道场景用 |
@@ -78,4 +88,4 @@ Y-Plan 只规划不执行。默认超时 480s（`YCE_TIMEOUT_PLAN_MS`）。按�
 
 `YCE_RESULT_DIR` 改结果落盘目录，缺省是系统临时目录下的 `yce-results/`，其中超过 3 天的 `yce-*.xml` 会在下次调用时自动清理。
 
-BYOK：`YCE_ENHANCE_*` / `YCE_YPLAN_*`，仅当次请求使用、不落库，需服务端放行。
+规划/增强模型后端：`YCE_YPLAN_BACKEND`、`YCE_ENHANCE_BACKEND`（`relay` 或 `local`）。本地 CLI：`YCE_YPLAN_CLI`、`YCE_YPLAN_CONFIG`。自备模型：`YCE_ENHANCE_*` / `YCE_YPLAN_*`；relay 时需服务端放行，local 时由本机 CLI 或直连 API 使用，不再单独配增强 Key。

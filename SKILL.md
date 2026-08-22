@@ -50,7 +50,7 @@ node ./scripts/validate-yce-result.mjs "<result_file>" --expect-sha256 <xml_sha2
 补充（不另开规则）：
 - `auto` 只在提示词模糊或用户明确要增强时才 enhance；已够具体则直接 search。无 `YCE_RELAY_TOKEN` / 无 `prompt_enhance` 权益时不要空跑 enhance。
 - CLI **不会**按关键词自动联网。联网由调用方显式传 `--mode network` 或 `--with-network`。
-- `plan` 只产出 Markdown 计划，不改文件、不跑命令。拿到计划后是否执行由用户决定。
+- `plan` 只产出 Markdown 计划，不改文件、不跑命令。计划输入不只来自网页：可包含任务、历史、手工 `search_context`、`--with-search` 的仓库代码上下文，以及显式开启的外部 web search；拿到计划后是否执行由用户决定。
 - 详情：[modes.md](references/modes.md)、[network-search.md](references/network-search.md)
 
 ## 敏感信息
@@ -81,8 +81,12 @@ node ./scripts/yce.js "Help me find where this provider is handled" --mode auto 
 # 外部事实
 node ./scripts/yce.js "What is the latest official React useEffect guidance" --mode network
 
-# 只规划
+# 只规划（默认走远端 YCE；本机 CLI 加 --plan-backend local）
 node ./scripts/yce.js "Migrate login sessions to Redis with backward compatibility" --mode plan --with-search --cwd "/abs/project" --language zh-CN
+node ./scripts/yce.js "Migrate login sessions to Redis with backward compatibility" --mode plan --plan-backend local --with-search --cwd "/abs/project"
+
+# 提示词增强走本机 CLI
+node ./scripts/yce.js "整理这个任务" --mode enhance --enhance-backend local
 ```
 
 指定落盘位置用 `--out <file|dir>`；只有需要管道时才用 `--stdout-xml`（此时主机可能截断，风险自负）。
@@ -93,7 +97,6 @@ node ./scripts/yce.js "Migrate login sessions to Redis with backward compatibili
 
 - CLI 退出码与 `scripts/validate-yce-result.mjs` 同一套语义：`0` 放行，`2` 未读完，`3` 无主结果。
 - 完整结果只在 `result_file`。按文件分段读，读到 `yce:eof` 哨兵为止；禁止把终端内容当完整结果。
-- MCP 结果先核对 `<yce-consume>` 的 `xml_bytes` 与收到 XML 是否一致；服务端 `complete=true` 不能代替这一步。
 - `--help` 也是 XML 且 exit 0，但 `resolved-action` 为空、`INVALID_ARGS`，不是检索成功。
 - 契约与标签：[xml-contract.md](references/xml-contract.md)
 - 排障：[troubleshooting.md](references/troubleshooting.md)

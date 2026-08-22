@@ -76,7 +76,7 @@ if [[ -d "$HOME/.agents/skills" ]]; then
   )
 fi
 
-INSTALL_FILES=("scripts" "vendor" "src" "test" "tests" "references" "Cargo.toml" "Cargo.lock" "SKILL.md" "install.sh" "install.ps1" ".env.example" ".gitignore")
+INSTALL_FILES=("scripts" "vendor" "test" "references" "SKILL.md" "install.sh" "install.ps1" ".env.example" ".gitignore")
 
 DEFAULT_PROMPT_ENHANCE_SCRIPT="./scripts/prompt-enhance.js"
 DEFAULT_PROMPT_ENHANCE_MODE="agent"
@@ -90,6 +90,40 @@ DEFAULT_TIMEOUT_ENHANCE_MS="300000"
 DEFAULT_TIMEOUT_SEARCH_MS="180000"
 DEFAULT_LOCAL_FALLBACK="false"
 DEFAULT_ENABLE_PLAN="true"
+DEFAULT_YPLAN_BACKEND="relay"
+DEFAULT_ENHANCE_BACKEND="relay"
+
+normalize_backend() {
+  local value="${1:-relay}"
+  value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+  case "$value" in
+    local|cli) echo "local" ;;
+    relay|yce|"") echo "relay" ;;
+    *) echo "" ;;
+  esac
+}
+
+detect_yplan_cli() {
+  local candidate
+  for candidate in \
+    "$HOME/.grok/skills/y-plan/scripts/y-plan.mjs" \
+    "$HOME/ai/skills/y-plan/scripts/y-plan.mjs" \
+    "$HOME/.agents/skills/y-plan/scripts/y-plan.mjs" \
+    "$HOME/.claude/skills/y-plan/scripts/y-plan.mjs" \
+    "$HOME/.codex/skills/y-plan/scripts/y-plan.mjs" \
+    "$HOME/.cursor/skills/y-plan/scripts/y-plan.mjs"
+  do
+    if [[ -f "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  if command -v y-plan >/dev/null 2>&1; then
+    command -v y-plan
+    return 0
+  fi
+  echo ""
+}
 
 normalize_local_fallback() {
   local value="${1:-false}"
@@ -235,6 +269,18 @@ MERGE_KEYS = (
     "YCE_TIMEOUT_ENHANCE_MS",
     "YCE_TIMEOUT_SEARCH_MS",
     "YCE_ENABLE_PLAN",
+    "YCE_YPLAN_BACKEND",
+    "YCE_ENHANCE_BACKEND",
+    "YCE_YPLAN_CLI",
+    "YCE_YPLAN_CONFIG",
+    "YCE_YPLAN_PROVIDER",
+    "YCE_YPLAN_BASE_URL",
+    "YCE_YPLAN_TOKEN",
+    "YCE_YPLAN_MODEL",
+    "YCE_ENHANCE_PROVIDER",
+    "YCE_ENHANCE_BASE_URL",
+    "YCE_ENHANCE_TOKEN",
+    "YCE_ENHANCE_MODEL",
 )
 
 def parse_env(path: Path) -> dict[str, str]:
@@ -621,6 +667,22 @@ write_runtime_config() {
   local_fallback="$(normalize_local_fallback "${12:-$DEFAULT_LOCAL_FALLBACK}")"
   local enable_plan
   enable_plan="$(normalize_enable_plan "${13:-$DEFAULT_ENABLE_PLAN}")"
+  local yplan_backend
+  yplan_backend="$(normalize_backend "${14:-$DEFAULT_YPLAN_BACKEND}")"
+  [[ -z "$yplan_backend" ]] && yplan_backend="$DEFAULT_YPLAN_BACKEND"
+  local enhance_backend
+  enhance_backend="$(normalize_backend "${15:-$DEFAULT_ENHANCE_BACKEND}")"
+  [[ -z "$enhance_backend" ]] && enhance_backend="$DEFAULT_ENHANCE_BACKEND"
+  local yplan_cli="${16:-}"
+  local yplan_config="${17:-}"
+  local yplan_provider="${18:-}"
+  local yplan_base_url="${19:-}"
+  local yplan_token="${20:-}"
+  local yplan_model="${21:-}"
+  local enhance_provider="${22:-}"
+  local enhance_base_url="${23:-}"
+  local enhance_token="${24:-}"
+  local enhance_model="${25:-}"
 
   local prompt_enhance_abs yce_engine_abs
   prompt_enhance_abs="$(resolve_path_from_script_dir "$prompt_enhance_script")"
@@ -651,7 +713,8 @@ YCE_PROMPT_ENHANCE_MODE=$prompt_enhance_mode
 YCE_PROMPT_ENHANCE_ENABLE_SEARCH=$prompt_enhance_enable_search
 
 # yce-engine adapter (远端优先：默认连接 yce.aigy.de relay)
-# YCE_RELAY_TOKEN 是统一 YCE Key；代码检索、联网检索、提示词增强和 Y-Plan 规划共用
+# YCE_RELAY_TOKEN 用于代码检索、联网检索，以及规划/增强走远端 YCE 时的模型调用。
+# 规划或增强选 local 时，模型走本机 CLI / 自备模型，不消耗这个 Key。
 YCE_ENGINE_SCRIPT=$yce_engine_script
 YCE_ENGINE_MAX_RESULTS=$yce_engine_max_results
 YCE_ENGINE_MAX_TURNS=$yce_engine_max_turns
@@ -665,15 +728,23 @@ YCE_LOCAL_FALLBACK=$local_fallback
 YCE_DEFAULT_MODE=$mode
 YCE_TIMEOUT_ENHANCE_MS=$timeout_enhance_ms
 YCE_TIMEOUT_SEARCH_MS=$timeout_search_ms
-# Y-Plan 规划能力（默认开启；设为 false 后 --mode plan 与 MCP y_plan 都不可用）
+# Y-Plan 规划能力（默认开启；设为 false 后 --mode plan 不可用）
 YCE_ENABLE_PLAN=$enable_plan
-# Y-Plan 规划超时（默认 480000）与 BYOK 自定义模型（服务端放行后才生效）
+# 规划 / 增强模型后端：relay=远端 YCE，local=本机 CLI
+YCE_YPLAN_BACKEND=$yplan_backend
+YCE_ENHANCE_BACKEND=$enhance_backend
+YCE_YPLAN_CLI=$yplan_cli
+YCE_YPLAN_CONFIG=$yplan_config
+# 自备模型（规划）；增强可单独写 YCE_ENHANCE_*，不需要再配增强专用 Key
+YCE_YPLAN_PROVIDER=$yplan_provider
+YCE_YPLAN_BASE_URL=$yplan_base_url
+YCE_YPLAN_TOKEN=$yplan_token
+YCE_YPLAN_MODEL=$yplan_model
+YCE_ENHANCE_PROVIDER=$enhance_provider
+YCE_ENHANCE_BASE_URL=$enhance_base_url
+YCE_ENHANCE_TOKEN=$enhance_token
+YCE_ENHANCE_MODEL=$enhance_model
 # YCE_TIMEOUT_PLAN_MS=480000
-# YCE_YPLAN_PROVIDER=
-# YCE_YPLAN_BASE_URL=
-# YCE_YPLAN_TOKEN=
-# YCE_YPLAN_MODEL=
-# YCE_YPLAN_TEMPERATURE=
 ENVEOF
 
   # Defensive: remove any .env that npm/tools may have left in the engine package dir.
@@ -689,6 +760,9 @@ ENVEOF
   [[ -n "$yce_relay_token" ]] && echo "  YCE Key: $(mask_secret "$yce_relay_token")"
   echo "  本地检索 fallback: $local_fallback"
   echo "  Y-Plan 规划: $enable_plan"
+  echo "  规划模型后端: $yplan_backend"
+  echo "  增强模型后端: $enhance_backend"
+  [[ -n "$yplan_cli" ]] && echo "  y-plan CLI: $yplan_cli"
 }
 
 cmd_install() {
@@ -820,6 +894,18 @@ cmd_setup() {
   local timeout_search_ms=""
   local local_fallback=""
   local enable_plan=""
+  local yplan_backend=""
+  local enhance_backend=""
+  local yplan_cli=""
+  local yplan_config=""
+  local yplan_provider=""
+  local yplan_base_url=""
+  local yplan_token=""
+  local yplan_model=""
+  local enhance_provider=""
+  local enhance_base_url=""
+  local enhance_token=""
+  local enhance_model=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -838,6 +924,14 @@ cmd_setup() {
       --no-local-fallback) has_direct_args=true; local_fallback="false"; shift ;;
       --enable-plan) has_direct_args=true; enable_plan="$(normalize_enable_plan "$2")"; shift 2 ;;
       --no-plan) has_direct_args=true; enable_plan="false"; shift ;;
+      --plan-backend) has_direct_args=true; yplan_backend="$2"; shift 2 ;;
+      --enhance-backend) has_direct_args=true; enhance_backend="$2"; shift 2 ;;
+      --yplan-cli) has_direct_args=true; yplan_cli="$2"; shift 2 ;;
+      --yplan-config) has_direct_args=true; yplan_config="$2"; shift 2 ;;
+      --yplan-provider) has_direct_args=true; yplan_provider="$2"; shift 2 ;;
+      --yplan-base-url) has_direct_args=true; yplan_base_url="$2"; shift 2 ;;
+      --yplan-token) has_direct_args=true; yplan_token="$2"; shift 2 ;;
+      --yplan-model) has_direct_args=true; yplan_model="$2"; shift 2 ;;
       *)
         fail "未知参数: $1"
         exit 1
@@ -893,12 +987,27 @@ cmd_setup() {
   enable_plan="${enable_plan:-$(read_env_file_value "YCE_ENABLE_PLAN")}"
   [[ -z "$enable_plan" ]] && enable_plan="$DEFAULT_ENABLE_PLAN"
   enable_plan="$(normalize_enable_plan "$enable_plan")"
+  yplan_backend="${yplan_backend:-$(read_env_file_value "YCE_YPLAN_BACKEND")}"
+  [[ -z "$yplan_backend" ]] && yplan_backend="$DEFAULT_YPLAN_BACKEND"
+  enhance_backend="${enhance_backend:-$(read_env_file_value "YCE_ENHANCE_BACKEND")}"
+  [[ -z "$enhance_backend" ]] && enhance_backend="$DEFAULT_ENHANCE_BACKEND"
+  yplan_cli="${yplan_cli:-$(read_env_file_value "YCE_YPLAN_CLI")}"
+  yplan_config="${yplan_config:-$(read_env_file_value "YCE_YPLAN_CONFIG")}"
+  yplan_provider="${yplan_provider:-$(read_env_file_value "YCE_YPLAN_PROVIDER")}"
+  yplan_base_url="${yplan_base_url:-$(read_env_file_value "YCE_YPLAN_BASE_URL")}"
+  yplan_token="${yplan_token:-$(read_env_file_value "YCE_YPLAN_TOKEN")}"
+  yplan_model="${yplan_model:-$(read_env_file_value "YCE_YPLAN_MODEL")}"
+  enhance_provider="${enhance_provider:-$(read_env_file_value "YCE_ENHANCE_PROVIDER")}"
+  enhance_base_url="${enhance_base_url:-$(read_env_file_value "YCE_ENHANCE_BASE_URL")}"
+  enhance_token="${enhance_token:-$(read_env_file_value "YCE_ENHANCE_TOKEN")}"
+  enhance_model="${enhance_model:-$(read_env_file_value "YCE_ENHANCE_MODEL")}"
 
   if [[ "$has_direct_args" == false ]]; then
     echo "─── 交互式配置 ───"
     echo ""
     printf "${CYAN}${BOLD}提示：${NC} YCE 默认连接 ${BOLD}${DEFAULT_YCE_RELAY_URL}${NC}。\n"
-    printf "      ${BOLD}YCE_RELAY_TOKEN${NC} 是统一 YCE Key，代码检索、联网检索和提示词增强共用。\n"
+    printf "      ${BOLD}YCE_RELAY_TOKEN${NC} 用于代码检索、联网检索；规划/增强走远端 YCE 时也用它。\n"
+    printf "      规划或增强选本机 CLI 时，模型不消耗这个 Key，也不再单独配置增强 Key。\n"
     echo ""
 
     echo "YCE Relay URL 当前: ${yce_relay_url:-$DEFAULT_YCE_RELAY_URL}"
@@ -907,21 +1016,63 @@ cmd_setup() {
     echo ""
 
     echo "YCE Key 当前: ${yce_relay_token:+$(mask_secret "$yce_relay_token")}";
-    [[ -z "$yce_relay_token" ]] && echo "YCE Key 当前: (空，远端能力不可用)"
-    read -rp "YCE Key / YCE_RELAY_TOKEN（必填，格式 yce_...）: " new_val
+    [[ -z "$yce_relay_token" ]] && echo "YCE Key 当前: (空，代码检索/联网检索不可用)"
+    read -rp "YCE Key / YCE_RELAY_TOKEN（代码检索需要，回车可先跳过）: " new_val
     [[ -n "$new_val" ]] && yce_relay_token="$new_val"
     echo ""
 
-    if [[ -n "$prompt_enhance_script" ]]; then
-      echo "提示词增强脚本: $prompt_enhance_script"
-    else
-      echo "提示词增强脚本: 未检测到仓内脚本"
+    echo "规划模型后端当前: $yplan_backend"
+    read -rp "规划模型走远端 YCE 还是本机 CLI？(relay/local，回车保留): " new_val
+    if [[ -n "$new_val" ]]; then
+      yplan_backend="$(normalize_backend "$new_val")"
+      [[ -z "$yplan_backend" ]] && yplan_backend="$DEFAULT_YPLAN_BACKEND"
     fi
     echo ""
 
-    echo "增强超时当前: $timeout_enhance_ms"
-    read -rp "增强超时 ms（回车保留）: " new_val
-    [[ -n "$new_val" ]] && timeout_enhance_ms="$new_val"
+    echo "提示词增强后端当前: $enhance_backend"
+    read -rp "提示词增强走远端 YCE 还是本机 CLI？(relay/local，回车保留): " new_val
+    if [[ -n "$new_val" ]]; then
+      enhance_backend="$(normalize_backend "$new_val")"
+      [[ -z "$enhance_backend" ]] && enhance_backend="$DEFAULT_ENHANCE_BACKEND"
+    fi
+    echo ""
+
+    if [[ "$yplan_backend" == "local" || "$enhance_backend" == "local" ]]; then
+      local detected_cli
+      detected_cli="$(detect_yplan_cli)"
+      [[ -z "$yplan_cli" ]] && yplan_cli="$detected_cli"
+      echo "本地 y-plan CLI 当前: ${yplan_cli:-未检测到}"
+      read -rp "y-plan CLI 路径（回车保留/使用检测结果）: " new_val
+      [[ -n "$new_val" ]] && yplan_cli="$new_val"
+      echo ""
+      echo "y-plan 配置文件当前: ${yplan_config:-默认读 CLI 旁边的 y-plan.config.json}"
+      read -rp "y-plan.config.json 路径（回车保留）: " new_val
+      [[ -n "$new_val" ]] && yplan_config="$new_val"
+      echo ""
+    fi
+
+    echo "自备模型当前: ${yplan_provider:-未配置} ${yplan_model}"
+    read -rp "是否配置规划自备模型？走远端或本机都可用 (y/N): " new_val
+    new_val="$(printf '%s' "$new_val" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$new_val" == "y" || "$new_val" == "yes" ]]; then
+      read -rp "provider（claude/openai/openai-responses 或 codex/cursor/claude-code）: " new_val
+      [[ -n "$new_val" ]] && yplan_provider="$new_val"
+      read -rp "model（回车保留）: " new_val
+      [[ -n "$new_val" ]] && yplan_model="$new_val"
+      read -rp "base url（本机 CLI 可不填）: " new_val
+      [[ -n "$new_val" ]] && yplan_base_url="$new_val"
+      read -rp "token（本机 CLI 可不填）: " new_val
+      [[ -n "$new_val" ]] && yplan_token="$new_val"
+      echo ""
+      read -rp "提示词增强是否使用同一套自备模型？(y/N): " new_val
+      new_val="$(printf '%s' "$new_val" | tr '[:upper:]' '[:lower:]')"
+      if [[ "$new_val" == "y" || "$new_val" == "yes" ]]; then
+        enhance_provider="$yplan_provider"
+        enhance_base_url="$yplan_base_url"
+        enhance_token="$yplan_token"
+        enhance_model="$yplan_model"
+      fi
+    fi
     echo ""
 
     echo "检索超时当前: $timeout_search_ms"
@@ -941,7 +1092,7 @@ cmd_setup() {
     fi
     echo ""
 
-    printf "${CYAN}${BOLD}提示：${NC} Y-Plan 规划默认开启。关闭后 --mode plan 和 MCP y_plan 都不可用。\n"
+    printf "${CYAN}${BOLD}提示：${NC} Y-Plan 规划默认开启。关闭后 --mode plan 不可用。\n"
     echo "Y-Plan 规划能力当前: $enable_plan"
     read -rp "启用 Y-Plan 规划？(Y/n，回车保留): " new_val
     if [[ -n "$new_val" ]]; then
@@ -955,6 +1106,11 @@ cmd_setup() {
   fi
 
   info "生成 .env"
+  yplan_backend="$(normalize_backend "$yplan_backend")"
+  [[ -z "$yplan_backend" ]] && yplan_backend="$DEFAULT_YPLAN_BACKEND"
+  enhance_backend="$(normalize_backend "$enhance_backend")"
+  [[ -z "$enhance_backend" ]] && enhance_backend="$DEFAULT_ENHANCE_BACKEND"
+
   write_runtime_config \
     "$prompt_enhance_script" \
     "$prompt_enhance_mode" \
@@ -968,7 +1124,19 @@ cmd_setup() {
     "$timeout_enhance_ms" \
     "$timeout_search_ms" \
     "$local_fallback" \
-    "$enable_plan"
+    "$enable_plan" \
+    "$yplan_backend" \
+    "$enhance_backend" \
+    "$yplan_cli" \
+    "$yplan_config" \
+    "$yplan_provider" \
+    "$yplan_base_url" \
+    "$yplan_token" \
+    "$yplan_model" \
+    "${enhance_provider:-}" \
+    "${enhance_base_url:-}" \
+    "${enhance_token:-}" \
+    "${enhance_model:-}"
 
   auto_sync_env_to_other_installs
   echo ""
@@ -976,7 +1144,7 @@ cmd_setup() {
   if env_has_relay_credentials "$ENV_FILE"; then
     ok "检索密钥校验: node ./vendor/yce-engine/yce-engine.mjs --check-key"
   else
-    warn "尚未配置 YCE_RELAY_TOKEN；代码检索需要 yce_... 格式的搜索密钥"
+    warn "尚未配置 YCE_RELAY_TOKEN；代码检索和联网检索需要 yce_... 格式的搜索密钥"
   fi
   echo ""
 }
@@ -1175,7 +1343,8 @@ print_help() {
   echo "  bash install.sh --install                  # 安装或更新（必要时自动下载远程最新版本）"
   echo "  bash install.sh --target agents            # 仅安装到指定工具"
   echo "  bash install.sh --setup                    # 交互式配置统一 YCE Key"
-  echo "  bash install.sh --setup --yce-relay-token <key>  # 直接写入统一 YCE Key"
+  echo "  bash install.sh --setup --yce-relay-token <key>  # 直接写入检索/联网用的 YCE Key"
+  echo "  bash install.sh --setup --plan-backend local --enhance-backend local"
   echo "  bash install.sh --setup --local-fallback true       # 远端失败时启用本地 fast fallback"
   echo "  bash install.sh --setup --no-local-fallback         # 禁用本地 fast fallback"
   echo "  bash install.sh --setup --enable-plan true          # 开启 Y-Plan 规划（默认）"
@@ -1189,7 +1358,10 @@ print_help() {
   echo ""
   echo "说明:"
   echo "  - 检索默认连接远端 relay（${DEFAULT_YCE_RELAY_URL}），安装时会写入 YCE_RELAY_URL"
-  echo "  - YCE_RELAY_TOKEN 是统一 YCE Key，代码检索、联网检索和提示词增强共用"
+  echo "  - YCE_RELAY_TOKEN 用于代码检索、联网检索，以及规划/增强走远端 YCE 时"
+  echo "  - 规划/增强可分别选 relay（远端 YCE）或 local（本机 CLI）；不再单独配置增强 Key"
+  echo "  - --setup --plan-backend local --enhance-backend local --yplan-cli <y-plan.mjs>"
+  echo "  - 自备模型：--yplan-provider --yplan-model --yplan-base-url --yplan-token，远端和本地都能用"
   echo "  - --setup 可交互选择是否启用 YCE_LOCAL_FALLBACK（远端失败时的本机 rg/heuristic 检索）"
   echo "  - --setup 可开关 Y-Plan 规划（默认开启；--no-plan 或 --enable-plan false 关闭）"
   echo "  - --setup 会优先复用当前 .env，并对齐仓内 scripts/prompt-enhance.js"

@@ -46,10 +46,10 @@ node ./scripts/validate-yce-result.mjs <file> --expect-sha256 <xml_sha256> --exp
 | `<success>` | 任一侧产出可用结果即为 true；**不能**代替 result-present |
 | `<mode>` | 传入模式 |
 | `<resolved-action>` | 实际动作：`enhance` / `search` / `enhance_then_search` / `network_search` / `*_with_network` / `plan` / `search_then_plan` / … |
-| `<enhanced executed success>` | 增强块；读 `<prompt>`、`<recommended-skills>`、`<task-plan>` |
+| `<enhanced executed success>` | 增强块；读 `<prompt>`、`<backend>`（`relay`/`local`）、`<runtime>`、`<recommended-skills>`、`<task-plan>` |
 | `<search result-present>` | 代码定位主结果在 `<result>`。`empty-result="true"` 时 success 仍可能为 true |
 | `<network-search result-present>` | 外部事实；evidence / summaries。不要把 URL 当仓库路径 |
-| `<y-plan result-present>` | 规划正文在 `<plan>`。只呈现，不自行执行 |
+| `<y-plan result-present>` | 规划正文在 `<plan>`。另有 `<backend>`、`<runtime>`、`<run-dir>`。只呈现，不自行执行 |
 | `<task-context present created-now>` | 任务锚点复述 |
 | `<errors>` | 即使 success=true 也要看。`EMPTY_RESULT` 表示跑完但没搜到 |
 
@@ -62,7 +62,7 @@ node ./scripts/validate-yce-result.mjs <file> --expect-sha256 <xml_sha256> --exp
 - `gate.may_analyze_or_edit_code`：仅当 XML 完整且 search result-present=true
 - 退出码 `0` 通过；`2` 未读完；`3` 无主结果
 
-`integrity` 三态：`verified`（哨兵或收据值重算一致）、`mismatch`（字节数或摘要不符）、`unverified`（无可信哨兵且未提供收据值，例如 `--stdout-xml`、MCP 结果，或正文引用了哨兵）。
+`integrity` 三态：`verified`（哨兵或收据值重算一致）、`mismatch`（字节数或摘要不符）、`unverified`（无可信哨兵且未提供收据值，例如 `--stdout-xml` 或正文引用了哨兵）。
 
 完整性判定按四层叠加，任一层不过即 exit 2：
 
@@ -72,8 +72,6 @@ node ./scripts/validate-yce-result.mjs <file> --expect-sha256 <xml_sha256> --exp
 3. **截断标记**：`truncated` / `token limit` 等字样，扫 `<yce>` 外侧以及 root 内 CDATA 之外。引擎结果里的 `(lines truncated)` / `(tree truncated)` 在 CDATA 内，不算主机截断。
 
 结果正文永远在 `</yce>` 之前，所以"截断到正文中某个内嵌哨兵处"必然丢掉根闭合标签，会被第 2 层抓到。
-
-MCP 的 `<yce-consume>` 带 `xml_bytes`，与收到 XML 字节数不一致视为未读完。
 
 ## `--help` 与参数错误
 

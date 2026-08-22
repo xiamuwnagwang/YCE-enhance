@@ -44,6 +44,14 @@ param(
   [switch]$NoLocalFallback,
   [string]$EnablePlan,
   [switch]$NoPlan,
+  [string]$PlanBackend,
+  [string]$EnhanceBackend,
+  [string]$YplanCli,
+  [string]$YplanConfig,
+  [string]$YplanProvider,
+  [string]$YplanBaseUrl,
+  [string]$YplanToken,
+  [string]$YplanModel,
   [switch]$Help
 )
 
@@ -69,8 +77,39 @@ $DefaultTimeoutEnhance = "300000"
 $DefaultTimeoutSearch = "180000"
 $DefaultLocalFallback = "false"
 $DefaultEnablePlan = "true"
+$DefaultYplanBackend = "relay"
+$DefaultEnhanceBackend = "relay"
+
+function Normalize-Backend {
+  param([string]$Value)
+  if (-not $Value) { return "relay" }
+  switch ($Value.Trim().ToLower()) {
+    "local" { return "local" }
+    "cli" { return "local" }
+    "relay" { return "relay" }
+    "yce" { return "relay" }
+    default { return "" }
+  }
+}
+
+function Find-YplanCli {
+  $candidates = @(
+    (Join-Path $env:USERPROFILE ".grok\skills\y-plan\scripts\y-plan.mjs"),
+    (Join-Path $env:USERPROFILE "ai\skills\y-plan\scripts\y-plan.mjs"),
+    (Join-Path $env:USERPROFILE ".agents\skills\y-plan\scripts\y-plan.mjs"),
+    (Join-Path $env:USERPROFILE ".claude\skills\y-plan\scripts\y-plan.mjs"),
+    (Join-Path $env:USERPROFILE ".codex\skills\y-plan\scripts\y-plan.mjs"),
+    (Join-Path $env:USERPROFILE ".cursor\skills\y-plan\scripts\y-plan.mjs")
+  )
+  foreach ($candidate in $candidates) {
+    if (Test-Path $candidate) { return $candidate }
+  }
+  $bin = Get-Command y-plan -ErrorAction SilentlyContinue
+  if ($bin) { return $bin.Source }
+  return ""
+}
 $DefaultPromptEnhanceScript = ".\scripts\prompt-enhance.js"
-$InstallFiles = @("scripts", "vendor", "src", "test", "tests", "references", "Cargo.toml", "Cargo.lock", "SKILL.md", "install.sh", "install.ps1", ".env.example", ".gitignore")
+$InstallFiles = @("scripts", "vendor", "test", "references", "SKILL.md", "install.sh", "install.ps1", ".env.example", ".gitignore")
 
 function Initialize-NetworkDefaults {
   try {
@@ -212,7 +251,10 @@ function Merge-EnvMissingKeys {
     'YCE_ENGINE_SCRIPT', 'YCE_ENGINE_MAX_RESULTS', 'YCE_ENGINE_MAX_TURNS', 'YCE_LOCAL_FALLBACK',
     'YCE_PROMPT_ENHANCE_SCRIPT', 'YCE_PROMPT_ENHANCE_MODE', 'YCE_PROMPT_ENHANCE_ENABLE_SEARCH',
     'YCE_DEFAULT_MODE', 'YCE_TIMEOUT_ENHANCE_MS', 'YCE_TIMEOUT_SEARCH_MS',
-    'YCE_ENABLE_PLAN'
+    'YCE_ENABLE_PLAN',
+    'YCE_YPLAN_BACKEND', 'YCE_ENHANCE_BACKEND', 'YCE_YPLAN_CLI', 'YCE_YPLAN_CONFIG',
+    'YCE_YPLAN_PROVIDER', 'YCE_YPLAN_BASE_URL', 'YCE_YPLAN_TOKEN', 'YCE_YPLAN_MODEL',
+    'YCE_ENHANCE_PROVIDER', 'YCE_ENHANCE_BASE_URL', 'YCE_ENHANCE_TOKEN', 'YCE_ENHANCE_MODEL'
   )
 
   $sourceVals = Read-EnvMapFromFile $SourceEnv
@@ -628,7 +670,19 @@ function Write-RuntimeConfig {
     [string]$RuntimeTimeoutEnhance,
     [string]$RuntimeTimeoutSearch,
     [string]$RuntimeLocalFallback,
-    [string]$RuntimeEnablePlan
+    [string]$RuntimeEnablePlan,
+    [string]$RuntimeYplanBackend,
+    [string]$RuntimeEnhanceBackend,
+    [string]$RuntimeYplanCli,
+    [string]$RuntimeYplanConfig,
+    [string]$RuntimeYplanProvider,
+    [string]$RuntimeYplanBaseUrl,
+    [string]$RuntimeYplanToken,
+    [string]$RuntimeYplanModel,
+    [string]$RuntimeEnhanceProvider,
+    [string]$RuntimeEnhanceBaseUrl,
+    [string]$RuntimeEnhanceToken,
+    [string]$RuntimeEnhanceModel
   )
 
   $resolvedPromptEnhance = Resolve-YcePath $RuntimePromptEnhanceScript
@@ -661,6 +715,8 @@ function Write-RuntimeConfig {
     Write-DryRun "  YCE_TIMEOUT_SEARCH_MS = $RuntimeTimeoutSearch"
     Write-DryRun "  YCE_LOCAL_FALLBACK = $RuntimeLocalFallback"
     Write-DryRun "  YCE_ENABLE_PLAN = $RuntimeEnablePlan"
+    Write-DryRun "  YCE_YPLAN_BACKEND = $RuntimeYplanBackend"
+    Write-DryRun "  YCE_ENHANCE_BACKEND = $RuntimeEnhanceBackend"
     return
   }
 
@@ -678,7 +734,8 @@ function Write-RuntimeConfig {
     "YCE_PROMPT_ENHANCE_ENABLE_SEARCH=$RuntimePromptEnhanceEnableSearch"
     ""
     "# yce-engine adapter (远端优先：默认连接 yce.aigy.de relay)"
-    "# YCE_RELAY_TOKEN 是统一 YCE Key；代码检索、联网检索、提示词增强和 Y-Plan 规划共用"
+    "# YCE_RELAY_TOKEN 用于代码检索、联网检索，以及规划/增强走远端 YCE 时的模型调用。"
+    "# 规划或增强选 local 时，模型走本机 CLI / 自备模型，不消耗这个 Key。"
     "YCE_ENGINE_SCRIPT=$RuntimeYceEngineScript"
     "YCE_ENGINE_MAX_RESULTS=$RuntimeYceEngineMaxResults"
     "YCE_ENGINE_MAX_TURNS=$RuntimeYceEngineMaxTurns"
@@ -692,15 +749,21 @@ function Write-RuntimeConfig {
     "YCE_DEFAULT_MODE=$RuntimeMode"
     "YCE_TIMEOUT_ENHANCE_MS=$RuntimeTimeoutEnhance"
     "YCE_TIMEOUT_SEARCH_MS=$RuntimeTimeoutSearch"
-    "# Y-Plan 规划能力（默认开启；设为 false 后 --mode plan 与 MCP y_plan 都不可用）"
+    "# Y-Plan 规划能力（默认开启；设为 false 后 --mode plan 不可用）"
     "YCE_ENABLE_PLAN=$RuntimeEnablePlan"
-    "# Y-Plan 规划超时（默认 480000）与 BYOK 自定义模型（服务端放行后才生效）"
+    "YCE_YPLAN_BACKEND=$RuntimeYplanBackend"
+    "YCE_ENHANCE_BACKEND=$RuntimeEnhanceBackend"
+    "YCE_YPLAN_CLI=$RuntimeYplanCli"
+    "YCE_YPLAN_CONFIG=$RuntimeYplanConfig"
+    "YCE_YPLAN_PROVIDER=$RuntimeYplanProvider"
+    "YCE_YPLAN_BASE_URL=$RuntimeYplanBaseUrl"
+    "YCE_YPLAN_TOKEN=$RuntimeYplanToken"
+    "YCE_YPLAN_MODEL=$RuntimeYplanModel"
+    "YCE_ENHANCE_PROVIDER=$RuntimeEnhanceProvider"
+    "YCE_ENHANCE_BASE_URL=$RuntimeEnhanceBaseUrl"
+    "YCE_ENHANCE_TOKEN=$RuntimeEnhanceToken"
+    "YCE_ENHANCE_MODEL=$RuntimeEnhanceModel"
     "# YCE_TIMEOUT_PLAN_MS=480000"
-    "# YCE_YPLAN_PROVIDER="
-    "# YCE_YPLAN_BASE_URL="
-    "# YCE_YPLAN_TOKEN="
-    "# YCE_YPLAN_MODEL="
-    "# YCE_YPLAN_TEMPERATURE="
   )
 
   if (Test-Path $WrongEngineEnvFile) {
@@ -715,6 +778,8 @@ function Write-RuntimeConfig {
   if ($RuntimeYceRelayToken) { Write-Host "  YCE Key: $(Get-MaskedValue $RuntimeYceRelayToken)" }
   Write-Host "  本地检索 fallback: $RuntimeLocalFallback"
   Write-Host "  Y-Plan 规划: $RuntimeEnablePlan"
+  Write-Host "  规划模型后端: $RuntimeYplanBackend"
+  Write-Host "  增强模型后端: $RuntimeEnhanceBackend"
 }
 
 function Invoke-Check {
@@ -1022,52 +1087,80 @@ function Invoke-Setup {
     $runtimeEnablePlan = $DefaultEnablePlan
   }
 
-  $hasDirectArgs = $PromptEnhanceScript -or $PromptEnhanceMode -or $PromptEnhanceEnableSearch -or $YceEngineScript -or $YceEngineMaxResults -or $YceEngineMaxTurns -or $YceRelayUrl -or $YceRelayToken -or $Mode -or $TimeoutEnhance -or $TimeoutSearch -or $LocalFallback -or $NoLocalFallback -or $EnablePlan -or $NoPlan
+  $runtimeYplanBackend = if ($PlanBackend) { $PlanBackend } elseif ($currentVars.ContainsKey('YCE_YPLAN_BACKEND')) { $currentVars['YCE_YPLAN_BACKEND'] } else { $DefaultYplanBackend }
+  $runtimeEnhanceBackend = if ($EnhanceBackend) { $EnhanceBackend } elseif ($currentVars.ContainsKey('YCE_ENHANCE_BACKEND')) { $currentVars['YCE_ENHANCE_BACKEND'] } else { $DefaultEnhanceBackend }
+  $runtimeYplanCli = if ($YplanCli) { $YplanCli } elseif ($currentVars.ContainsKey('YCE_YPLAN_CLI')) { $currentVars['YCE_YPLAN_CLI'] } else { '' }
+  $runtimeYplanConfig = if ($YplanConfig) { $YplanConfig } elseif ($currentVars.ContainsKey('YCE_YPLAN_CONFIG')) { $currentVars['YCE_YPLAN_CONFIG'] } else { '' }
+  $runtimeYplanProvider = if ($YplanProvider) { $YplanProvider } elseif ($currentVars.ContainsKey('YCE_YPLAN_PROVIDER')) { $currentVars['YCE_YPLAN_PROVIDER'] } else { '' }
+  $runtimeYplanBaseUrl = if ($YplanBaseUrl) { $YplanBaseUrl } elseif ($currentVars.ContainsKey('YCE_YPLAN_BASE_URL')) { $currentVars['YCE_YPLAN_BASE_URL'] } else { '' }
+  $runtimeYplanToken = if ($YplanToken) { $YplanToken } elseif ($currentVars.ContainsKey('YCE_YPLAN_TOKEN')) { $currentVars['YCE_YPLAN_TOKEN'] } else { '' }
+  $runtimeYplanModel = if ($YplanModel) { $YplanModel } elseif ($currentVars.ContainsKey('YCE_YPLAN_MODEL')) { $currentVars['YCE_YPLAN_MODEL'] } else { '' }
+  $runtimeEnhanceProvider = if ($currentVars.ContainsKey('YCE_ENHANCE_PROVIDER')) { $currentVars['YCE_ENHANCE_PROVIDER'] } else { '' }
+  $runtimeEnhanceBaseUrl = if ($currentVars.ContainsKey('YCE_ENHANCE_BASE_URL')) { $currentVars['YCE_ENHANCE_BASE_URL'] } else { '' }
+  $runtimeEnhanceToken = if ($currentVars.ContainsKey('YCE_ENHANCE_TOKEN')) { $currentVars['YCE_ENHANCE_TOKEN'] } else { '' }
+  $runtimeEnhanceModel = if ($currentVars.ContainsKey('YCE_ENHANCE_MODEL')) { $currentVars['YCE_ENHANCE_MODEL'] } else { '' }
+
+  $hasDirectArgs = $PromptEnhanceScript -or $PromptEnhanceMode -or $PromptEnhanceEnableSearch -or $YceEngineScript -or $YceEngineMaxResults -or $YceEngineMaxTurns -or $YceRelayUrl -or $YceRelayToken -or $Mode -or $TimeoutEnhance -or $TimeoutSearch -or $LocalFallback -or $NoLocalFallback -or $EnablePlan -or $NoPlan -or $PlanBackend -or $EnhanceBackend -or $YplanCli -or $YplanConfig -or $YplanProvider -or $YplanBaseUrl -or $YplanToken -or $YplanModel
 
   if (-not $hasDirectArgs -or $Edit -or $Reset) {
     Write-Host '--- 交互式配置 ---'
     Write-Host ''
     Write-Host '提示：YCE 默认连接 https://yce.aigy.de。' -ForegroundColor Cyan
-    Write-Host '      YCE_RELAY_TOKEN 是统一 YCE Key，代码检索、联网检索和提示词增强共用。' -ForegroundColor Cyan
+    Write-Host '      YCE_RELAY_TOKEN 用于代码检索、联网检索；规划/增强走远端 YCE 时也用它。' -ForegroundColor Cyan
+    Write-Host '      规划或增强选本机 CLI 时，模型不消耗这个 Key，也不再单独配置增强 Key。' -ForegroundColor Cyan
     Write-Host ''
 
     Write-Host "YCE Relay URL 当前: $(if ($runtimeYceRelayUrl) { $runtimeYceRelayUrl } else { $DefaultYceRelayUrl })"
     $newRelayUrl = Read-Host "YCE Relay URL（回车默认 $DefaultYceRelayUrl）"
     if ($newRelayUrl) { $runtimeYceRelayUrl = $newRelayUrl }
 
-    Write-Host "YCE Key 当前: $(if ($runtimeYceRelayToken) { Get-MaskedValue $runtimeYceRelayToken } else { '(空，远端能力不可用)' })"
-    $newRelayToken = Read-Host 'YCE Key / YCE_RELAY_TOKEN（必填，格式 yce_...）'
+    Write-Host "YCE Key 当前: $(if ($runtimeYceRelayToken) { Get-MaskedValue $runtimeYceRelayToken } else { '(空，代码检索/联网检索不可用)' })"
+    $newRelayToken = Read-Host 'YCE Key / YCE_RELAY_TOKEN（代码检索需要，回车可先跳过）'
     if ($newRelayToken) { $runtimeYceRelayToken = $newRelayToken }
 
-    Write-Host "提示词增强脚本当前: $(if ($runtimePromptEnhance) { $runtimePromptEnhance } else { '未检测到仓内脚本' })"
+    Write-Host "规划模型后端当前: $runtimeYplanBackend"
+    $newPlanBackend = Read-Host '规划模型走远端 YCE 还是本机 CLI？(relay/local，回车保留)'
+    if ($newPlanBackend) {
+      $normalized = Normalize-Backend $newPlanBackend
+      if ($normalized) { $runtimeYplanBackend = $normalized }
+    }
 
-    Write-Host "提示词增强模式当前: $runtimePromptEnhanceMode"
-    $newEnhanceMode = Read-Host '提示词增强模式（agent/disabled，回车保留）'
-    if ($newEnhanceMode) { $runtimePromptEnhanceMode = $newEnhanceMode }
+    Write-Host "提示词增强后端当前: $runtimeEnhanceBackend"
+    $newEnhanceBackend = Read-Host '提示词增强走远端 YCE 还是本机 CLI？(relay/local，回车保留)'
+    if ($newEnhanceBackend) {
+      $normalized = Normalize-Backend $newEnhanceBackend
+      if ($normalized) { $runtimeEnhanceBackend = $normalized }
+    }
 
-    Write-Host "提示词增强联合搜索当前: $runtimePromptEnhanceEnableSearch"
-    $newEnableSearch = Read-Host '提示词增强联合搜索（true/false，回车保留）'
-    if ($newEnableSearch) { $runtimePromptEnhanceEnableSearch = $newEnableSearch }
+    if ($runtimeYplanBackend -eq 'local' -or $runtimeEnhanceBackend -eq 'local') {
+      if (-not $runtimeYplanCli) { $runtimeYplanCli = Find-YplanCli }
+      Write-Host "本地 y-plan CLI 当前: $(if ($runtimeYplanCli) { $runtimeYplanCli } else { '未检测到' })"
+      $newCli = Read-Host 'y-plan CLI 路径（回车保留/使用检测结果）'
+      if ($newCli) { $runtimeYplanCli = $newCli }
+      Write-Host "y-plan 配置文件当前: $(if ($runtimeYplanConfig) { $runtimeYplanConfig } else { '默认读 CLI 旁边的 y-plan.config.json' })"
+      $newConfig = Read-Host 'y-plan.config.json 路径（回车保留）'
+      if ($newConfig) { $runtimeYplanConfig = $newConfig }
+    }
 
-    Write-Host "yce-engine 入口当前: $runtimeYceEngineScript"
-    $newEngineScript = Read-Host 'yce-engine 入口（回车保留）'
-    if ($newEngineScript) { $runtimeYceEngineScript = $newEngineScript }
-
-    Write-Host "yce-engine 最大结果数当前: $runtimeYceEngineMaxResults"
-    $newEngineMaxResults = Read-Host 'yce-engine max results（回车保留）'
-    if ($newEngineMaxResults) { $runtimeYceEngineMaxResults = $newEngineMaxResults }
-
-    Write-Host "yce-engine 最大轮次当前: $runtimeYceEngineMaxTurns"
-    $newEngineMaxTurns = Read-Host 'yce-engine max turns（回车保留）'
-    if ($newEngineMaxTurns) { $runtimeYceEngineMaxTurns = $newEngineMaxTurns }
-
-    Write-Host "默认模式当前: $runtimeMode"
-    $newMode = Read-Host '默认模式（回车保留）'
-    if ($newMode) { $runtimeMode = $newMode }
-
-    Write-Host "增强超时当前: $runtimeTimeoutEnhance"
-    $newEnhance = Read-Host '增强超时 ms（回车保留）'
-    if ($newEnhance) { $runtimeTimeoutEnhance = $newEnhance }
+    Write-Host "自备模型当前: $(if ($runtimeYplanProvider) { $runtimeYplanProvider } else { '未配置' }) $runtimeYplanModel"
+    $wantByok = Read-Host '是否配置规划自备模型？走远端或本机都可用 (y/N)'
+    if ($wantByok -match '^[Yy]') {
+      $newProvider = Read-Host 'provider（claude/openai/openai-responses 或 codex/cursor/claude-code）'
+      if ($newProvider) { $runtimeYplanProvider = $newProvider }
+      $newModel = Read-Host 'model（回车保留）'
+      if ($newModel) { $runtimeYplanModel = $newModel }
+      $newUrl = Read-Host 'base url（本机 CLI 可不填）'
+      if ($newUrl) { $runtimeYplanBaseUrl = $newUrl }
+      $newToken = Read-Host 'token（本机 CLI 可不填）'
+      if ($newToken) { $runtimeYplanToken = $newToken }
+      $copyEnhance = Read-Host '提示词增强是否使用同一套自备模型？(y/N)'
+      if ($copyEnhance -match '^[Yy]') {
+        $runtimeEnhanceProvider = $runtimeYplanProvider
+        $runtimeEnhanceBaseUrl = $runtimeYplanBaseUrl
+        $runtimeEnhanceToken = $runtimeYplanToken
+        $runtimeEnhanceModel = $runtimeYplanModel
+      }
+    }
 
     Write-Host "检索超时当前: $runtimeTimeoutSearch"
     $newSearchTimeout = Read-Host '检索超时 ms（回车保留）'
@@ -1096,7 +1189,12 @@ function Invoke-Setup {
     }
   }
 
-  Write-RuntimeConfig -RuntimePromptEnhanceScript $runtimePromptEnhance -RuntimePromptEnhanceMode $runtimePromptEnhanceMode -RuntimePromptEnhanceEnableSearch $runtimePromptEnhanceEnableSearch -RuntimeYceEngineScript $runtimeYceEngineScript -RuntimeYceEngineMaxResults $runtimeYceEngineMaxResults -RuntimeYceEngineMaxTurns $runtimeYceEngineMaxTurns -RuntimeYceRelayUrl $runtimeYceRelayUrl -RuntimeYceRelayToken $runtimeYceRelayToken -RuntimeMode $runtimeMode -RuntimeTimeoutEnhance $runtimeTimeoutEnhance -RuntimeTimeoutSearch $runtimeTimeoutSearch -RuntimeLocalFallback $runtimeLocalFallback -RuntimeEnablePlan $runtimeEnablePlan
+  $runtimeYplanBackend = Normalize-Backend $runtimeYplanBackend
+  if (-not $runtimeYplanBackend) { $runtimeYplanBackend = $DefaultYplanBackend }
+  $runtimeEnhanceBackend = Normalize-Backend $runtimeEnhanceBackend
+  if (-not $runtimeEnhanceBackend) { $runtimeEnhanceBackend = $DefaultEnhanceBackend }
+
+  Write-RuntimeConfig -RuntimePromptEnhanceScript $runtimePromptEnhance -RuntimePromptEnhanceMode $runtimePromptEnhanceMode -RuntimePromptEnhanceEnableSearch $runtimePromptEnhanceEnableSearch -RuntimeYceEngineScript $runtimeYceEngineScript -RuntimeYceEngineMaxResults $runtimeYceEngineMaxResults -RuntimeYceEngineMaxTurns $runtimeYceEngineMaxTurns -RuntimeYceRelayUrl $runtimeYceRelayUrl -RuntimeYceRelayToken $runtimeYceRelayToken -RuntimeMode $runtimeMode -RuntimeTimeoutEnhance $runtimeTimeoutEnhance -RuntimeTimeoutSearch $runtimeTimeoutSearch -RuntimeLocalFallback $runtimeLocalFallback -RuntimeEnablePlan $runtimeEnablePlan -RuntimeYplanBackend $runtimeYplanBackend -RuntimeEnhanceBackend $runtimeEnhanceBackend -RuntimeYplanCli $runtimeYplanCli -RuntimeYplanConfig $runtimeYplanConfig -RuntimeYplanProvider $runtimeYplanProvider -RuntimeYplanBaseUrl $runtimeYplanBaseUrl -RuntimeYplanToken $runtimeYplanToken -RuntimeYplanModel $runtimeYplanModel -RuntimeEnhanceProvider $runtimeEnhanceProvider -RuntimeEnhanceBaseUrl $runtimeEnhanceBaseUrl -RuntimeEnhanceToken $runtimeEnhanceToken -RuntimeEnhanceModel $runtimeEnhanceModel
 
   Sync-EnvToOtherInstallsAuto
 
@@ -1105,7 +1203,7 @@ function Invoke-Setup {
   if (Test-EnvHasRelayCredentials) {
     Write-Ok '检索密钥校验: node .\vendor\yce-engine\yce-engine.mjs --check-key'
   } else {
-    Write-Warn '尚未配置 YCE_RELAY_TOKEN；代码检索需要 yce_... 格式的搜索密钥'
+    Write-Warn '尚未配置 YCE_RELAY_TOKEN；代码检索和联网检索需要 yce_... 格式的搜索密钥'
   }
   Write-Host ''
 
@@ -1193,7 +1291,9 @@ if ($Help) {
   Write-Host ''
   Write-Host '说明:'
   Write-Host '  - 检索默认连接远端 relay（https://yce.aigy.de），安装时会写入 YCE_RELAY_URL'
-  Write-Host '  - YCE_RELAY_TOKEN 是统一 YCE Key，代码检索、联网检索和提示词增强共用'
+  Write-Host '  - YCE_RELAY_TOKEN 用于代码检索、联网检索，以及规划/增强走远端 YCE 时'
+  Write-Host '  - 规划/增强可分别选 relay（远端 YCE）或 local（本机 CLI）；不再单独配置增强 Key'
+  Write-Host '  - -Setup -PlanBackend local -EnhanceBackend local -YplanCli <y-plan.mjs>'
   Write-Host '  - -Setup 可交互选择 YCE_LOCAL_FALLBACK；也可用 -LocalFallback true/false 或 -NoLocalFallback'
   Write-Host '  - -Setup 可开关 Y-Plan 规划（默认开启；-NoPlan 或 -EnablePlan false 关闭）'
   Write-Host '  - -Setup 会优先复用当前 .env，并对齐仓内 scripts\prompt-enhance.js'

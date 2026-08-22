@@ -136,7 +136,7 @@ async function main() {
 
   if (args.help === true || args.h === true) {
     const payload = buildInvalidArgsResponse(
-      "Usage: node scripts/yce.js \"<query>\" [--mode auto|enhance|search|network|plan] [--task <id>|--no-task] [--with-network] [--network-profile quick|balanced|exhaustive] [--library <name>] [--repo <owner/name>] [--history <text>] [--cwd <path>] [--out <file|dir>] [--stdout-xml] [--xml-pretty] [--timeout-enhance-ms <n>] [--timeout-search-ms <n>] [--timeout-network-ms <n>] [--timeout-plan-ms <n>] [--with-search (plan)] [--search-context <text> (plan)] [--save <dir|file.md> (plan)] [--enable-web-search|--no-web-search (plan)] [--language zh-CN|en-US (plan)] [--plan-provider claude|openai|openai-responses|gemini] [--plan-base-url <url>] [--plan-token <token>] [--plan-model <model>] [--plan-temperature <n>] [--max-turns 1-5] [--max-commands 1-20] [--max-results 1-30] [--tree-depth 0-6] [--exclude <glob[,glob]>] [--repo-map-mode classic|bootstrap_hotspot] [--bootstrap-enabled true|false|--no-bootstrap] [--bootstrap-tree-depth 1-3] [--hotspot-top-k 0-8] [--hotspot-tree-depth 1-4] [--hotspot-max-bytes 16384-256000] [--bootstrap-max-turns 1-5] [--bootstrap-max-commands 1-20] [--no-search] [--raw-events] [--json-pretty (legacy alias)] | node scripts/yce.js task <show [id]|list|check <n> --evidence <text>|done [--force]|new --goal <text> [--accept <text>]...> [--task <id>] [--cwd <path>]",
+      "Usage: node scripts/yce.js \"<query>\" [--mode auto|enhance|search|network|plan] [--task <id>|--no-task] [--with-network] [--network-profile quick|balanced|exhaustive] [--library <name>] [--repo <owner/name>] [--history <text>] [--cwd <path>] [--out <file|dir>] [--stdout-xml] [--xml-pretty] [--timeout-enhance-ms <n>] [--timeout-search-ms <n>] [--timeout-network-ms <n>] [--timeout-plan-ms <n>] [--with-search (plan)] [--search-context <text> (plan)] [--save <dir|file.md> (plan)] [--enable-web-search|--no-web-search (plan)] [--language zh-CN|en-US] [--plan-backend relay|local] [--enhance-backend relay|local] [--plan-provider claude|openai|openai-responses|gemini|codex|cursor|claude-code|qoder|kiro] [--plan-base-url <url>] [--plan-token <token>] [--plan-model <model>] [--plan-temperature <n>] [--max-turns 1-5] [--max-commands 1-20] [--max-results 1-30] [--tree-depth 0-6] [--exclude <glob[,glob]>] [--repo-map-mode classic|bootstrap_hotspot] [--bootstrap-enabled true|false|--no-bootstrap] [--bootstrap-tree-depth 1-3] [--hotspot-top-k 0-8] [--hotspot-tree-depth 1-4] [--hotspot-max-bytes 16384-256000] [--bootstrap-max-turns 1-5] [--bootstrap-max-commands 1-20] [--no-search] [--raw-events] [--json-pretty (legacy alias)] | node scripts/yce.js task <show [id]|list|check <n> --evidence <text>|done [--force]|new --goal <text> [--accept <text>]...> [--task <id>] [--cwd <path>]",
       config,
       cwd
     );
@@ -209,6 +209,27 @@ async function main() {
   if (args["no-web-search"] === true) {
     planEnableWebSearch = false;
   }
+  const planBackendArg = typeof args["plan-backend"] === "string" ? args["plan-backend"].trim() : "";
+  const enhanceBackendArg = typeof args["enhance-backend"] === "string" ? args["enhance-backend"].trim() : "";
+  const allowedBackends = new Set(["relay", "local", "yce", "cli"]);
+  if (planBackendArg && !allowedBackends.has(planBackendArg.toLowerCase())) {
+    const payload = buildInvalidArgsResponse(
+      "plan-backend must be relay, yce, local, or cli.",
+      config,
+      cwd,
+    );
+    console.log(serializeForStdout(payload, pretty));
+    process.exit(1);
+  }
+  if (enhanceBackendArg && !allowedBackends.has(enhanceBackendArg.toLowerCase())) {
+    const payload = buildInvalidArgsResponse(
+      "enhance-backend must be relay, yce, local, or cli.",
+      config,
+      cwd,
+    );
+    console.log(serializeForStdout(payload, pretty));
+    process.exit(1);
+  }
   const planCustomProviderFlags = {
     provider: typeof args["plan-provider"] === "string" ? args["plan-provider"].trim() : "",
     baseUrl: typeof args["plan-base-url"] === "string" ? args["plan-base-url"].trim() : "",
@@ -267,7 +288,12 @@ async function main() {
           typeof args.library === "string" ? args.library.trim() : "",
         repo: typeof args.repo === "string" ? args.repo.trim() : "",
       },
+      enhanceOptions: {
+        backend: enhanceBackendArg,
+        language: planLanguage,
+      },
       planOptions: {
+        backend: planBackendArg,
         withSearch: args["with-search"] === true,
         searchContext:
           typeof args["search-context"] === "string" ? args["search-context"] : "",

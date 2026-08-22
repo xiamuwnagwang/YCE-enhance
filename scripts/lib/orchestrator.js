@@ -1,7 +1,10 @@
 const { runPromptEnhance } = require("./adapters/promptEnhance");
+const { runPromptEnhanceLocal } = require("./adapters/promptEnhanceLocal");
 const { runYceEngineSearch } = require("./adapters/yceEngineSearch");
 const { runNetworkSearch } = require("./adapters/networkSearch");
 const { runYPlan, savePlanToFile, MAX_SEARCH_CONTEXT_CHARS } = require("./adapters/yPlan");
+const { formatNetworkContext, runYPlanLocal } = require("./adapters/yPlanLocal");
+const { resolveBackend } = require("./adapters/localModel");
 const { createCardFromTaskPlan, resolveCard } = require("./taskCard");
 const { buildError, isNonEmptyString, normalizeSearchQuery, nowIso, PLAN_DISABLED_MESSAGE } = require("./utils");
 
@@ -145,7 +148,22 @@ async function orchestrate(input) {
   // --mode network  or  --with-network
   const shouldRunNetwork = mode === "network" || withNetwork === true;
 
-  const canEnhance = hasPromptEnhanceToken(config);
+  const enhanceBackend = resolveBackend(
+    (input.enhanceOptions && input.enhanceOptions.backend) || config.enhanceBackend,
+    "relay",
+  );
+  if ((resolvedAction === "enhance" || resolvedAction === "enhance_then_search") && !enhanceBackend) {
+    errors.push(
+      buildError(
+        "prompt-enhance",
+        "INVALID_ARGS",
+        "enhance-backend 只能是 relay / yce 或 local / cli。",
+      ),
+    );
+  }
+
+  const canEnhance =
+    enhanceBackend === "local" || hasPromptEnhanceToken(config);
   if (!canEnhance && (resolvedAction === "enhance" || resolvedAction === "enhance_then_search")) {
     if (mode === "enhance") {
       // Explicit enhance without a YCE Key: fail fast.
@@ -190,16 +208,29 @@ async function orchestrate(input) {
     }
   }
 
-  if (canEnhance && (resolvedAction === "enhance" || resolvedAction === "enhance_then_search")) {
-    const enhanceResult = await runPromptEnhance({
-      prompt: query,
-      history,
-      scriptPath: config.promptEnhanceScript,
-      timeoutMs: input.timeoutEnhanceMs,
-      noSearch,
-      rawEvents,
-      env: config.promptEnhanceEnv,
-    });
+  if (canEnhance && enhanceBackend && (resolvedAction === "enhance" || resolvedAction === "enhance_then_search")) {
+    const enhanceResult = enhanceBackend === "local"
+      ? await runPromptEnhanceLocal({
+          prompt: query,
+          history,
+          timeoutMs: input.timeoutEnhanceMs,
+          noSearch,
+          language: input.enhanceOptions && input.enhanceOptions.language,
+          cwd,
+          customProvider: config.enhanceCustomProvider || null,
+          cliPath: config.yPlanCli,
+          skillRoot: config.yPlanSkillRoot,
+          configPath: config.yPlanConfig,
+        })
+      : await runPromptEnhance({
+          prompt: query,
+          history,
+          scriptPath: config.promptEnhanceScript,
+          timeoutMs: input.timeoutEnhanceMs,
+          noSearch,
+          rawEvents,
+          env: config.promptEnhanceEnv,
+        });
     enhance = enhanceResult.enhance;
     durations.enhance = enhanceResult.durationMs;
     if (enhanceResult.error) {
@@ -234,6 +265,7 @@ async function orchestrate(input) {
     }
   }
 
+  let prePlanNetwork = null;
   if (resolvedAction === "plan" && config.enablePlan === false) {
     plan = {
       executed: false,
@@ -245,6 +277,12 @@ async function orchestrate(input) {
     errors.push(buildError("y-plan", "DISABLED", PLAN_DISABLED_MESSAGE));
   } else if (resolvedAction === "plan") {
     const planOptions = input.planOptions || {};
+    const planBackend = resolveBackend(planOptions.backend || config.yPlanBackend, "relay");
+    if (!planBackend) {
+      errors.push(
+        buildError("y-plan", "INVALID_ARGS", "plan-backend 只能是 relay / yce 或 local / cli。"),
+      );
+    }
     let searchContext = isNonEmptyString(planOptions.searchContext)
       ? String(planOptions.searchContext)
       : "";
@@ -277,21 +315,62 @@ async function orchestrate(input) {
       resolvedAction = "search_then_plan";
     }
 
-    const planResult = await runYPlan({
-      task: query,
-      history,
-      searchContext,
-      enableWebSearch: planOptions.enableWebSearch,
-      language: planOptions.language,
-      relayUrl: config.yceRelayUrl,
-      relayToken: config.yceRelayToken,
-      timeoutMs: input.timeoutPlanMs || config.timeoutPlanMs,
-      customProvider: planOptions.customProvider || config.yPlanCustomProvider || null,
-    });
-    plan = planResult.plan;
-    durations.plan = planResult.durationMs;
-    if (planResult.error) {
-      errors.push(planResult.error);
+    // 本地规划没有服务端 web search：需要时先走 YCE 联网，再把结果喂给本机模型。
+    if (planBackend === "local" && planOptions.enableWebSearch === true) {
+      const networkQuery = query;
+      const networkResult = await runNetworkSearch({
+        query: networkQuery,
+        relayUrl: config.yceRelayUrl,
+        relayToken: config.yceRelayToken,
+        timeoutMs: input.timeoutNetworkMs,
+        ...(networkOptions || {}),
+      });
+      prePlanNetwork = networkResult;
+      if (networkResult.error) {
+        errors.push(networkResult.error);
+      }
+    }
+
+    const customProvider = planOptions.customProvider || config.yPlanCustomProvider || null;
+    if (planBackend === "local") {
+      const planResult = await runYPlanLocal({
+        task: query,
+        cwd,
+        history,
+        searchContext,
+        networkContext: formatNetworkContext(prePlanNetwork && prePlanNetwork.networkSearch),
+        language: planOptions.language,
+        timeoutMs: input.timeoutPlanMs || config.timeoutPlanMs,
+        customProvider,
+        cliPath: config.yPlanCli,
+        skillRoot: config.yPlanSkillRoot,
+        configPath: config.yPlanConfig,
+      });
+      plan = planResult.plan;
+      durations.plan = planResult.durationMs;
+      if (planResult.error) {
+        errors.push(planResult.error);
+      }
+    } else if (planBackend === "relay") {
+      const planResult = await runYPlan({
+        task: query,
+        history,
+        searchContext,
+        enableWebSearch: planOptions.enableWebSearch,
+        language: planOptions.language,
+        relayUrl: config.yceRelayUrl,
+        relayToken: config.yceRelayToken,
+        timeoutMs: input.timeoutPlanMs || config.timeoutPlanMs,
+        customProvider,
+      });
+      plan = planResult.plan;
+      if (plan && !plan.backend) {
+        plan.backend = "relay";
+      }
+      durations.plan = planResult.durationMs;
+      if (planResult.error) {
+        errors.push(planResult.error);
+      }
     }
 
     // --save：规划成功后按契约文件名落盘；写失败不取消已成功的计划结果。
@@ -321,19 +400,24 @@ async function orchestrate(input) {
   }
 
   if (shouldRunNetwork) {
-    const networkQuery =
-      enhance && enhance.success && enhance.prompt ? enhance.prompt : query;
-    const networkResult = await runNetworkSearch({
-      query: networkQuery,
-      relayUrl: config.yceRelayUrl,
-      relayToken: config.yceRelayToken,
-      timeoutMs: input.timeoutNetworkMs,
-      ...(networkOptions || {}),
-    });
-    networkSearch = networkResult.networkSearch;
-    durations.network = networkResult.durationMs;
-    if (networkResult.error) {
-      errors.push(networkResult.error);
+    if (prePlanNetwork) {
+      networkSearch = prePlanNetwork.networkSearch;
+      durations.network = prePlanNetwork.durationMs;
+    } else {
+      const networkQuery =
+        enhance && enhance.success && enhance.prompt ? enhance.prompt : query;
+      const networkResult = await runNetworkSearch({
+        query: networkQuery,
+        relayUrl: config.yceRelayUrl,
+        relayToken: config.yceRelayToken,
+        timeoutMs: input.timeoutNetworkMs,
+        ...(networkOptions || {}),
+      });
+      networkSearch = networkResult.networkSearch;
+      durations.network = networkResult.durationMs;
+      if (networkResult.error) {
+        errors.push(networkResult.error);
+      }
     }
     if (mode === "network") {
       resolvedAction = "network_search";

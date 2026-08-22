@@ -183,25 +183,33 @@ function buildPromptEnhanceEnv(merged) {
   return childEnv;
 }
 
-function buildYPlanCustomProvider(merged) {
+function buildCustomProvider(merged, prefix) {
   const read = (key) =>
     hasOwn(merged, key) && isNonEmptyString(merged[key]) ? String(merged[key]).trim() : "";
-  const provider = read("YCE_YPLAN_PROVIDER");
-  const baseUrl = read("YCE_YPLAN_BASE_URL");
-  const token = read("YCE_YPLAN_TOKEN");
-  const model = read("YCE_YPLAN_MODEL");
+  const provider = read(`${prefix}_PROVIDER`);
+  const baseUrl = read(`${prefix}_BASE_URL`);
+  const token = read(`${prefix}_TOKEN`);
+  const model = read(`${prefix}_MODEL`);
   if (!provider && !baseUrl && !token && !model) {
     return null;
   }
   const config = { provider, baseUrl, token, model };
-  const temperature = Number(read("YCE_YPLAN_TEMPERATURE"));
+  const temperature = Number(read(`${prefix}_TEMPERATURE`));
   if (Number.isFinite(temperature)) {
     config.temperature = temperature;
   }
-  if (read("YCE_YPLAN_FORCE_STREAM") === "true") {
+  if (read(`${prefix}_FORCE_STREAM`) === "true") {
     config.forceStream = true;
   }
   return config;
+}
+
+function buildYPlanCustomProvider(merged) {
+  return buildCustomProvider(merged, "YCE_YPLAN");
+}
+
+function buildEnhanceCustomProvider(merged) {
+  return buildCustomProvider(merged, "YCE_ENHANCE");
 }
 
 function buildYceEngineEnv(merged) {
@@ -275,6 +283,22 @@ function loadRuntimeConfig() {
     timeoutPlanMs: toPositiveInt(merged.YCE_TIMEOUT_PLAN_MS, DEFAULTS.timeoutPlanMs),
     enablePlan: toBoolean(merged.YCE_ENABLE_PLAN, DEFAULTS.enablePlan),
     yPlanCustomProvider: buildYPlanCustomProvider(merged),
+    enhanceCustomProvider: buildEnhanceCustomProvider(merged),
+    yPlanBackend: isNonEmptyString(merged.YCE_YPLAN_BACKEND)
+      ? String(merged.YCE_YPLAN_BACKEND).trim()
+      : "relay",
+    enhanceBackend: isNonEmptyString(merged.YCE_ENHANCE_BACKEND)
+      ? String(merged.YCE_ENHANCE_BACKEND).trim()
+      : "relay",
+    yPlanCli: isNonEmptyString(merged.YCE_YPLAN_CLI)
+      ? String(merged.YCE_YPLAN_CLI).trim()
+      : "",
+    yPlanConfig: isNonEmptyString(merged.YCE_YPLAN_CONFIG)
+      ? String(merged.YCE_YPLAN_CONFIG).trim()
+      : "",
+    yPlanSkillRoot: isNonEmptyString(merged.YCE_YPLAN_SKILL_ROOT)
+      ? String(merged.YCE_YPLAN_SKILL_ROOT).trim()
+      : "",
   };
 }
 
@@ -882,6 +906,8 @@ function serializeForStdout(payload, pretty = false) {
     ].join(" ");
     pushLine(1, `<enhanced ${attrs}>`);
     pushTextTag(2, "prompt", payload.enhance.prompt, { cdata: true, always: true });
+    pushTextTag(2, "backend", payload.enhance.backend || "relay");
+    pushTextTag(2, "runtime", payload.enhance.runtime);
     pushStringList(2, "recommended-skills", "skill", payload.enhance.recommended_skills);
     if (payload.enhance.task_plan && payload.enhance.task_plan.goal) {
       pushTextTag(2, "task-plan", JSON.stringify(payload.enhance.task_plan), { cdata: true });
@@ -1073,6 +1099,9 @@ function serializeForStdout(payload, pretty = false) {
     pushTextTag(2, "search-used", planResult.search_used === true ? "true" : "false");
     pushTextTag(2, "custom-model", planResult.custom_model === true ? "true" : "false");
     pushTextTag(2, "status", planResult.status, { always: true });
+    pushTextTag(2, "backend", planResult.backend || "relay");
+    pushTextTag(2, "runtime", planResult.runtime);
+    pushTextTag(2, "run-dir", planResult.run_dir, { cdata: true });
     pushLine(1, `</y-plan>`);
   } else {
     pushLine(1, `<y-plan executed="false" success="false" result-present="false"/>`);
