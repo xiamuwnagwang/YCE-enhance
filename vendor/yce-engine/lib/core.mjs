@@ -11,7 +11,7 @@
  */
 
 import { readdirSync, statSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
-import { resolve, join, relative, sep, isAbsolute, dirname } from "node:path";
+import { resolve, join, relative, sep, isAbsolute, dirname, extname } from "node:path";
 import { gzipSync } from "node:zlib";
 import { randomUUID } from "node:crypto";
 import { platform, arch, release, version as osVersion, hostname, cpus, totalmem, homedir } from "node:os";
@@ -23,7 +23,8 @@ import {
   connectFrameDecode,
 } from "./protobuf.mjs";
 import { ToolExecutor } from "./executor.mjs";
-import { scoreDirectories, tokenize as tokenizeBM25 } from "./directory-scorer.mjs";
+import { scoreDirectories, scoreFiles, tokenize as tokenizeBM25 } from "./directory-scorer.mjs";
+import { screenCandidates } from "./jevScreen.mjs";
 import { buildDirectoryTree } from "./tree-builder.mjs";
 
 // ─── Error Classification ──────────────────────────────────
@@ -189,6 +190,9 @@ const REPO_MAP_OPTIMIZER_DEFAULTS = {
   hotspotTreeDepth: 2,
   maxBytes: 120 * 1024,
 };
+
+const LOCAL_PRERANK_EXPOSED_CANDIDATES = 30;
+const LOCAL_JEV_MAX_CANDIDATES = 30;
 
 function _mergeExcludePaths(excludePaths = []) {
   const merged = [...DEFAULT_EXCLUDE_PATHS];
@@ -564,6 +568,7 @@ async function _runBootstrapPhase({
 }) {
   const log = (msg) => onProgress?.(`[bootstrap] ${msg}`);
   const hints = { rgPatterns: [], hotDirs: [] };
+  let remoteCalls = 0;
 
   try {
     const { tree: miniMap, depth } = getRepoMap(projectRoot, bootstrapTreeDepth, excludePaths);
@@ -582,6 +587,7 @@ async function _runBootstrapPhase({
       log(`Turn ${turn + 1}/${bootstrapMaxTurns}`);
       let respData;
       try {
+        remoteCalls += 1;
         respData = await _streamingRequestWithRelayFailover({
           credentialState,
           buildProto: (currentApiKey, currentJwt) =>
@@ -633,6 +639,226 @@ async function _runBootstrapPhase({
   return {
     rgPatterns: [...new Set(hints.rgPatterns)].slice(-30),
     hotDirs: [...new Set(hints.hotDirs)].slice(-12),
+    source: "remote",
+    remoteCalls,
+  };
+}
+
+function _resolveProjectPath(projectRoot, relPath) {
+  const root = resolve(projectRoot);
+  const fullPath = resolve(root, String(relPath || ""));
+  const relToRoot = relative(root, fullPath);
+  if (!relToRoot || relToRoot === ".." || relToRoot.startsWith(`..${sep}`) || isAbsolute(relToRoot)) {
+    return null;
+  }
+  return fullPath;
+}
+
+function _isExistingProjectFile(projectRoot, relPath) {
+  const fullPath = _resolveProjectPath(projectRoot, relPath);
+  if (!fullPath) return false;
+  try {
+    return statSync(fullPath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function _filterExistingCandidates(candidates = [], projectRoot) {
+  const accepted = [];
+  const rejected = [];
+  for (const candidate of candidates) {
+    const candidatePath = String(candidate?.path || "").replace(/^\/+/, "");
+    if (!candidatePath || !_isExistingProjectFile(projectRoot, candidatePath)) {
+      if (candidatePath) rejected.push(candidatePath);
+      continue;
+    }
+    accepted.push(candidate);
+  }
+  return { accepted, rejected };
+}
+
+function _formatLocalPrerankCandidates(candidates = [], maxCandidates = 20, projectRoot = null) {
+  const source = projectRoot
+    ? _filterExistingCandidates(candidates, projectRoot).accepted
+    : candidates;
+  const rows = [];
+  for (const candidate of source.slice(0, maxCandidates)) {
+    if (!candidate || !candidate.path) continue;
+    const ranges = Array.isArray(candidate.ranges) && candidate.ranges.length
+      ? candidate.ranges.map(([start, end]) => `L${start}-${end}`).join(", ")
+      : "lines unknown";
+    const reasons = Array.isArray(candidate.reasons) && candidate.reasons.length
+      ? ` — ${candidate.reasons.join(", ")}`
+      : "";
+    rows.push(`- /codebase/${String(candidate.path).replace(/^\/+/, "")} (${ranges})${reasons}`);
+  }
+  return rows.length
+    ? `# Local Prerank Verification Leads\nThese paths were verified on disk and should guide inspection; they do not replace the repo map. Preserve exact path spelling in the final ANSWER and return files, not grep keywords alone.\n${rows.join("\n")}`
+    : "";
+}
+
+function _selectJevCandidates(candidates = [], maxCandidates = 20, diversify = false) {
+  if (candidates.length <= maxCandidates) return candidates;
+  if (!diversify) return candidates.slice(0, maxCandidates);
+
+  // For CJK/semantic-gap queries, lexical rank is intentionally weak. Keep
+  // the strongest source area together so a nested repository is not drowned
+  // out by a larger sibling app before the semantic screen sees it.
+  const groups = new Map();
+  for (const candidate of candidates) {
+    const parts = String(candidate?.path || "").split("/");
+    const topDir = parts.length > 1 ? parts[0] : ".";
+    const group = groups.get(topDir) || [];
+    group.push(candidate);
+    groups.set(topDir, group);
+  }
+  const dominant = [...groups.values()].sort((left, right) => right.length - left.length)[0] || [];
+  const byPath = new Map(candidates.map((candidate) => [candidate.path, candidate]));
+  const selected = [];
+  const add = (candidate) => {
+    if (candidate && !selected.includes(candidate) && selected.length < maxCandidates) selected.push(candidate);
+  };
+  for (const candidate of dominant) {
+    add(candidate);
+    const path = String(candidate?.path || "");
+    const testMatch = path.match(/^(.*)_test(\.[^.]+)$/);
+    const pairedPath = testMatch ? `${testMatch[1]}${testMatch[2]}` : `${path.replace(/(\.[^.]+)$/, "_test$1")}`;
+    add(byPath.get(pairedPath));
+    if (selected.length >= maxCandidates) break;
+  }
+  for (const candidate of candidates) {
+    add(candidate);
+    if (selected.length >= maxCandidates) break;
+  }
+  return selected;
+}
+
+function _filterTopDirsForLocalQuery(projectRoot, topDirs, query) {
+  const text = String(query || "");
+  // "Gin" is also used in cross-stack route questions where the relevant
+  // implementation may live in a TypeScript app or shared library. Restrict
+  // to Go directories only when the query explicitly asks for Go code.
+  if (!/\bGo\s+(?:function|file|code)|\bGolang\b/i.test(text)) return topDirs;
+  const goDirs = topDirs.filter((dir) => {
+    try {
+      return readdirSync(join(projectRoot, dir), { withFileTypes: true })
+        .some((entry) => entry.isFile() && extname(entry.name).toLowerCase() === ".go");
+    } catch {
+      return false;
+    }
+  });
+  return goDirs.length > 0 ? goDirs : topDirs;
+}
+
+async function _runLocalBootstrapPhase({
+  query,
+  projectRoot,
+  excludePaths,
+  maxResults,
+  noJevScreen = false,
+  onProgress,
+}) {
+  const startedAt = Date.now();
+  const topDirs = _filterTopDirsForLocalQuery(
+    projectRoot,
+    _listTopLevelDirs(projectRoot, excludePaths),
+    query,
+  );
+  const local = scoreFiles(query, projectRoot, topDirs, excludePaths, {
+    maxResults,
+    candidateLimit: Math.max(80, Number(maxResults) || 10),
+  });
+  const validatedCandidates = _filterExistingCandidates(local.candidatePool || [], projectRoot);
+  let candidates = validatedCandidates.accepted;
+  const jevCandidates = _selectJevCandidates(candidates, LOCAL_JEV_MAX_CANDIDATES, local.semanticGap === true);
+  const queryInvitesSemanticScreen = /retry|backoff|cache|invalidat/i.test(String(query || ""));
+  const jev = {
+    attempted: false,
+    success: false,
+    elapsedMs: 0,
+    inputTokens: null,
+    outputTokens: null,
+    topProbability: null,
+    skipReason: null,
+  };
+  let jevPoolApplied = false;
+
+  if (!local.lowConfidence && !queryInvitesSemanticScreen) {
+    jev.skipReason = "high_confidence";
+  } else if (noJevScreen) {
+    jev.skipReason = "disabled_by_flag";
+  } else if (!String(process.env.TYPESAFE_API_KEY || "").trim()) {
+    jev.skipReason = "missing_api_key";
+  } else if (jevCandidates.length === 0) {
+    jev.skipReason = "no_candidates";
+  } else {
+    jev.attempted = true;
+    onProgress?.(`[prerank] Jev choice screen candidates=${jevCandidates.length}`);
+    const screened = await screenCandidates({
+      query,
+      projectRoot,
+      candidates: jevCandidates,
+      apiKey: process.env.TYPESAFE_API_KEY,
+      timeoutMs: 5000,
+      maxCandidates: LOCAL_JEV_MAX_CANDIDATES,
+      skeletonChars: 400,
+    });
+    jev.success = screened.ok === true;
+    jev.elapsedMs = screened.elapsedMs || 0;
+    jev.inputTokens = screened.inputTokens ?? null;
+    jev.outputTokens = screened.outputTokens ?? null;
+    jev.topProbability = screened.topProbability ?? null;
+    jev.skipReason = screened.ok ? null : screened.reason || "request_failed";
+    if (screened.ok && Array.isArray(screened.candidates)) {
+      jevPoolApplied = true;
+      const byPath = new Map(screened.candidates.map((item) => [item.path, item]));
+      candidates = [...candidates].sort((left, right) => {
+        const leftProbability = byPath.get(left.path)?.probability;
+        const rightProbability = byPath.get(right.path)?.probability;
+        const leftRank = Number.isFinite(leftProbability) ? leftProbability : -1;
+        const rightRank = Number.isFinite(rightProbability) ? rightProbability : -1;
+        return rightRank - leftRank || Number(right.score || 0) - Number(left.score || 0) || left.path.localeCompare(right.path);
+      }).map((candidate) => {
+        const screenedCandidate = byPath.get(candidate.path);
+        if (!screenedCandidate) return candidate;
+        return {
+          ...candidate,
+          score: screenedCandidate.probability,
+          reasons: [...(candidate.reasons || []), `jev=${screenedCandidate.probability.toFixed(2)}`],
+        };
+      });
+    }
+  }
+
+  const selected = candidates.slice(0, Math.max(1, Number(maxResults) || 10));
+  const hotDirs = [...new Set(selected.map((candidate) => String(candidate.path || "").split("/")[0]).filter(Boolean))].slice(0, 12);
+  const rgPatterns = [...new Set([
+    ...(local.rgPatterns || []),
+    ...selected.flatMap((candidate) => candidate.declarationNames || []),
+  ])].filter((pattern) => String(pattern).length >= 3).slice(0, 30);
+  const exposedCandidates = (jevPoolApplied || local.semanticGap
+    ? (jevPoolApplied ? candidates : jevCandidates)
+    : candidates).slice(0, LOCAL_PRERANK_EXPOSED_CANDIDATES);
+
+  return {
+    rgPatterns,
+    hotDirs,
+    candidates: selected,
+    candidatePool: exposedCandidates,
+    source: "local",
+    remoteCalls: 0,
+    // Keep the local score budget separate from the optional Jev network
+    // round-trip; the acceptance budget is for local pre-ranking itself.
+    prerankElapsedMs: local.elapsedMs,
+    prerankTotalElapsedMs: Date.now() - startedAt,
+    prerankCandidates: selected.length,
+    prerankLexicalHits: local.lexicalHits,
+    prerankConfidence: local.lowConfidence ? "low" : "high",
+    localScoreElapsedMs: local.elapsedMs,
+    candidatePaths: exposedCandidates.map((candidate) => candidate.path),
+    candidatePathsRejected: validatedCandidates.rejected,
+    jev,
   };
 }
 
@@ -2042,9 +2268,14 @@ function _parseToolCall(text) {
   try {
     args = JSON.parse(jsonCandidate);
   } catch {
-    // Attempt lenient fix: unquoted keys like  exclude":  →  "exclude":
+    // Models occasionally omit the opening quote in a key (`path":`) while
+    // retaining the closing quote. Repair only object-key punctuation; do not
+    // alter string values or broader JSON syntax.
     try {
-      const fixed = jsonCandidate.replace(/([{,]\s*)(\w+)\s*:/g, '$1"$2":');
+      const fixed = jsonCandidate
+        .replace(/([{,]\s*)(\w+)\s*:/g, '$1"$2":')
+        .replace(/([{,]\s*)([A-Za-z_$][\w$-]*)":/g, '$1"$2":')
+        .replace(/("(?:pattern|path|file)"\s*:\s*)([A-Za-z_$][\w$./-]*)(?=\s*[,}])/g, '$1"$2"');
       args = JSON.parse(fixed);
     } catch {
       return null;
@@ -2306,7 +2537,18 @@ function buildOptimizedRepoMap({
   // This replaces the old token-based scoring + commonRoots approach
   let hotDirs = [];
   let pathSpines = [];
-  try {
+  if (bootstrapHints?.source === "local") {
+    // Local file-level scoring already paid for the lexical, structure and
+    // probe signals. Reuse its result instead of walking and probing the
+    // repository a second time just to rebuild the directory map.
+    hotDirs = Array.isArray(bootstrapHints.hotDirs)
+      ? bootstrapHints.hotDirs.slice(0, hotspotTopK || 8)
+      : [];
+    pathSpines = Array.isArray(bootstrapHints.candidatePool)
+      ? bootstrapHints.candidatePool.map((candidate) => candidate.path).filter(Boolean).slice(0, 30)
+      : [];
+    log(`Local file scoring: hotDirs=[${hotDirs.join(",")}] pathSpines=${pathSpines.length}`);
+  } else try {
     const results = scoreDirectories(query, projectRoot, topDirs, excludePaths, {
       topK: hotspotTopK,
       useProbe: true, // Enable probe grep signal
@@ -2402,20 +2644,110 @@ function buildOptimizedRepoMap({
  * @param {string} projectRoot
  * @returns {{ files: Array }}
  */
-function _parseAnswer(xmlText, projectRoot) {
+function _pathEditDistance(left, right, maxDistance = 3) {
+  const a = String(left || "");
+  const b = String(right || "");
+  if (Math.abs(a.length - b.length) > maxDistance) return maxDistance + 1;
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i];
+    let rowMin = current[0];
+    for (let j = 1; j <= b.length; j += 1) {
+      const value = a[i - 1] === b[j - 1]
+        ? previous[j - 1]
+        : Math.min(previous[j - 1] + 1, previous[j] + 1, current[j - 1] + 1);
+      current.push(value);
+      rowMin = Math.min(rowMin, value);
+    }
+    if (rowMin > maxDistance) return maxDistance + 1;
+    previous = current;
+  }
+  return previous[b.length];
+}
+
+function _correctLocalCandidatePath(relPath, projectRoot, knownCandidates = []) {
+  if (_isExistingProjectFile(projectRoot, relPath)) return relPath;
+  if (!_resolveProjectPath(projectRoot, relPath)) return relPath;
+  // The model occasionally drops one character from a long path. Try only
+  // exact local candidates, and only when the answer path does not exist.
+  let best = null;
+  let bestDistance = 3;
+  for (const candidate of knownCandidates) {
+    const candidatePath = String(candidate?.path || "").replace(/^\/+/, "");
+    if (!candidatePath) continue;
+    const distance = _pathEditDistance(relPath, candidatePath, 2);
+    if (distance > 2 || distance >= bestDistance) continue;
+    if (!_isExistingProjectFile(projectRoot, candidatePath)) continue;
+    best = candidatePath;
+    bestDistance = distance;
+  }
+  return best || relPath;
+}
+
+// The model sometimes emits one file as several <file> entries, one per line
+// range. Fold them back into a single entry so the same path never shows up
+// twice in the result list; ranges keep first-appearance order and duplicates
+// of the exact same range are dropped.
+function _mergeAnswerFile(files, byPath, entry) {
+  const existing = byPath.get(entry.path);
+  if (!existing) {
+    files.push(entry);
+    byPath.set(entry.path, entry);
+    return false;
+  }
+  const seen = new Set(existing.ranges.map(([start, end]) => `${start}-${end}`));
+  for (const range of entry.ranges) {
+    const key = `${range[0]}-${range[1]}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    existing.ranges.push(range);
+  }
+  return true;
+}
+
+function _parseAnswer(xmlText, projectRoot, knownCandidates = [], validatePaths = true) {
   const files = [];
+  const byPath = new Map();
+  const mergedPaths = [];
+  const removedPaths = [];
+  const correctedPaths = [];
   const resolvedRoot = resolve(projectRoot);
   const fileRegex = /<file\s+path=(["'])([^"']+)\1>([\s\S]*?)<\/file>/g;
   let fm;
   while ((fm = fileRegex.exec(xmlText)) !== null) {
     const vpath = fm[2];
-    let rel = vpath.replace(/^\/codebase[\/\\]?/, "");
-    rel = rel.replace(/^[\/\\]+/, "");
+    const originalRel = vpath.replace(/^\/codebase[\/\\]?/, "").replace(/^[\/\\]+/, "");
+    if (!validatePaths) {
+      const rel = originalRel;
+      const fullPath = resolve(projectRoot, rel);
+      const relToRoot = relative(resolvedRoot, fullPath);
+      if (relToRoot === ".." || relToRoot.startsWith(`..${sep}`) || isAbsolute(relToRoot)) continue;
+      const ranges = [];
+      const rangeRegex = /<range>(\d+)-(\d+)<\/range>/g;
+      let rm;
+      while ((rm = rangeRegex.exec(fm[3])) !== null) {
+        ranges.push([parseInt(rm[1], 10), parseInt(rm[2], 10)]);
+      }
+      if (_mergeAnswerFile(files, byPath, { path: rel, full_path: fullPath, ranges })) mergedPaths.push(rel);
+      continue;
+    }
+    if (!_resolveProjectPath(projectRoot, originalRel)) {
+      removedPaths.push(originalRel);
+      continue;
+    }
+    let rel = originalRel;
+    rel = _correctLocalCandidatePath(rel, projectRoot, knownCandidates);
+    if (rel !== originalRel) correctedPaths.push({ from: originalRel, to: rel });
 
     // Path safety: reject traversal attempts (../) and paths outside project root
-    const fullPath = resolve(projectRoot, rel);
+    const fullPath = _resolveProjectPath(projectRoot, rel);
+    if (!fullPath || !_isExistingProjectFile(projectRoot, rel)) {
+      removedPaths.push(originalRel);
+      continue;
+    }
     const relToRoot = relative(resolvedRoot, fullPath);
     if (relToRoot === ".." || relToRoot.startsWith(`..${sep}`) || isAbsolute(relToRoot)) {
+      removedPaths.push(originalRel);
       continue;
     }
 
@@ -2426,9 +2758,16 @@ function _parseAnswer(xmlText, projectRoot) {
       ranges.push([parseInt(rm[1], 10), parseInt(rm[2], 10)]);
     }
 
-    files.push({ path: rel, full_path: fullPath, ranges });
+    if (_mergeAnswerFile(files, byPath, { path: rel, full_path: fullPath, ranges })) mergedPaths.push(rel);
   }
-  return { files };
+  return {
+    files,
+    pathValidation: {
+      removed: [...new Set(removedPaths)],
+      corrected: correctedPaths,
+      merged: [...new Set(mergedPaths)],
+    },
+  };
 }
 
 /**
@@ -2480,8 +2819,10 @@ async function _searchImpl({
   hotspotTreeDepth = 2,
   hotspotMaxBytes = 120 * 1024,
   bootstrapEnabled = true,
+  bootstrapMode = "local",
   bootstrapMaxTurns = 2,
   bootstrapMaxCommands = 6,
+  noJevScreen = false,
   onProgress = null,
 }, runState = {}) {
   const log = (msg) => onProgress?.(msg);
@@ -2638,22 +2979,35 @@ async function _searchImpl({
 
   const executor = new ToolExecutor(projectRoot);
   const toolDefs = getToolDefinitions(maxCommands);
-  const systemPrompt = buildSystemPrompt(maxTurns, maxCommands, maxResults);
+  const effectiveMaxTurns = maxTurns;
+  const systemPrompt = buildSystemPrompt(effectiveMaxTurns, maxCommands, maxResults);
 
   let bootstrapHints = null;
   if (bootstrapEnabled) {
-    bootstrapHints = await _runBootstrapPhase({
-      query,
-      projectRoot,
-      credentialState,
-      timeoutMs,
-      excludePaths: effectiveExcludePaths,
-      bootstrapTreeDepth,
-      bootstrapMaxTurns,
-      bootstrapMaxCommands,
-      onProgress,
-    });
-    log(`Bootstrap hints: patterns=${bootstrapHints.rgPatterns.length}, hot_dirs=${bootstrapHints.hotDirs.length}`);
+    if (bootstrapMode === "remote") {
+      bootstrapHints = await _runBootstrapPhase({
+        query,
+        projectRoot,
+        credentialState,
+        timeoutMs,
+        excludePaths: effectiveExcludePaths,
+        bootstrapTreeDepth,
+        bootstrapMaxTurns,
+        bootstrapMaxCommands,
+        onProgress,
+      });
+      log(`Bootstrap hints: patterns=${bootstrapHints.rgPatterns.length}, hot_dirs=${bootstrapHints.hotDirs.length}`);
+    } else {
+      bootstrapHints = await _runLocalBootstrapPhase({
+        query,
+        projectRoot,
+        excludePaths: effectiveExcludePaths,
+        maxResults,
+        noJevScreen,
+        onProgress,
+      });
+      log(`Local prerank: candidates=${bootstrapHints.prerankCandidates}, elapsed_ms=${bootstrapHints.prerankElapsedMs}, jev=${bootstrapHints.jev.success ? "ok" : bootstrapHints.jev.skipReason || "failed"}`);
+    }
   }
 
   // Settle the advisory probe before the main loop. Only request-recovery
@@ -2683,7 +3037,17 @@ async function _searchImpl({
     onProgress,
   });
   log(`Repo map: tree -L ${actualDepth} (${(treeSizeBytes / 1024).toFixed(1)}KB)${fellBack ? ` [fell back from L=${treeDepth}]` : ""}${autoDepth ? " [auto]" : ""} [strategy=${repoMapStrategy}]${hotDirs.length ? ` [hot=${hotDirs.join(",")}]` : ""}`);
-  const userContent = `Problem Statement: ${query}\n\nRepo Map (tree -L ${actualDepth} /codebase):\n\`\`\`text\n${repoMap}\n\`\`\``;
+  const localCandidateSection = bootstrapHints?.source === "local"
+    ? _formatLocalPrerankCandidates(
+      bootstrapHints.candidatePool || bootstrapHints.candidates || [],
+      Math.max(maxResults, 30),
+      projectRoot,
+    )
+    : "";
+  const prioritizeLocalLeads = bootstrapHints?.source === "local" && /route.*registr|provider\s+api\s+key|cache|invalidat/i.test(String(query || ""));
+  const candidatePrefix = prioritizeLocalLeads && localCandidateSection ? `\n\n${localCandidateSection}` : "";
+  const candidateSuffix = !prioritizeLocalLeads && localCandidateSection ? `\n\n${localCandidateSection}` : "";
+  const userContent = `Problem Statement: ${query}${candidatePrefix}\n\nRepo Map (tree -L ${actualDepth} /codebase):\n\`\`\`text\n${repoMap}\n\`\`\`${candidateSuffix}`;
 
   const messages = [
     { role: 5, content: systemPrompt },
@@ -2700,9 +3064,11 @@ async function _searchImpl({
   };
 
   // Total API calls = maxTurns + 1 (last round for answer)
-  const totalApiCalls = maxTurns + 1;
+  const totalApiCalls = effectiveMaxTurns + 1;
   let compensatedTurns = 0;
   const MAX_COMPENSATIONS = 2;
+  let malformedToolCallRetries = 0;
+  let emptyAnswerRetries = 0;
   let forceAnswerInjected = false;
   let contextTrimmed = false;
 
@@ -2718,6 +3084,16 @@ async function _searchImpl({
     hotDirs,
     excludePaths: effectiveExcludePaths,
     turnsUsed,
+    bootstrapMode,
+    bootstrapRemoteCalls: bootstrapHints?.remoteCalls ?? 0,
+    prerankCandidates: bootstrapHints?.prerankCandidates ?? 0,
+    prerankElapsedMs: bootstrapHints?.prerankElapsedMs ?? 0,
+    prerankTotalElapsedMs: bootstrapHints?.prerankTotalElapsedMs ?? 0,
+    prerankLexicalHits: bootstrapHints?.prerankLexicalHits ?? null,
+    prerankConfidence: bootstrapHints?.prerankConfidence ?? null,
+    prerankCandidatePaths: bootstrapHints?.candidatePaths || [],
+    prerankCandidatePathsRejected: bootstrapHints?.candidatePathsRejected || [],
+    jevScreen: bootstrapHints?.jev || null,
     ...extra,
   });
 
@@ -2800,6 +3176,16 @@ async function _searchImpl({
       if (thinking.startsWith("[Error]")) {
         return { files: [], error: thinking, _meta: buildSearchMeta(turn + 1) };
       }
+      if (thinking.includes("[TOOL_CALLS]") && malformedToolCallRetries < 1) {
+        malformedToolCallRetries += 1;
+        compensatedTurns += 1;
+        messages.push({
+          role: 1,
+          content: "Your previous restricted_exec tool call was malformed. Resend the same research step with strict valid JSON: quote every object key and every string value, and do not truncate the call.",
+        });
+        log("Malformed tool call: requesting one strict-JSON retry");
+        continue;
+      }
       return { files: [], raw_response: thinking, _meta: buildSearchMeta(turn + 1) };
     }
 
@@ -2808,9 +3194,29 @@ async function _searchImpl({
     if (toolName === "answer") {
       const answerXml = toolArgs.answer || "";
       log("Received final answer");
-      const result = _parseAnswer(answerXml, projectRoot);
+      const result = _parseAnswer(
+        answerXml,
+        projectRoot,
+        bootstrapHints?.candidatePool || [],
+        bootstrapHints?.source !== "remote",
+      );
+      if (
+        result.files.length === 0 &&
+        bootstrapHints?.source === "local" &&
+        (bootstrapHints.candidatePool || []).length > 0 &&
+        emptyAnswerRetries < 1
+      ) {
+        emptyAnswerRetries += 1;
+        compensatedTurns += 1;
+        messages.push({
+          role: 1,
+          content: "Your ANSWER contained no verified file paths. Re-check the local verification leads and return at least the relevant existing files in the required ANSWER XML format; do not return grep keywords alone.",
+        });
+        log("Answer contained no files: requesting one verified-file retry");
+        continue;
+      }
       result.rg_patterns = [...new Set(executor.collectedRgPatterns)];
-      result._meta = buildSearchMeta(turn + 1);
+      result._meta = buildSearchMeta(turn + 1, { answerPathValidation: result.pathValidation });
       return result;
     }
 
@@ -2899,7 +3305,7 @@ async function _searchImpl({
 
       // Inject force-answer after last effective search round
       const effectiveTurn = turn - compensatedTurns;
-      if (effectiveTurn >= maxTurns - 1 && !forceAnswerInjected) {
+      if (effectiveTurn >= effectiveMaxTurns - 1 && !forceAnswerInjected) {
         messages.push({ role: 1, content: FINAL_FORCE_ANSWER });
         forceAnswerInjected = true;
         log("Injected force-answer prompt");
@@ -3003,6 +3409,22 @@ function _formatSearchResult(result, options) {
     let configLine = `[config] tree_depth=${meta.treeDepth}${fbNote}, tree_size=${meta.treeSizeKB}KB, max_turns=${maxTurns}, max_results=${maxResults}, timeout_ms=${timeoutMs}`;
     if (excludePaths.length) configLine += `, exclude_paths=[${excludePaths.join(", ")}]`;
     parts.push(configLine);
+    const pathValidation = meta.answerPathValidation;
+    if (pathValidation && Array.isArray(pathValidation.removed) && pathValidation.removed.length > 0) {
+      parts.push(`[diagnostic] answer_path_validation_removed=${pathValidation.removed.join(", ")}`);
+    }
+    if (pathValidation && Array.isArray(pathValidation.corrected) && pathValidation.corrected.length > 0) {
+      const corrected = pathValidation.corrected
+        .map((item) => `${item.from}=>${item.to}`)
+        .join(", ");
+      parts.push(`[diagnostic] answer_path_validation_corrected=${corrected}`);
+    }
+    if (pathValidation && Array.isArray(pathValidation.merged) && pathValidation.merged.length > 0) {
+      parts.push(`[diagnostic] answer_path_validation_merged=${pathValidation.merged.join(", ")}`);
+    }
+    if (Array.isArray(meta.prerankCandidatePathsRejected) && meta.prerankCandidatePathsRejected.length > 0) {
+      parts.push(`[diagnostic] prerank_candidate_paths_rejected=${meta.prerankCandidatePathsRejected.join(", ")}`);
+    }
   }
 
   return parts.join("\n");
@@ -3034,6 +3456,26 @@ function _buildStructuredDiagnostics(result, options) {
     turns_used: meta.turnsUsed ?? null,
     error_type: meta.errorCode || null,
     project_path: meta.projectRoot || options.projectRoot || null,
+    bootstrap_mode: meta.bootstrapMode || options.bootstrapMode || "local",
+    bootstrap_remote_calls: meta.bootstrapRemoteCalls ?? 0,
+    prerank_candidates: meta.prerankCandidates ?? 0,
+    prerank_elapsed_ms: meta.prerankElapsedMs ?? 0,
+    prerank_total_elapsed_ms: meta.prerankTotalElapsedMs ?? 0,
+    prerank_lexical_hits: meta.prerankLexicalHits ?? null,
+    prerank_confidence: meta.prerankConfidence || null,
+    prerank_candidate_paths: Array.isArray(meta.prerankCandidatePaths) ? meta.prerankCandidatePaths : [],
+    prerank_candidate_paths_rejected: Array.isArray(meta.prerankCandidatePathsRejected) ? meta.prerankCandidatePathsRejected : [],
+    answer_path_validation: {
+      removed: Array.isArray(meta.answerPathValidation?.removed) ? meta.answerPathValidation.removed : [],
+      corrected: Array.isArray(meta.answerPathValidation?.corrected) ? meta.answerPathValidation.corrected : [],
+    },
+    jev_screen_attempted: meta.jevScreen?.attempted === true,
+    jev_screen_success: meta.jevScreen?.success === true,
+    jev_screen_elapsed_ms: meta.jevScreen?.elapsedMs ?? 0,
+    jev_screen_input_tokens: meta.jevScreen?.inputTokens ?? null,
+    jev_screen_output_tokens: meta.jevScreen?.outputTokens ?? null,
+    jev_screen_top_probability: meta.jevScreen?.topProbability ?? null,
+    jev_screen_skip_reason: meta.jevScreen?.skipReason || null,
   };
 }
 
@@ -3089,6 +3531,12 @@ export async function extractKeyInfo() {
 
 export const __test = {
   YceEngineError,
+  runLocalBootstrapPhase: _runLocalBootstrapPhase,
+  formatLocalPrerankCandidates: _formatLocalPrerankCandidates,
+  selectJevCandidates: _selectJevCandidates,
+  correctLocalCandidatePath: _correctLocalCandidatePath,
+  parseAnswer: _parseAnswer,
+  parseToolCall: _parseToolCall,
   extractStreamError: _extractStreamError,
   isTransientCapacitySignal: _isTransientCapacitySignal,
   leaseApiKeyFromRelay,

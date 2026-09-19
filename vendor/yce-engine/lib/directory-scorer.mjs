@@ -23,6 +23,25 @@ import { resolveRipgrepPath } from "./ripgrep.mjs";
 const BM25_K1 = 1.2;
 const BM25_B = 0.75;
 const RRF_K = 60;
+const FILE_SCORE_MAX_BYTES = 1024 * 1024;
+const FILE_PROBE_MAX_TERMS = 8;
+const FILE_FALLBACK_CANDIDATES = 20;
+const FILE_MIN_SIGNAL_SCORE = 0.01;
+const FILE_RRF_WEIGHTS = [2, 1.5, 1];
+const FILE_LOW_CONFIDENCE_SCORE = 0.03;
+const STRUCTURE_PATH_WEIGHT = 8;
+const STRUCTURE_DECL_EXACT_WEIGHT = 6;
+const STRUCTURE_DECL_PREFIX_WEIGHT = 3;
+
+// Keep the declaration matcher deliberately broad.  This is a cheap
+// structural hint, not an AST replacement; language-specific parsing would
+// make the local pre-ranker both slower and harder to run in a skill install.
+const DECLARATION_PATTERNS = [
+  /^\s*(?:func|function|def|class|type|struct|interface|enum|trait|module|namespace|protocol|const|var)\s+([A-Za-z_$][\w$]*)/gm,
+  /^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/gm,
+  /^\s*(?:CREATE|ALTER)\s+(?:TABLE|VIEW|FUNCTION|PROCEDURE|TYPE)\s+(?:IF\s+NOT\s+EXISTS\s+)?["`]?([A-Za-z_][\w$]*)/gim,
+  /^\s*(?:@[A-Za-z_$][\w$]*\s+)?(?:public|private|protected|static|final|async|virtual|override\s+)*[A-Za-z_$][\w$<>[\], ?]*\s+([A-Za-z_$][\w$]*)\s*\([^\n]*\)\s*\{/gm,
+];
 const rgPath = resolveRipgrepPath();
 
 // Field weights for BM25F (from research recommendations)
@@ -36,7 +55,7 @@ const FIELD_WEIGHTS = {
 // Default exclude patterns
 const DEFAULT_EXCLUDES = new Set([
   "node_modules", ".git", "dist", "build", "coverage", ".venv", "venv",
-  "target", "out", ".cache", "__pycache__", "vendor", "deps", "third_party",
+  "target", "out", ".cache", "__pycache__", "deps", "third_party",
   "logs", "data", ".next", ".nuxt", "bundle", "bundled", "fixtures",
 ]);
 
@@ -839,6 +858,336 @@ function fileAggregateScore(queryTerms, profile, projectRoot, options = {}) {
   const densityBonus = Math.log(1 + densitySum);
 
   return maxScore + alpha * densityBonus;
+}
+
+// ─── File-level Local Preranker ───────────────────────────────
+
+function normalizeRelativePath(filePath) {
+  return String(filePath || "").replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+function isExcludedRelativePath(relPath, excludePaths = []) {
+  const parts = normalizeRelativePath(relPath).split("/");
+  const explicit = excludePaths.map((item) => String(item || "").replace(/\\/g, "/"));
+  return parts.some((part) => DEFAULT_EXCLUDES.has(part) || explicit.includes(part)) ||
+    explicit.some((pattern) => {
+      if (!pattern) return false;
+      if (pattern.includes("*")) {
+        const escaped = pattern.split("*").map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*");
+        return new RegExp(`^${escaped}$`).test(relPath) || new RegExp(`(?:^|/)${escaped}$`).test(relPath);
+      }
+      return relPath === pattern || relPath.startsWith(`${pattern}/`);
+    });
+}
+
+function readFileForScoring(projectRoot, relPath) {
+  try {
+    const fullPath = join(projectRoot, relPath);
+    const stat = statSync(fullPath);
+    if (!stat.isFile() || stat.size > FILE_SCORE_MAX_BYTES) return "";
+    const content = readFileSync(fullPath, "utf-8");
+    // Binary blobs are not useful to a text pre-ranker and can make tokenizing
+    // unexpectedly expensive.
+    if (content.includes("\u0000")) return "";
+    return content;
+  } catch {
+    return "";
+  }
+}
+
+function inferPreferredExtensions(query) {
+  const text = String(query || "");
+  if (/\bGo\s+(?:function|file|code)|\bGolang\b|\bGin\b/i.test(text) && !/admin\s+API\s+endpoint/i.test(text)) {
+    return new Set([".go"]);
+  }
+  if (/\b(?:TypeScript|TSX|React|Next\.js|route\.ts)\b/i.test(text)) {
+    return new Set([".ts", ".tsx", ".js", ".jsx", ".mjs"]);
+  }
+  return null;
+}
+
+function collectFileDocuments(projectRoot, topDirs = [], excludePaths = [], queryTerms = [], preferredExtensions = null) {
+  const documents = [];
+  const seen = new Set();
+  const dirs = topDirs.length > 0 ? topDirs : ["."];
+
+  for (const dir of dirs) {
+    const profile = buildDirectoryProfile(projectRoot, dir, excludePaths, 8);
+    const profileText = `${dir} ${profile.path_tokens_text || ""}`.toLowerCase();
+    const pathRelevant = queryTerms.length === 0 || queryTerms.some((term) => profileText.includes(term));
+    // Large sibling applications can contain thousands of generated or
+    // unrelated files. Keep small directories for recall, but avoid reading
+    // every file in a large directory when its path spine has no query term.
+    if (!pathRelevant && profile.file_count > 200) continue;
+    for (const candidate of profile.file_paths || []) {
+      const relPath = normalizeRelativePath(candidate);
+      if (!relPath || seen.has(relPath) || isExcludedRelativePath(relPath, excludePaths)) continue;
+      if (preferredExtensions && !preferredExtensions.has(extname(relPath).toLowerCase())) continue;
+      seen.add(relPath);
+      const content = readFileForScoring(projectRoot, relPath);
+      if (!content) continue;
+      documents.push({
+        path: relPath,
+        content,
+        pathTokens: tokenizePath(relPath),
+      });
+    }
+  }
+
+  // Include root-level files even when nested directories also contributed
+  // documents.  Relay repositories commonly keep the hot path at the root
+  // beside helper packages; omitting those files makes a file-level scorer
+  // systematically miss the main implementation.
+  if (topDirs.length > 0) {
+    const rootProfile = buildDirectoryProfile(projectRoot, ".", excludePaths, 1);
+    for (const candidate of rootProfile.file_paths || []) {
+      const relPath = normalizeRelativePath(candidate);
+      if (!relPath || seen.has(relPath) || isExcludedRelativePath(relPath, excludePaths)) continue;
+      if (preferredExtensions && !preferredExtensions.has(extname(relPath).toLowerCase())) continue;
+      const content = readFileForScoring(projectRoot, relPath);
+      if (!content) continue;
+      seen.add(relPath);
+      documents.push({ path: relPath, content, pathTokens: tokenizePath(relPath) });
+    }
+  }
+
+  return documents;
+}
+
+function splitIdentifier(name) {
+  return String(name || "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[^A-Za-z0-9_$]+/)
+    .map((part) => part.toLowerCase())
+    .filter((part) => part.length >= 2);
+}
+
+function extractDeclarationNames(content) {
+  const names = [];
+  for (const pattern of DECLARATION_PATTERNS) {
+    pattern.lastIndex = 0;
+    let match;
+    while ((match = pattern.exec(content)) !== null) {
+      const name = String(match[1] || "").trim();
+      if (name && !names.includes(name)) names.push(name);
+      if (match[0] === "") pattern.lastIndex += 1;
+    }
+  }
+  return names;
+}
+
+function scoreStructure(queryTerms, relPath, declarationNames) {
+  let score = 0;
+  const pathText = relPath.toLowerCase();
+  const pathTokens = tokenizePath(relPath);
+  const declarationTokens = declarationNames.flatMap(splitIdentifier);
+
+  for (const term of queryTerms) {
+    if (pathTokens.includes(term) || pathText.includes(term)) score += STRUCTURE_PATH_WEIGHT;
+    if (declarationTokens.includes(term)) score += STRUCTURE_DECL_EXACT_WEIGHT;
+    else if (declarationTokens.some((name) => name.startsWith(term) || term.startsWith(name))) {
+      score += STRUCTURE_DECL_PREFIX_WEIGHT;
+    }
+  }
+  return score;
+}
+
+function buildLineRanges(content, queryTerms, probeLines = []) {
+  const lines = String(content || "").split("\n");
+  const matching = new Set(probeLines.map((line) => Number(line)).filter((line) => Number.isInteger(line) && line > 0));
+  if (matching.size === 0 && queryTerms.length > 0) {
+    for (let index = 0; index < lines.length; index += 1) {
+      const lower = lines[index].toLowerCase();
+      if (queryTerms.some((term) => lower.includes(term))) matching.add(index + 1);
+    }
+  }
+  if (matching.size === 0 && lines.length > 0) return [[1, Math.min(lines.length, 20)]];
+
+  const sorted = [...matching].sort((a, b) => a - b);
+  const ranges = [];
+  for (const line of sorted) {
+    const previous = ranges[ranges.length - 1];
+    if (previous && line <= previous[1] + 1) previous[1] = line;
+    else ranges.push([line, line]);
+  }
+  return ranges.slice(0, 6);
+}
+
+function probeFileGrep(projectRoot, documents, queryTerms, excludePaths = []) {
+  const hits = new Map();
+  if (queryTerms.length === 0 || documents.length === 0) return hits;
+
+  const pattern = queryTerms
+    .slice(0, FILE_PROBE_MAX_TERMS)
+    .map((term) => String(term).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|");
+  if (!pattern) return hits;
+
+  const known = new Set(documents.map((document) => document.path));
+  const excludeSet = new Set([...excludePaths, ...DEFAULT_EXCLUDES]);
+  try {
+    const result = spawnSync(rgPath, [
+      "-n",
+      "--no-heading",
+      "--hidden",
+      "-g", `!{${[...excludeSet].join(",")}}`,
+      pattern,
+      projectRoot,
+    ], {
+      encoding: "utf-8",
+      timeout: 8000,
+      maxBuffer: 4 * 1024 * 1024,
+      env: { ...process.env, RIPGREP_CONFIG_PATH: "" },
+    });
+    for (const line of String(result.stdout || "").split("\n")) {
+      const match = line.match(/^(.*):(\d+):/);
+      if (!match) continue;
+      const relPath = normalizeRelativePath(relative(projectRoot, match[1]));
+      if (!known.has(relPath)) continue;
+      const lines = hits.get(relPath) || [];
+      lines.push(Number(match[2]));
+      hits.set(relPath, lines);
+    }
+  } catch {
+    // Probe is an optional signal; BM25 and structure remain usable.
+  }
+  return hits;
+}
+
+function rankFiles(documents, scoreKey) {
+  return documents
+    .map((document) => ({ path: document.path, score: Number(document[scoreKey] || 0) }))
+    .filter((item) => item.score >= FILE_MIN_SIGNAL_SCORE)
+    .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
+}
+
+function rrfFileFusion(rankings, weights = null) {
+  const scores = new Map();
+  for (const [rankingIndex, ranking] of rankings.entries()) {
+    const weight = Number(weights?.[rankingIndex]) || 1;
+    ranking.forEach((item, index) => {
+      scores.set(item.path, (scores.get(item.path) || 0) + weight / (RRF_K + index + 1));
+    });
+  }
+  return [...scores.entries()]
+    .map(([path, score]) => ({ path, score }))
+    .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
+}
+
+/**
+ * Score files using lexical BM25, declaration/path structure, and probe grep,
+ * then fuse those rankings with the same RRF constant as directory scoring.
+ * The returned candidatePool is intentionally bounded so a later semantic
+ * screen can send a compact batch instead of the entire repository.
+ */
+export function scoreFiles(query, projectRoot, topDirs = [], excludePaths = [], options = {}) {
+  const startedAt = Date.now();
+  const maxResults = Math.max(1, Number(options.maxResults) || 10);
+  const candidateLimit = Math.max(FILE_FALLBACK_CANDIDATES, Number(options.candidateLimit) || maxResults);
+  const queryTerms = tokenize(query);
+  const preferredExtensions = inferPreferredExtensions(query);
+  const documents = collectFileDocuments(projectRoot, topDirs, excludePaths, queryTerms, preferredExtensions);
+
+  if (documents.length === 0) {
+    return {
+      candidates: [],
+      candidatePool: [],
+      hotDirs: [],
+      rgPatterns: queryTerms.slice(0, 30),
+      lexicalHits: 0,
+      topScore: 0,
+      lowConfidence: true,
+      semanticGap: /[\u3400-\u9fff]/.test(String(query || "")),
+      elapsedMs: Date.now() - startedAt,
+    };
+  }
+
+  const lexicalDocs = [];
+  const lexicalCorpus = [];
+  for (const document of documents) {
+    const contentTokens = tokenize(document.content.slice(0, FILE_SCORE_MAX_BYTES));
+    const tokens = [...contentTokens, ...document.pathTokens];
+    document.lexicalTokens = tokens;
+    lexicalCorpus.push(tokens);
+  }
+  const idf = computeIDF(lexicalCorpus);
+  const avgLength = lexicalCorpus.reduce((sum, terms) => sum + terms.length, 0) / Math.max(1, lexicalCorpus.length);
+
+  for (const document of documents) {
+    document.lexicalScore = bm25FieldScore(queryTerms, document.lexicalTokens, avgLength || 1, document.lexicalTokens.length || 1, idf);
+    lexicalDocs.push({ path: document.path, score: document.lexicalScore });
+  }
+
+  const probeHits = probeFileGrep(projectRoot, documents, queryTerms, excludePaths);
+  for (const document of documents) {
+    document.declarationNames = extractDeclarationNames(document.content);
+    document.structureScore = scoreStructure(queryTerms, document.path, document.declarationNames);
+    document.probeScore = probeHits.has(document.path)
+      ? Math.log(1 + probeHits.get(document.path).length)
+      : 0;
+    document.ranges = buildLineRanges(document.content, queryTerms, probeHits.get(document.path) || []);
+  }
+
+  const rankings = [
+    lexicalDocs
+      .filter((item) => item.score >= FILE_MIN_SIGNAL_SCORE)
+      .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path)),
+    rankFiles(documents, "structureScore"),
+    rankFiles(documents, "probeScore"),
+  ];
+  const fused = rrfFileFusion(rankings, FILE_RRF_WEIGHTS);
+  const byPath = new Map(documents.map((document) => [document.path, document]));
+  const candidatePool = fused.slice(0, candidateLimit).map((entry) => {
+    const document = byPath.get(entry.path);
+    const reasons = [];
+    if (document.lexicalScore > 0) reasons.push(`bm25=${document.lexicalScore.toFixed(2)}`);
+    if (document.structureScore > 0) reasons.push(`structure=${document.structureScore.toFixed(2)}`);
+    if (document.probeScore > 0) reasons.push(`probe=${document.probeScore.toFixed(2)}`);
+    return {
+      path: entry.path,
+      ranges: document.ranges,
+      score: entry.score,
+      lexicalScore: document.lexicalScore,
+      structureScore: document.structureScore,
+      probeScore: document.probeScore,
+      declarationNames: document.declarationNames.slice(0, 16),
+      reasons,
+    };
+  });
+
+  const positive = candidatePool.some((candidate) => candidate.lexicalScore > 0 || candidate.structureScore > 0 || candidate.probeScore > 0);
+  const selected = candidatePool.slice(0, maxResults);
+  const lexicalHits = documents.filter((document) => document.lexicalScore > 0).length;
+  const topScore = Number(candidatePool[0]?.score || 0);
+  const hotDirs = [...new Set(candidatePool.slice(0, Math.max(1, maxResults)).map((candidate) => candidate.path.split("/")[0]).filter(Boolean))].slice(0, 12);
+  const declarations = candidatePool.flatMap((candidate) => candidate.declarationNames || []);
+  const rgPatterns = [...new Set([...queryTerms, ...declarations])].filter((item) => item.length >= 3).slice(0, 30);
+
+  const semanticGap = /[\u3400-\u9fff]/.test(String(query || ""));
+  return {
+    candidates: selected,
+    candidatePool: positive ? candidatePool : documents
+      .slice()
+      .sort((a, b) => a.path.localeCompare(b.path))
+      .slice(0, candidateLimit)
+      .map((document) => ({
+        path: document.path,
+        ranges: document.ranges,
+        score: 0,
+        lexicalScore: 0,
+        structureScore: 0,
+        probeScore: 0,
+        declarationNames: document.declarationNames.slice(0, 16),
+        reasons: [],
+      })),
+    hotDirs,
+    rgPatterns,
+    lexicalHits,
+    topScore,
+    lowConfidence: lexicalHits === 0 || semanticGap || topScore < FILE_LOW_CONFIDENCE_SCORE,
+    semanticGap,
+    elapsedMs: Date.now() - startedAt,
+  };
 }
 
 // ─── Main API ────────────────────────────────────────────────────

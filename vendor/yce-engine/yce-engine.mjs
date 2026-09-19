@@ -51,8 +51,10 @@ Options:
       --hotspot-max-bytes <n>     Hotspot repo-map byte budget
       --bootstrap-enabled         Enable bootstrap phase
       --no-bootstrap              Disable bootstrap phase
+      --bootstrap-mode <mode>     local (default) or remote bootstrap
       --bootstrap-max-turns <n>   Bootstrap phase turns
       --bootstrap-max-commands <n> Bootstrap commands per turn
+      --no-jev-screen             Disable optional TypeSafe Jev choice screen
       --json                      Emit structured JSON for programmatic callers
       --check-key                 Verify relay / YCE_API_KEY without printing the full key
       --help                      Show this help
@@ -101,6 +103,8 @@ function parseArgs(argv) {
     hotspotMaxBytes: 120 * 1024,
     bootstrapMaxTurns: 2,
     bootstrapMaxCommands: 6,
+    bootstrapMode: "local",
+    noJevScreen: false,
     checkKey: false,
     json: false,
     help: false,
@@ -170,6 +174,10 @@ function parseArgs(argv) {
       case "--no-bootstrap":
         opts.bootstrapEnabled = false;
         break;
+      case "--bootstrap-mode":
+        opts.bootstrapMode = takeValue(argv, i, arg);
+        i++;
+        break;
       case "--bootstrap-max-turns":
         opts.bootstrapMaxTurns = parseInteger(arg, takeValue(argv, i, arg));
         i++;
@@ -177,6 +185,9 @@ function parseArgs(argv) {
       case "--bootstrap-max-commands":
         opts.bootstrapMaxCommands = parseInteger(arg, takeValue(argv, i, arg));
         i++;
+        break;
+      case "--no-jev-screen":
+        opts.noJevScreen = true;
         break;
       case "--check-key":
         opts.checkKey = true;
@@ -217,6 +228,9 @@ function validateOptions(opts) {
   validateRange("--hotspot-max-bytes", opts.hotspotMaxBytes, 16 * 1024, 250 * 1024);
   validateRange("--bootstrap-max-turns", opts.bootstrapMaxTurns, 1, 5);
   validateRange("--bootstrap-max-commands", opts.bootstrapMaxCommands, 1, 20);
+  if (!new Set(["local", "remote"]).has(opts.bootstrapMode)) {
+    throw new Error(`--bootstrap-mode must be local or remote, received: ${opts.bootstrapMode}`);
+  }
   if (!new Set(["classic", "bootstrap_hotspot"]).has(opts.repoMapMode)) {
     throw new Error(`--repo-map-mode must be classic or bootstrap_hotspot, received: ${opts.repoMapMode}`);
   }
@@ -332,8 +346,10 @@ async function main() {
       hotspotTreeDepth: opts.hotspotTreeDepth,
       hotspotMaxBytes: opts.hotspotMaxBytes,
       bootstrapEnabled: opts.bootstrapEnabled,
+      bootstrapMode: opts.bootstrapMode,
       bootstrapMaxTurns: opts.bootstrapMaxTurns,
       bootstrapMaxCommands: opts.bootstrapMaxCommands,
+      noJevScreen: opts.noJevScreen,
     };
 
     if (opts.json) {
