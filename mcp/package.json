@@ -1,0 +1,25 @@
+{
+  "name": "yce-mcp",
+  "version": "3.5.0",
+  "description": "stdio MCP server that exposes the YCE CLI (scripts/yce.js) as tools: search / enhance / network / plan / task / read-result.",
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "bin": {
+    "yce-mcp": "src/index.mjs"
+  },
+  "main": "src/index.mjs",
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/index.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.6.5"
+  }
+}

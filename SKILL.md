@@ -99,6 +99,7 @@ node ./scripts/yce.js "整理这个任务" --mode enhance --enhance-backend loca
 - 完整结果只在 `result_file`。按文件分段读，读到 `yce:eof` 哨兵为止；禁止把终端内容当完整结果。
 - `--help` 也是 XML 且 exit 0，但 `resolved-action` 为空、`INVALID_ARGS`，不是检索成功。
 - 契约与标签：[xml-contract.md](references/xml-contract.md)
+- 走 MCP 而不是命令行时，工具表与契约映射见 [mcp.md](references/mcp.md)（闸门与哨兵规则不变）
 - 排障：[troubleshooting.md](references/troubleshooting.md)
 - Windows：[windows-execution.md](references/windows-execution.md)
 
