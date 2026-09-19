@@ -193,6 +193,10 @@ const REPO_MAP_OPTIMIZER_DEFAULTS = {
 
 const LOCAL_PRERANK_EXPOSED_CANDIDATES = 30;
 const LOCAL_JEV_MAX_CANDIDATES = 30;
+// The Jev screen is an optional prerank accelerator, so its key lease must not
+// become a new latency source: fail fast onto the local env key instead of
+// waiting out the 10s budget the main search lease can afford.
+const JEV_LEASE_TIMEOUT_MS = 2000;
 
 function _mergeExcludePaths(excludePaths = []) {
   const merged = [...DEFAULT_EXCLUDE_PATHS];
@@ -751,6 +755,130 @@ function _filterTopDirsForLocalQuery(projectRoot, topDirs, query) {
   return goDirs.length > 0 ? goDirs : topDirs;
 }
 
+// ─── Jev screen key lease ──────────────────────────────────
+// The Jev screen key is leased from the relay pool (POST /yce/jev-lease) and
+// its token usage is reported back (POST /yce/jev-usage). These deliberately
+// do not reuse the windsurf lease helpers: their request bodies carry
+// windsurf-only fields, and they write the module-level relay failure state
+// that the main search surfaces to the user — an optional prerank screen must
+// never be reported as "YCE relay key lease failed". Failures are values, so
+// the caller can fall back to the local env key without any thrown error.
+
+async function _leaseJevKey() {
+  const relayUrl = _normalizeRelayUrl(process.env.YCE_RELAY_URL) || DEFAULT_YCE_RELAY_ORIGIN;
+  const relayToken = String(process.env.YCE_RELAY_TOKEN || "").trim();
+  if (!relayToken) return { ok: false, error: "missing relay token (set YCE_RELAY_TOKEN)" };
+
+  try {
+    const response = await fetch(`${relayUrl}/yce/jev-lease`, {
+      method: "POST",
+      headers: {
+        "Accept": "application/json",
+        "Authorization": `Bearer ${relayToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(JEV_LEASE_TIMEOUT_MS),
+    });
+    // Every non-200 — 503 NO_JEV_KEY, 503 JEV_SCHEDULER_UNAVAILABLE and
+    // 500 JEV_POOL_LOAD_FAILED alike — becomes an error value the caller
+    // turns into an env fallback. Never a silent skip.
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      const code = String(payload?.code || "").trim() || `HTTP ${response.status}`;
+      const message = String(payload?.error || payload?.message || "").trim();
+      return { ok: false, error: message ? `${code}: ${message}` : code };
+    }
+    const payload = await response.json().catch(() => ({}));
+    const apiKey = String(payload?.api_key || "").trim();
+    if (!apiKey) return { ok: false, error: `HTTP ${response.status}: lease response carried no api_key` };
+    return {
+      ok: true,
+      apiKey,
+      keyId: String(payload?.key_id || "").trim(),
+      leaseId: String(payload?.lease_id || "").trim(),
+      relayUrl,
+      relayToken,
+      leaseExpiresAt: String(payload?.lease_expires_at || "").trim(),
+      selectionReason: String(payload?.selection_reason || "").trim(),
+    };
+  } catch (error) {
+    return { ok: false, error: `jev lease error: ${error?.message || String(error)}` };
+  }
+}
+
+// jevScreen reports transport failures as reason="http_<status>"; the receipt
+// wants the numeric status so the relay can cool the pooled key down.
+function _jevScreenStatusCode(reason) {
+  const match = /^http_(\d+)$/.exec(String(reason || ""));
+  const status = match ? Number(match[1]) : NaN;
+  return Number.isFinite(status) ? status : null;
+}
+
+async function _reportJevUsage(lease, {
+  ok = false,
+  inputTokens = null,
+  outputTokens = null,
+  statusCode = null,
+  errorCode = "",
+  durationMs = null,
+} = {}) {
+  if (!lease?.relayUrl || !lease?.relayToken || !lease?.keyId) return false;
+  const count = (value) => (typeof value === "number" && Number.isFinite(value) ? value : null);
+  const body = JSON.stringify({
+    key_id: lease.keyId,
+    lease_id: lease.leaseId || "",
+    ok: ok === true,
+    input_tokens: count(inputTokens),
+    output_tokens: count(outputTokens),
+    status_code: count(statusCode),
+    error_code: String(errorCode || "").slice(0, 128),
+    duration_ms: count(durationMs),
+  });
+  let lastError = "";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await fetch(`${lease.relayUrl}/yce/jev-usage`, {
+        method: "POST",
+        headers: {
+          "Accept": "application/json",
+          "Authorization": `Bearer ${lease.relayToken}`,
+          "Content-Type": "application/json",
+        },
+        body,
+        signal: AbortSignal.timeout(3000),
+      });
+      if (response.ok) {
+        lease.lastUsageError = "";
+        return true;
+      }
+      const payload = await response.json().catch(() => ({}));
+      lastError = String(payload?.error || `HTTP ${response.status}`);
+      // 4xx (an unknown lease_id, say) means the receipt itself is invalid and
+      // retrying cannot repair it.
+      if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) {
+        break;
+      }
+    } catch (error) {
+      lastError = error?.message || String(error);
+    }
+    if (attempt < 2) await _sleep(150 * (2 ** attempt));
+  }
+  lease.lastUsageError = lastError || "jev usage receipt was not acknowledged";
+  return false;
+}
+
+// The receipt rides the same pending-report set as the main search usage
+// receipts, so search() flushes it in its finally block instead of paying for
+// it inside the prerank phase.
+function _reportJevUsageBackground(lease, info) {
+  const pending = _reportJevUsage(lease, info)
+    .catch(() => {})
+    .finally(() => _pendingUsageReports.delete(pending));
+  _pendingUsageReports.add(pending);
+  return pending;
+}
+
 async function _runLocalBootstrapPhase({
   query,
   projectRoot,
@@ -781,6 +909,11 @@ async function _runLocalBootstrapPhase({
     outputTokens: null,
     topProbability: null,
     skipReason: null,
+    // null until key acquisition is actually attempted, so W7 can tell
+    // "never reached the screen" apart from "reached it and got nothing".
+    keySource: null,
+    keyId: null,
+    leaseError: null,
   };
   let jevPoolApplied = false;
 
@@ -788,46 +921,79 @@ async function _runLocalBootstrapPhase({
     jev.skipReason = "high_confidence";
   } else if (noJevScreen) {
     jev.skipReason = "disabled_by_flag";
-  } else if (!String(process.env.TYPESAFE_API_KEY || "").trim()) {
-    jev.skipReason = "missing_api_key";
   } else if (jevCandidates.length === 0) {
+    // Checked before the lease: a key leased for a screen that will not run
+    // holds a relay pool slot until its TTL expires.
     jev.skipReason = "no_candidates";
   } else {
-    jev.attempted = true;
-    onProgress?.(`[prerank] Jev choice screen candidates=${jevCandidates.length}`);
-    const screened = await screenCandidates({
-      query,
-      projectRoot,
-      candidates: jevCandidates,
-      apiKey: process.env.TYPESAFE_API_KEY,
-      timeoutMs: 5000,
-      maxCandidates: LOCAL_JEV_MAX_CANDIDATES,
-      skeletonChars: 400,
-    });
-    jev.success = screened.ok === true;
-    jev.elapsedMs = screened.elapsedMs || 0;
-    jev.inputTokens = screened.inputTokens ?? null;
-    jev.outputTokens = screened.outputTokens ?? null;
-    jev.topProbability = screened.topProbability ?? null;
-    jev.skipReason = screened.ok ? null : screened.reason || "request_failed";
-    if (screened.ok && Array.isArray(screened.candidates)) {
-      jevPoolApplied = true;
-      const byPath = new Map(screened.candidates.map((item) => [item.path, item]));
-      candidates = [...candidates].sort((left, right) => {
-        const leftProbability = byPath.get(left.path)?.probability;
-        const rightProbability = byPath.get(right.path)?.probability;
-        const leftRank = Number.isFinite(leftProbability) ? leftProbability : -1;
-        const rightRank = Number.isFinite(rightProbability) ? rightProbability : -1;
-        return rightRank - leftRank || Number(right.score || 0) - Number(left.score || 0) || left.path.localeCompare(right.path);
-      }).map((candidate) => {
-        const screenedCandidate = byPath.get(candidate.path);
-        if (!screenedCandidate) return candidate;
-        return {
-          ...candidate,
-          score: screenedCandidate.probability,
-          reasons: [...(candidate.reasons || []), `jev=${screenedCandidate.probability.toFixed(2)}`],
-        };
-      });
+    // Lease first, use second. The relay pool is the preferred source, the
+    // local env key is the fallback, and a relay failure is always recorded
+    // on the diagnostics rather than degrading into a silent skip.
+    const lease = await _leaseJevKey();
+    const envKey = String(process.env.TYPESAFE_API_KEY || "").trim();
+    if (!lease.ok) jev.leaseError = lease.error;
+    if (lease.ok) {
+      jev.keySource = "relay";
+      jev.keyId = lease.keyId || null;
+    } else {
+      jev.keySource = envKey ? "env_fallback" : "none";
+    }
+    const apiKey = lease.ok ? lease.apiKey : envKey;
+    if (!apiKey) {
+      jev.skipReason = "missing_api_key";
+    } else {
+      jev.attempted = true;
+      onProgress?.(`[prerank] Jev choice screen candidates=${jevCandidates.length} key=${jev.keySource}`);
+      let screened = null;
+      try {
+        screened = await screenCandidates({
+          query,
+          projectRoot,
+          candidates: jevCandidates,
+          apiKey,
+          timeoutMs: 5000,
+          maxCandidates: LOCAL_JEV_MAX_CANDIDATES,
+          skeletonChars: 400,
+        });
+      } finally {
+        // Failure receipts matter as much as success ones: they are what lets
+        // the relay cool a bad pooled key down.
+        if (lease.ok) {
+          _reportJevUsageBackground(lease, {
+            ok: screened?.ok === true,
+            inputTokens: screened?.inputTokens ?? null,
+            outputTokens: screened?.outputTokens ?? null,
+            statusCode: _jevScreenStatusCode(screened?.reason),
+            errorCode: screened?.ok === true ? "" : String(screened?.reason || "request_failed"),
+            durationMs: screened?.elapsedMs ?? null,
+          });
+        }
+      }
+      jev.success = screened.ok === true;
+      jev.elapsedMs = screened.elapsedMs || 0;
+      jev.inputTokens = screened.inputTokens ?? null;
+      jev.outputTokens = screened.outputTokens ?? null;
+      jev.topProbability = screened.topProbability ?? null;
+      jev.skipReason = screened.ok ? null : screened.reason || "request_failed";
+      if (screened.ok && Array.isArray(screened.candidates)) {
+        jevPoolApplied = true;
+        const byPath = new Map(screened.candidates.map((item) => [item.path, item]));
+        candidates = [...candidates].sort((left, right) => {
+          const leftProbability = byPath.get(left.path)?.probability;
+          const rightProbability = byPath.get(right.path)?.probability;
+          const leftRank = Number.isFinite(leftProbability) ? leftProbability : -1;
+          const rightRank = Number.isFinite(rightProbability) ? rightProbability : -1;
+          return rightRank - leftRank || Number(right.score || 0) - Number(left.score || 0) || left.path.localeCompare(right.path);
+        }).map((candidate) => {
+          const screenedCandidate = byPath.get(candidate.path);
+          if (!screenedCandidate) return candidate;
+          return {
+            ...candidate,
+            score: screenedCandidate.probability,
+            reasons: [...(candidate.reasons || []), `jev=${screenedCandidate.probability.toFixed(2)}`],
+          };
+        });
+      }
     }
   }
 
@@ -3476,6 +3642,9 @@ function _buildStructuredDiagnostics(result, options) {
     jev_screen_output_tokens: meta.jevScreen?.outputTokens ?? null,
     jev_screen_top_probability: meta.jevScreen?.topProbability ?? null,
     jev_screen_skip_reason: meta.jevScreen?.skipReason || null,
+    jev_key_source: meta.jevScreen?.keySource || null,
+    jev_key_id: meta.jevScreen?.keyId || null,
+    jev_lease_error: meta.jevScreen?.leaseError || null,
   };
 }
 
@@ -3534,6 +3703,8 @@ export const __test = {
   runLocalBootstrapPhase: _runLocalBootstrapPhase,
   formatLocalPrerankCandidates: _formatLocalPrerankCandidates,
   selectJevCandidates: _selectJevCandidates,
+  leaseJevKey: _leaseJevKey,
+  reportJevUsage: _reportJevUsage,
   correctLocalCandidatePath: _correctLocalCandidatePath,
   parseAnswer: _parseAnswer,
   parseToolCall: _parseToolCall,
