@@ -100,6 +100,10 @@ function buildSearchOptions(args, config) {
   if (!["classic", "bootstrap_hotspot"].includes(repoMapMode)) {
     throw new RangeError("repo-map-mode must be classic or bootstrap_hotspot.");
   }
+  const bootstrapMode = String(args["bootstrap-mode"] || config.yceEngineBootstrapMode || "local").trim().toLowerCase();
+  if (!["local", "remote"].includes(bootstrapMode)) {
+    throw new RangeError("bootstrap-mode must be local or remote.");
+  }
   return {
     maxTurns: toBoundedInt(args["max-turns"], { name: "max-turns", min: 1, max: 5, fallback: config.yceEngineMaxTurns }),
     maxCommands: toBoundedInt(args["max-commands"], { name: "max-commands", min: 1, max: 20, fallback: config.yceEngineMaxCommands }),
@@ -107,6 +111,7 @@ function buildSearchOptions(args, config) {
     treeDepth: toBoundedInt(args["tree-depth"], { name: "tree-depth", min: 0, max: 6, fallback: config.yceEngineTreeDepth }),
     excludePaths: args.exclude === undefined ? config.yceEngineExcludePaths : normalizeExcludePaths(args.exclude),
     repoMapMode,
+    bootstrapMode,
     bootstrapEnabled: parseBootstrapEnabled(args, config.yceEngineBootstrapEnabled),
     bootstrapTreeDepth: toBoundedInt(args["bootstrap-tree-depth"], { name: "bootstrap-tree-depth", min: 1, max: 3, fallback: config.yceEngineBootstrapTreeDepth }),
     hotspotTopK: toBoundedInt(args["hotspot-top-k"], { name: "hotspot-top-k", min: 0, max: 8, fallback: config.yceEngineHotspotTopK }),
@@ -114,6 +119,9 @@ function buildSearchOptions(args, config) {
     hotspotMaxBytes: toBoundedInt(args["hotspot-max-bytes"], { name: "hotspot-max-bytes", min: 16 * 1024, max: 250 * 1024, fallback: config.yceEngineHotspotMaxBytes }),
     bootstrapMaxTurns: toBoundedInt(args["bootstrap-max-turns"], { name: "bootstrap-max-turns", min: 1, max: 5, fallback: config.yceEngineBootstrapMaxTurns }),
     bootstrapMaxCommands: toBoundedInt(args["bootstrap-max-commands"], { name: "bootstrap-max-commands", min: 1, max: 20, fallback: config.yceEngineBootstrapMaxCommands }),
+    noJevScreen: args["no-jev-screen"] === true || config.yceJevScreenEnabled === false,
+    codeContextEnabled: args["no-context"] !== true && config.yceCodeContextEnabled,
+    codeContextMaxTokens: config.yceCodeContextMaxTokens,
   };
 }
 
@@ -136,7 +144,7 @@ async function main() {
 
   if (args.help === true || args.h === true) {
     const payload = buildInvalidArgsResponse(
-      "Usage: node scripts/yce.js \"<query>\" [--mode auto|enhance|search|network|plan] [--task <id>|--no-task] [--with-network] [--network-profile quick|balanced|exhaustive] [--library <name>] [--repo <owner/name>] [--history <text>] [--cwd <path>] [--out <file|dir>] [--stdout-xml] [--xml-pretty] [--timeout-enhance-ms <n>] [--timeout-search-ms <n>] [--timeout-network-ms <n>] [--timeout-plan-ms <n>] [--with-search (plan)] [--search-context <text> (plan)] [--save <dir|file.md> (plan)] [--enable-web-search|--no-web-search (plan)] [--language zh-CN|en-US] [--plan-backend relay|local] [--enhance-backend relay|local] [--plan-provider claude|openai|openai-responses|gemini|codex|cursor|claude-code|qoder|kiro] [--plan-base-url <url>] [--plan-token <token>] [--plan-model <model>] [--plan-temperature <n>] [--max-turns 1-5] [--max-commands 1-20] [--max-results 1-30] [--tree-depth 0-6] [--exclude <glob[,glob]>] [--repo-map-mode classic|bootstrap_hotspot] [--bootstrap-enabled true|false|--no-bootstrap] [--bootstrap-tree-depth 1-3] [--hotspot-top-k 0-8] [--hotspot-tree-depth 1-4] [--hotspot-max-bytes 16384-256000] [--bootstrap-max-turns 1-5] [--bootstrap-max-commands 1-20] [--no-search] [--raw-events] [--json-pretty (legacy alias)] | node scripts/yce.js task <show [id]|list|check <n> --evidence <text>|done [--force]|new --goal <text> [--accept <text>]...> [--task <id>] [--cwd <path>]",
+      "Usage: node scripts/yce.js \"<query>\" [--mode auto|enhance|search|network|plan] [--task <id>|--no-task] [--with-network] [--network-profile quick|balanced|exhaustive] [--library <name>] [--repo <owner/name>] [--history <text>] [--cwd <path>] [--out <file|dir>] [--stdout-xml] [--xml-pretty] [--timeout-enhance-ms <n>] [--timeout-search-ms <n>] [--timeout-network-ms <n>] [--timeout-plan-ms <n>] [--with-search (plan)] [--search-context <text> (plan)] [--save <dir|file.md> (plan)] [--enable-web-search|--no-web-search (plan)] [--language zh-CN|en-US] [--plan-backend relay|local] [--enhance-backend relay|local] [--plan-provider claude|openai|openai-responses|gemini|codex|cursor|claude-code|qoder|kiro] [--plan-base-url <url>] [--plan-token <token>] [--plan-model <model>] [--plan-temperature <n>] [--max-turns 1-5] [--max-commands 1-20] [--max-results 1-30] [--tree-depth 0-6] [--exclude <glob[,glob]>] [--repo-map-mode classic|bootstrap_hotspot] [--bootstrap-mode local|remote] [--bootstrap-enabled true|false|--no-bootstrap] [--bootstrap-tree-depth 1-3] [--hotspot-top-k 0-8] [--hotspot-tree-depth 1-4] [--hotspot-max-bytes 16384-256000] [--bootstrap-max-turns 1-5] [--bootstrap-max-commands 1-20] [--no-jev-screen] [--no-search] [--no-context] [--raw-events] [--json-pretty (legacy alias)] | node scripts/yce.js task <show [id]|list|check <n> --evidence <text>|done [--force]|new --goal <text> [--accept <text>]...> [--task <id>] [--cwd <path>]",
       config,
       cwd
     );

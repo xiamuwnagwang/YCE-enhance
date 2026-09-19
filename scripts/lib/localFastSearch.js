@@ -675,6 +675,7 @@ function runLocalFastSearch({ query, cwd, maxResults = 10 }) {
       emptyResult: true,
       output: "No relevant files found by local fast fallback.",
       diagnostics: [],
+      files: [],
     };
   }
 
@@ -716,6 +717,7 @@ function runLocalFastSearch({ query, cwd, maxResults = 10 }) {
         `local fast fallback tokens: ${queryTerms.join(", ")}`,
         `hot dirs: ${hotDirs.join(", ") || "(none)"}`,
       ],
+      files: [],
     };
   }
 
@@ -741,6 +743,10 @@ function runLocalFastSearch({ query, cwd, maxResults = 10 }) {
     emptyResult: false,
     output,
     diagnostics: ["local fast fallback search"],
+    files: picked.map((item) => ({
+      path: item.filePath,
+      ranges: item.ranges.map((range) => [range.start, range.end]),
+    })),
   };
 }
 

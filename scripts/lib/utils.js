@@ -3,6 +3,10 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { runLocalFastSearch } = require("./localFastSearch");
+const {
+  buildCodeContext,
+  DEFAULT_CODE_CONTEXT_MAX_TOKENS,
+} = require("./codeContext");
 
 const ROOT_DIR = path.resolve(__dirname, "..", "..");
 function expandHomePath(inputPath) {
@@ -52,6 +56,10 @@ const DEFAULTS = {
   yceEngineHotspotMaxBytes: 120 * 1024,
   yceEngineBootstrapMaxTurns: 2,
   yceEngineBootstrapMaxCommands: 6,
+  yceEngineBootstrapMode: "local",
+  yceJevScreenEnabled: true,
+  yceCodeContextEnabled: true,
+  yceCodeContextMaxTokens: DEFAULT_CODE_CONTEXT_MAX_TOKENS,
   yceRelayUrl: "https://yce.aigy.de",
   defaultMode: "auto",
   timeoutEnhanceMs: 300000,
@@ -226,7 +234,7 @@ function buildYceEngineEnv(merged) {
   if (relayUrl) childEnv.YCE_RELAY_URL = relayUrl;
   if (relayToken) childEnv.YCE_RELAY_TOKEN = relayToken;
 
-  const passthroughKeys = ["YCE_API_KEY", "YCE_LOCAL_FALLBACK"];
+  const passthroughKeys = ["YCE_API_KEY", "YCE_LOCAL_FALLBACK", "TYPESAFE_API_KEY"];
 
   for (const key of passthroughKeys) {
     if (hasOwn(merged, key) && isNonEmptyString(merged[key])) {
@@ -262,6 +270,12 @@ function loadRuntimeConfig() {
     yceEngineHotspotMaxBytes: toBoundedIntOrFallback(merged.YCE_ENGINE_HOTSPOT_MAX_BYTES, DEFAULTS.yceEngineHotspotMaxBytes, 16 * 1024, 250 * 1024),
     yceEngineBootstrapMaxTurns: toBoundedIntOrFallback(merged.YCE_ENGINE_BOOTSTRAP_MAX_TURNS, DEFAULTS.yceEngineBootstrapMaxTurns, 1, 5),
     yceEngineBootstrapMaxCommands: toBoundedIntOrFallback(merged.YCE_ENGINE_BOOTSTRAP_MAX_COMMANDS, DEFAULTS.yceEngineBootstrapMaxCommands, 1, 20),
+    yceEngineBootstrapMode: ["local", "remote"].includes(String(merged.YCE_ENGINE_BOOTSTRAP_MODE || "").trim().toLowerCase())
+      ? String(merged.YCE_ENGINE_BOOTSTRAP_MODE).trim().toLowerCase()
+      : DEFAULTS.yceEngineBootstrapMode,
+    yceJevScreenEnabled: toBoolean(merged.YCE_JEV_SCREEN, DEFAULTS.yceJevScreenEnabled),
+    yceCodeContextEnabled: toBoolean(merged.YCE_CODE_CONTEXT, DEFAULTS.yceCodeContextEnabled),
+    yceCodeContextMaxTokens: toPositiveInt(merged.YCE_CODE_CONTEXT_MAX_TOKENS, DEFAULTS.yceCodeContextMaxTokens),
     promptEnhanceEnv: buildPromptEnhanceEnv(merged),
     yceEngineEnv: buildYceEngineEnv(merged),
     yceRelayUrl:
@@ -707,7 +721,25 @@ function findLineRanges(lines, tokens) {
   return ranges.map((range) => (range.start === range.end ? `L${range.start}` : `L${range.start}-${range.end}`));
 }
 
-function runLocalSearch({ query, cwd, maxResults = 10 }) {
+function localRangeToPair(range) {
+  if (Array.isArray(range) && range.length >= 2) {
+    return [Number(range[0]), Number(range[1])];
+  }
+  if (range && typeof range === "object") {
+    return [Number(range.start), Number(range.end)];
+  }
+  const match = String(range || "").match(/^L(\d+)(?:-(\d+))?$/);
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2] || match[1])];
+}
+
+function runLocalSearch({
+  query,
+  cwd,
+  maxResults = 10,
+  codeContextEnabled = true,
+  codeContextMaxTokens = DEFAULT_CODE_CONTEXT_MAX_TOKENS,
+}) {
   const result = {
     executed: true,
     success: true,
@@ -715,8 +747,17 @@ function runLocalSearch({ query, cwd, maxResults = 10 }) {
     raw_stdout: null,
     result_present: false,
     empty_result: false,
+    files: [],
     exit_code: 0,
     stderr_summary: ["local fallback search"],
+  };
+
+  const attachCodeContext = () => {
+    if (!codeContextEnabled || result.files.length === 0) return;
+    result.code_context = buildCodeContext(
+      { files: result.files },
+      { budgetTokens: codeContextMaxTokens, projectRoot: cwd },
+    );
   };
 
   const fast = runLocalFastSearch({ query, cwd, maxResults });
@@ -724,6 +765,8 @@ function runLocalSearch({ query, cwd, maxResults = 10 }) {
     result.result_present = true;
     result.raw_stdout = fast.output;
     result.stderr_summary = fast.diagnostics;
+    result.files = Array.isArray(fast.files) ? fast.files : [];
+    attachCodeContext();
     return { search: result, error: null };
   }
 
@@ -783,6 +826,10 @@ function runLocalSearch({ query, cwd, maxResults = 10 }) {
   }
 
   result.result_present = true;
+  result.files = picked.map((item) => ({
+    path: item.filePath,
+    ranges: item.ranges.map(localRangeToPair).filter(Boolean),
+  }));
   result.raw_stdout = [
     `Found ${picked.length} relevant files by local fallback.`,
     "",
@@ -794,6 +841,7 @@ function runLocalSearch({ query, cwd, maxResults = 10 }) {
     `local fallback tokens: ${tokens.join(", ")}`,
   ].join("\n");
 
+  attachCodeContext();
   return { search: result, error: null };
 }
 
@@ -959,6 +1007,32 @@ function serializeForStdout(payload, pretty = false) {
     pushLine(1, `<search ${attrs.join(" ")}>`);
     pushTextTag(2, "query", payload.search.query, { cdata: true, always: true });
     pushTextTag(2, "result", payload.search.raw_stdout, { cdata: true, always: true });
+    const codeContext = payload.search.code_context;
+    if (codeContext && Array.isArray(codeContext.files) && codeContext.files.length > 0) {
+      const budgetTokens = codeContext.budgetTokens ?? codeContext.budget_tokens ?? 0;
+      const usedTokens = codeContext.usedTokens ?? codeContext.used_tokens ?? 0;
+      pushLine(
+        2,
+        `<code-context budget-tokens="${xmlEscapeAttr(String(budgetTokens))}" used-tokens="${xmlEscapeAttr(String(usedTokens))}">`,
+      );
+      for (const file of codeContext.files) {
+        if (!file || typeof file !== "object") continue;
+        const filePath = file.path || file.filePath || "";
+        const startLine = file.startLine ?? file.start_line;
+        const endLine = file.endLine ?? file.end_line;
+        const fileAttrs = [
+          `path="${xmlEscapeAttr(String(filePath))}"`,
+          `start-line="${xmlEscapeAttr(String(startLine ?? ""))}"`,
+          `end-line="${xmlEscapeAttr(String(endLine ?? ""))}"`,
+        ];
+        if (file.content === undefined || file.content === null) {
+          pushLine(3, `<file ${fileAttrs.join(" ")}/>`);
+        } else {
+          pushLine(3, `<file ${fileAttrs.join(" ")}>${xmlCdata(file.content)}</file>`);
+        }
+      }
+      pushLine(2, `</code-context>`);
+    }
     if (payload.search.diagnostics && typeof payload.search.diagnostics === "object") {
       const diagnostics = payload.search.diagnostics;
       const scalarFields = [
@@ -980,6 +1054,20 @@ function serializeForStdout(payload, pretty = false) {
         ["hotspot-max-bytes", "hotspot_max_bytes"],
         ["bootstrap-max-turns", "bootstrap_max_turns"],
         ["bootstrap-max-commands", "bootstrap_max_commands"],
+        ["bootstrap-mode", "bootstrap_mode"],
+        ["bootstrap-remote-calls", "bootstrap_remote_calls"],
+        ["prerank-candidates", "prerank_candidates"],
+        ["prerank-elapsed-ms", "prerank_elapsed_ms"],
+        ["prerank-total-elapsed-ms", "prerank_total_elapsed_ms"],
+        ["prerank-lexical-hits", "prerank_lexical_hits"],
+        ["prerank-confidence", "prerank_confidence"],
+        ["jev-screen-attempted", "jev_screen_attempted"],
+        ["jev-screen-success", "jev_screen_success"],
+        ["jev-screen-elapsed-ms", "jev_screen_elapsed_ms"],
+        ["jev-screen-input-tokens", "jev_screen_input_tokens"],
+        ["jev-screen-output-tokens", "jev_screen_output_tokens"],
+        ["jev-screen-top-probability", "jev_screen_top_probability"],
+        ["jev-screen-skip-reason", "jev_screen_skip_reason"],
         ["turns-used", "turns_used"],
         ["error-type", "error_type"],
         ["project-path", "project_path"],
@@ -990,6 +1078,7 @@ function serializeForStdout(payload, pretty = false) {
         pushTextTag(3, tagName, diagnostics[key]);
       }
       pushStringList(3, "hot-dirs", "hot-dir", diagnostics.hot_dirs);
+      pushStringList(3, "prerank-candidate-paths", "prerank-candidate-path", diagnostics.prerank_candidate_paths);
       pushStringList(3, "exclude-paths", "exclude-path", diagnostics.exclude_paths);
       pushStringList(3, "ignore-patterns", "ignore-pattern", diagnostics.ignore_patterns);
       pushLine(2, `</diagnostics>`);

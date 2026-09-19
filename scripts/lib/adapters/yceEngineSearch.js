@@ -7,6 +7,10 @@ const {
   runCommand,
   summarizeText,
 } = require("../utils");
+const {
+  buildCodeContext,
+  DEFAULT_CODE_CONTEXT_MAX_TOKENS,
+} = require("../codeContext");
 
 function isLocalFallbackEnabled(env) {
   return String(env?.YCE_LOCAL_FALLBACK || "").trim().toLowerCase() === "true";
@@ -74,12 +78,16 @@ async function runYceEngineSearch({
   excludePaths = [],
   repoMapMode,
   bootstrapEnabled = true,
+  bootstrapMode = "local",
   bootstrapTreeDepth,
   hotspotTopK,
   hotspotTreeDepth,
   hotspotMaxBytes,
   bootstrapMaxTurns,
   bootstrapMaxCommands,
+  noJevScreen = false,
+  codeContextEnabled = true,
+  codeContextMaxTokens = DEFAULT_CODE_CONTEXT_MAX_TOKENS,
   env,
 }) {
   const result = {
@@ -90,13 +98,32 @@ async function runYceEngineSearch({
     result_present: false,
     empty_result: false,
     files: [],
+    code_context: null,
     grep_patterns: [],
     diagnostics: null,
     exit_code: null,
     stderr_summary: [],
   };
 
+  const runLocalFallback = () => runLocalSearch({
+    query,
+    cwd,
+    maxResults,
+    codeContextEnabled,
+    codeContextMaxTokens,
+  });
+
   if (!fileExists(scriptPath)) {
+    if (isLocalFallbackEnabled(env)) {
+      const fallback = runLocalFallback();
+      if (fallback.search.result_present || fallback.search.empty_result) {
+        return {
+          search: fallback.search,
+          error: buildError("yce-engine", "DEPENDENCY_NOT_FOUND", `yce-engine script not found: ${scriptPath}`),
+          durationMs: 0,
+        };
+      }
+    }
     return {
       search: result,
       error: buildError("yce-engine", "DEPENDENCY_NOT_FOUND", `yce-engine script not found: ${scriptPath}`),
@@ -119,12 +146,14 @@ async function runYceEngineSearch({
   if (Number.isInteger(treeDepth)) args.push("--tree-depth", String(treeDepth));
   for (const excludePath of excludePaths) args.push("--exclude", String(excludePath));
   if (repoMapMode) args.push("--repo-map-mode", String(repoMapMode));
+  if (bootstrapMode) args.push("--bootstrap-mode", String(bootstrapMode));
   if (Number.isInteger(bootstrapTreeDepth)) args.push("--bootstrap-tree-depth", String(bootstrapTreeDepth));
   if (Number.isInteger(hotspotTopK)) args.push("--hotspot-top-k", String(hotspotTopK));
   if (Number.isInteger(hotspotTreeDepth)) args.push("--hotspot-tree-depth", String(hotspotTreeDepth));
   if (Number.isInteger(hotspotMaxBytes)) args.push("--hotspot-max-bytes", String(hotspotMaxBytes));
   if (Number.isInteger(bootstrapMaxTurns)) args.push("--bootstrap-max-turns", String(bootstrapMaxTurns));
   if (Number.isInteger(bootstrapMaxCommands)) args.push("--bootstrap-max-commands", String(bootstrapMaxCommands));
+  if (noJevScreen === true) args.push("--no-jev-screen");
   // The engine gets a smaller internal budget than the subprocess kill timer,
   // so on timeout it can still flush its structured JSON (partial results,
   // quota codes, diagnostics) before SIGTERM. Equal budgets made SIGTERM win
@@ -155,10 +184,17 @@ async function runYceEngineSearch({
     result.diagnostics = payload.diagnostics && typeof payload.diagnostics === "object" ? payload.diagnostics : null;
   }
 
+  if (codeContextEnabled && result.result_present && result.files.length > 0) {
+    result.code_context = buildCodeContext(
+      { files: result.files },
+      { budgetTokens: codeContextMaxTokens, projectRoot: cwd },
+    );
+  }
+
   const failWithLocalFallback = (code, message) => {
     const error = buildError("yce-engine", code, message);
     if (isLocalFallbackEnabled(env)) {
-      const fallback = runLocalSearch({ query, cwd, maxResults });
+      const fallback = runLocalFallback();
       if (fallback.search.result_present) {
         fallback.search.raw_stdout = [
           fallback.search.raw_stdout,
@@ -194,7 +230,7 @@ async function runYceEngineSearch({
       if (result.result_present) return { search: result, error: null, durationMs };
       if (result.empty_result) {
         if (isLocalFallbackEnabled(env)) {
-          const fallback = runLocalSearch({ query, cwd, maxResults });
+          const fallback = runLocalFallback();
           fallback.search.diagnostics = { source: "local_fallback" };
           if (fallback.search.result_present) return { search: fallback.search, error: null, durationMs };
         }
@@ -214,7 +250,7 @@ async function runYceEngineSearch({
     const semanticFailure = detectYceEngineSemanticFailure(commandResult.stdout, commandResult.stderr);
     if (semanticFailure) {
       if (isLocalFallbackEnabled(env)) {
-        const fallback = runLocalSearch({ query, cwd, maxResults });
+        const fallback = runLocalFallback();
         if (fallback.search.result_present) {
           fallback.search.raw_stdout = [
             fallback.search.raw_stdout,
@@ -251,7 +287,7 @@ async function runYceEngineSearch({
 
     if (/Found 0 relevant files|No relevant files found/i.test(stdout) || !stdout) {
       if (isLocalFallbackEnabled(env)) {
-        const fallback = runLocalSearch({ query, cwd, maxResults });
+        const fallback = runLocalFallback();
         if (fallback.search.result_present) {
           fallback.search.raw_stdout = [
             fallback.search.raw_stdout,
@@ -280,7 +316,7 @@ async function runYceEngineSearch({
 
   const mapped = mapYceEngineFailure(payload?.error || commandResult.stderr || commandResult.stdout);
   if (isLocalFallbackEnabled(env)) {
-    const fallback = runLocalSearch({ query, cwd, maxResults });
+    const fallback = runLocalFallback();
     if (fallback.search.result_present) {
       fallback.search.raw_stdout = [
         fallback.search.raw_stdout,
