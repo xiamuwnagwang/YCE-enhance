@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const { spawnSync } = require("child_process");
 
 // These constants independently reproduce the curation behavior documented for
 // Better Context Engine (curate.go/service.go); this implementation does not
@@ -261,6 +262,211 @@ function buildCodeContext(input, options = {}) {
   };
 }
 
+// This reproduces the observed intent of BCE's relatedSymbolHints
+// (relate.go:359-428) -- surface grep-able leads for identifiers that show
+// up in the curated snippets but are not themselves declared there -- using
+// only regex extraction and `rg` lookups. It does not read or copy BCE
+// source.
+const RELATED_SYMBOLS_MIN_IDENTIFIER_LENGTH = 4;
+const RELATED_SYMBOLS_MAX_RESULTS = 8;
+const RELATED_SYMBOLS_MAX_FANOUT_FILES = 15;
+const RELATED_SYMBOLS_RG_TIMEOUT_MS = 1200;
+const RELATED_SYMBOLS_DECLARATION_KEYWORDS = ["func", "function", "class", "type", "interface", "struct", "def"];
+const RELATED_SYMBOLS_RG_GLOBS = [
+  "!node_modules/**",
+  "!.git/**",
+  "!dist/**",
+  "!build/**",
+  "!coverage/**",
+  "!vendor/**",
+];
+
+const DECLARATION_KEYWORD_SET = new Set(RELATED_SYMBOLS_DECLARATION_KEYWORDS);
+const IDENTIFIER_RE = /\b[A-Za-z_][A-Za-z0-9_]{3,}\b/g;
+const DECLARATION_RE = new RegExp(`\\b(${RELATED_SYMBOLS_DECLARATION_KEYWORDS.join("|")})\\s+([A-Za-z_][A-Za-z0-9_]*)`, "g");
+const DECLARATION_LINE_RE = new RegExp(`\\b(${RELATED_SYMBOLS_DECLARATION_KEYWORDS.join("|")})\\s+([A-Za-z_][A-Za-z0-9_]*)\\b`);
+
+let cachedRelatedSymbolsRgPath = null;
+
+function resolveRelatedSymbolsRgPath() {
+  if (cachedRelatedSymbolsRgPath !== null) return cachedRelatedSymbolsRgPath;
+  try {
+    const rootDir = path.resolve(__dirname, "..", "..");
+    // eslint-disable-next-line import/no-dynamic-require, global-require
+    const ripgrep = require(path.join(rootDir, "vendor/yce-engine/node_modules/@vscode/ripgrep"));
+    cachedRelatedSymbolsRgPath = ripgrep.rgPath || "rg";
+  } catch {
+    cachedRelatedSymbolsRgPath = "rg";
+  }
+  return cachedRelatedSymbolsRgPath;
+}
+
+function escapeRegExpLiteral(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Scan the already-curated snippet bodies for candidate identifiers: tokens
+ * of at least 4 characters that are not themselves declared (via one of the
+ * BCE-observed declaration keywords) inside the shown snippets. Candidates
+ * are ranked by how often they are referenced across the snippets.
+ */
+function extractCandidateSymbols(codeContext) {
+  const files = codeContext && Array.isArray(codeContext.files) ? codeContext.files : [];
+  const defined = new Set();
+  const counts = new Map();
+  const order = [];
+
+  for (const file of files) {
+    if (!file || typeof file.content !== "string" || file.content === "") continue;
+    const content = file.content;
+
+    DECLARATION_RE.lastIndex = 0;
+    let declMatch;
+    while ((declMatch = DECLARATION_RE.exec(content))) {
+      defined.add(declMatch[2]);
+    }
+
+    IDENTIFIER_RE.lastIndex = 0;
+    let idMatch;
+    while ((idMatch = IDENTIFIER_RE.exec(content))) {
+      const token = idMatch[0];
+      if (DECLARATION_KEYWORD_SET.has(token)) continue;
+      if (!counts.has(token)) {
+        counts.set(token, 0);
+        order.push(token);
+      }
+      counts.set(token, counts.get(token) + 1);
+    }
+  }
+
+  return order
+    .filter((token) => !defined.has(token))
+    .map((name) => ({ name, count: counts.get(name) }))
+    .sort((a, b) => b.count - a.count);
+}
+
+/**
+ * Resolve declaration sites for a bounded set of candidate symbol names with
+ * a single `rg` invocation (one process spawn regardless of candidate
+ * count), matching the probe-grep spawn/timeout/ignore conventions used by
+ * localFastSearch.js. Symbols declared in more than
+ * RELATED_SYMBOLS_MAX_FANOUT_FILES files are treated as too generic and
+ * dropped.
+ */
+function findSymbolDeclarations(candidateNames, options = {}) {
+  const result = new Map();
+  if (!Array.isArray(candidateNames) || candidateNames.length === 0) return result;
+
+  const projectRoot = typeof options.projectRoot === "string" && options.projectRoot
+    ? options.projectRoot
+    : process.cwd();
+  const timeoutMs = Number.isInteger(options.timeoutMs) && options.timeoutMs > 0
+    ? options.timeoutMs
+    : RELATED_SYMBOLS_RG_TIMEOUT_MS;
+
+  const namesPattern = candidateNames.map(escapeRegExpLiteral).join("|");
+  const pattern = `\\b(${RELATED_SYMBOLS_DECLARATION_KEYWORDS.join("|")})\\s+(${namesPattern})\\b`;
+  const args = [
+    "--no-heading",
+    "-n",
+    "--max-count",
+    "20",
+    ...RELATED_SYMBOLS_RG_GLOBS.flatMap((glob) => ["--glob", glob]),
+    pattern,
+    projectRoot,
+  ];
+
+  let spawnResult;
+  try {
+    spawnResult = spawnSync(resolveRelatedSymbolsRgPath(), args, {
+      encoding: "utf8",
+      timeout: timeoutMs,
+      maxBuffer: 4 * 1024 * 1024,
+      env: { ...process.env, RIPGREP_CONFIG_PATH: "" },
+    });
+  } catch {
+    return result;
+  }
+  if (!spawnResult || !spawnResult.stdout) return result;
+
+  const candidateSet = new Set(candidateNames);
+  const fanoutFiles = new Map();
+  const firstSeen = new Map();
+
+  for (const rawLine of spawnResult.stdout.split(/\r?\n/)) {
+    if (!rawLine) continue;
+    const lineMatch = rawLine.match(/^(.+?):(\d+):(.*)$/);
+    if (!lineMatch) continue;
+    const [, filePath, lineNoText, content] = lineMatch;
+    const declMatch = content.match(DECLARATION_LINE_RE);
+    if (!declMatch) continue;
+    const kind = declMatch[1];
+    const name = declMatch[2];
+    if (!candidateSet.has(name)) continue;
+
+    const absolutePath = path.isAbsolute(filePath) ? filePath : path.resolve(filePath);
+    const relPath = path.relative(projectRoot, absolutePath).replace(/\\/g, "/") || filePath;
+
+    let files = fanoutFiles.get(name);
+    if (!files) {
+      files = new Set();
+      fanoutFiles.set(name, files);
+    }
+    files.add(relPath);
+
+    if (!firstSeen.has(name)) {
+      firstSeen.set(name, { path: relPath, line: Number(lineNoText), kind });
+    }
+  }
+
+  for (const name of candidateNames) {
+    const files = fanoutFiles.get(name);
+    if (!files || files.size === 0) continue;
+    if (files.size > RELATED_SYMBOLS_MAX_FANOUT_FILES) continue;
+    const first = firstSeen.get(name);
+    if (first) result.set(name, first);
+  }
+
+  return result;
+}
+
+/**
+ * Build the `<related-symbols>` payload for a code-context result: grep
+ * leads for referenced-but-not-shown identifiers, capped at
+ * RELATED_SYMBOLS_MAX_RESULTS entries. Returns null when there is nothing to
+ * report (no snippet bodies, no surviving candidates, or no declaration
+ * found for any of them).
+ */
+function buildRelatedSymbols(codeContext, options = {}) {
+  const maxResults = Number.isInteger(options.maxResults) && options.maxResults > 0
+    ? options.maxResults
+    : RELATED_SYMBOLS_MAX_RESULTS;
+
+  const candidates = extractCandidateSymbols(codeContext).slice(0, maxResults);
+  if (candidates.length === 0) return null;
+
+  const declarations = findSymbolDeclarations(candidates.map((candidate) => candidate.name), {
+    projectRoot: options.projectRoot,
+    timeoutMs: options.timeoutMs,
+  });
+
+  const symbols = [];
+  for (const candidate of candidates) {
+    const declaration = declarations.get(candidate.name);
+    if (!declaration) continue;
+    symbols.push({
+      name: candidate.name,
+      path: declaration.path,
+      line: declaration.line,
+      kind: declaration.kind,
+    });
+  }
+
+  if (symbols.length === 0) return null;
+  return { symbols };
+}
+
 module.exports = {
   CHARS_PER_TOKEN,
   DEFAULT_CODE_CONTEXT_MAX_TOKENS,
@@ -268,8 +474,14 @@ module.exports = {
   EXPAND_PAD_LINES,
   MERGE_GAP_LINES,
   PER_FILE_SEGMENT_CAP,
+  RELATED_SYMBOLS_MAX_FANOUT_FILES,
+  RELATED_SYMBOLS_MAX_RESULTS,
+  RELATED_SYMBOLS_MIN_IDENTIFIER_LENGTH,
   buildCodeContext,
+  buildRelatedSymbols,
   curateRanges,
+  extractCandidateSymbols,
+  findSymbolDeclarations,
   mergeRanges,
   normalizeRanges,
 };

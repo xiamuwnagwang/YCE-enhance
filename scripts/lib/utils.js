@@ -5,6 +5,7 @@ const { spawn } = require("child_process");
 const { runLocalFastSearch } = require("./localFastSearch");
 const {
   buildCodeContext,
+  buildRelatedSymbols,
   DEFAULT_CODE_CONTEXT_MAX_TOKENS,
 } = require("./codeContext");
 
@@ -1024,6 +1025,7 @@ function serializeForStdout(payload, pretty = false) {
     pushTextTag(2, "query", payload.search.query, { cdata: true, always: true });
     pushTextTag(2, "result", payload.search.raw_stdout, { cdata: true, always: true });
     const codeContext = payload.search.code_context;
+    let relatedSymbolsElapsedMs = null;
     if (codeContext && Array.isArray(codeContext.files) && codeContext.files.length > 0) {
       const budgetTokens = codeContext.budgetTokens ?? codeContext.budget_tokens ?? 0;
       const usedTokens = codeContext.usedTokens ?? codeContext.used_tokens ?? 0;
@@ -1048,9 +1050,28 @@ function serializeForStdout(payload, pretty = false) {
         }
       }
       pushLine(2, `</code-context>`);
+
+      const relatedSymbolsStartedAt = Date.now();
+      const relatedSymbols = buildRelatedSymbols(codeContext, { projectRoot: payload.cwd });
+      relatedSymbolsElapsedMs = Date.now() - relatedSymbolsStartedAt;
+      if (relatedSymbols && Array.isArray(relatedSymbols.symbols) && relatedSymbols.symbols.length > 0) {
+        pushLine(2, `<related-symbols>`);
+        for (const symbol of relatedSymbols.symbols) {
+          const symbolAttrs = [
+            `name="${xmlEscapeAttr(String(symbol.name))}"`,
+            `path="${xmlEscapeAttr(String(symbol.path))}"`,
+            `line="${xmlEscapeAttr(String(symbol.line))}"`,
+            `kind="${xmlEscapeAttr(String(symbol.kind))}"`,
+          ];
+          pushLine(3, `<symbol ${symbolAttrs.join(" ")}/>`);
+        }
+        pushLine(2, `</related-symbols>`);
+      }
     }
     if (payload.search.diagnostics && typeof payload.search.diagnostics === "object") {
-      const diagnostics = payload.search.diagnostics;
+      const diagnostics = relatedSymbolsElapsedMs !== null
+        ? { ...payload.search.diagnostics, related_symbols_elapsed_ms: relatedSymbolsElapsedMs }
+        : payload.search.diagnostics;
       const scalarFields = [
         ["tree-depth", "tree_depth"],
         ["requested-tree-depth", "requested_tree_depth"],
@@ -1095,6 +1116,7 @@ function serializeForStdout(payload, pretty = false) {
         ["cache-age-ms", "cache_age_ms"],
         ["cache-fingerprint", "cache_fingerprint"],
         ["cache-fingerprint-ms", "cache_fingerprint_ms"],
+        ["related-symbols-elapsed-ms", "related_symbols_elapsed_ms"],
       ];
       pushLine(2, `<diagnostics>`);
       for (const [tagName, key] of scalarFields) {
