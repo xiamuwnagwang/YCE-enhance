@@ -61,6 +61,8 @@ const DEFAULTS = {
   yceCodeContextEnabled: true,
   yceCodeContextMaxTokens: DEFAULT_CODE_CONTEXT_MAX_TOKENS,
   yceRelayUrl: "https://yce.aigy.de",
+  yceSearchCacheEnabled: true,
+  yceSearchCacheTtlMs: 21600000,
   defaultMode: "auto",
   timeoutEnhanceMs: 300000,
   timeoutAutoEnhanceMs: 60000,
@@ -242,6 +244,18 @@ function buildYceEngineEnv(merged) {
     }
   }
 
+  // Normalized so the search-cache layer always sees resolved values,
+  // regardless of whether the caller set YCE_SEARCH_CACHE at all.
+  childEnv.YCE_SEARCH_CACHE = toBoolean(merged.YCE_SEARCH_CACHE, DEFAULTS.yceSearchCacheEnabled)
+    ? "true"
+    : "off";
+  childEnv.YCE_SEARCH_CACHE_TTL_MS = String(
+    toPositiveInt(merged.YCE_SEARCH_CACHE_TTL_MS, DEFAULTS.yceSearchCacheTtlMs),
+  );
+  if (hasOwn(merged, "YCE_SEARCH_CACHE_DIR") && isNonEmptyString(merged.YCE_SEARCH_CACHE_DIR)) {
+    childEnv.YCE_SEARCH_CACHE_DIR = String(merged.YCE_SEARCH_CACHE_DIR).trim();
+  }
+
   return childEnv;
 }
 
@@ -282,6 +296,8 @@ function loadRuntimeConfig() {
       (isNonEmptyString(merged.YCE_RELAY_URL)
         ? String(merged.YCE_RELAY_URL).trim()
         : "") || DEFAULTS.yceRelayUrl,
+    yceSearchCacheEnabled: toBoolean(merged.YCE_SEARCH_CACHE, DEFAULTS.yceSearchCacheEnabled),
+    yceSearchCacheTtlMs: toPositiveInt(merged.YCE_SEARCH_CACHE_TTL_MS, DEFAULTS.yceSearchCacheTtlMs),
     yceRelayToken: isNonEmptyString(merged.YCE_RELAY_TOKEN)
       ? String(merged.YCE_RELAY_TOKEN).trim()
       : "",
@@ -1075,6 +1091,10 @@ function serializeForStdout(payload, pretty = false) {
         ["error-type", "error_type"],
         ["project-path", "project_path"],
         ["ignore-file", "ignore_file"],
+        ["cache-hit", "cache_hit"],
+        ["cache-age-ms", "cache_age_ms"],
+        ["cache-fingerprint", "cache_fingerprint"],
+        ["cache-fingerprint-ms", "cache_fingerprint_ms"],
       ];
       pushLine(2, `<diagnostics>`);
       for (const [tagName, key] of scalarFields) {

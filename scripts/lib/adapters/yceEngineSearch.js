@@ -11,6 +11,13 @@ const {
   buildCodeContext,
   DEFAULT_CODE_CONTEXT_MAX_TOKENS,
 } = require("../codeContext");
+const {
+  buildCacheKey,
+  computeFingerprint,
+  readCacheEntry,
+  resolveCacheConfig,
+  writeCacheEntry,
+} = require("../searchCache");
 
 function isLocalFallbackEnabled(env) {
   return String(env?.YCE_LOCAL_FALLBACK || "").trim().toLowerCase() === "true";
@@ -139,6 +146,57 @@ async function runYceEngineSearch({
     };
   }
 
+  const cacheConfig = resolveCacheConfig(env || {});
+  let cacheKey = null;
+  let cacheFingerprint = null;
+  let cacheFingerprintMs = 0;
+  const cacheLookupStartedAt = Date.now();
+  if (cacheConfig.enabled) {
+    const fp = computeFingerprint(cwd);
+    cacheFingerprint = fp.fingerprint;
+    cacheFingerprintMs = fp.elapsedMs;
+    cacheKey = buildCacheKey({
+      fingerprint: cacheFingerprint,
+      cwd,
+      query,
+      maxResults,
+      maxTurns,
+      scriptPath,
+      bootstrapMode,
+    });
+    const cached = readCacheEntry(cacheConfig.dir, cacheKey, cacheConfig.ttlMs);
+    if (cached) {
+      const hitResult = {
+        executed: true,
+        success: cached.success === true,
+        query,
+        raw_stdout: cached.raw_stdout ?? null,
+        result_present: cached.result_present === true,
+        empty_result: cached.empty_result === true,
+        files: Array.isArray(cached.files) ? cached.files : [],
+        code_context: null,
+        grep_patterns: Array.isArray(cached.grep_patterns) ? cached.grep_patterns : [],
+        diagnostics: cached.diagnostics && typeof cached.diagnostics === "object" ? { ...cached.diagnostics } : null,
+        exit_code: cached.exit_code ?? null,
+        stderr_summary: Array.isArray(cached.stderr_summary) ? cached.stderr_summary : [],
+      };
+      if (codeContextEnabled && hitResult.result_present && hitResult.files.length > 0) {
+        hitResult.code_context = buildCodeContext(
+          { files: hitResult.files },
+          { budgetTokens: codeContextMaxTokens, projectRoot: cwd },
+        );
+      }
+      hitResult.diagnostics = {
+        ...(hitResult.diagnostics || {}),
+        cache_hit: true,
+        cache_age_ms: Date.now() - cached.storedAt,
+        cache_fingerprint: cacheFingerprint,
+        cache_fingerprint_ms: cacheFingerprintMs,
+      };
+      return { search: hitResult, error: null, durationMs: Date.now() - cacheLookupStartedAt };
+    }
+  }
+
   const args = [scriptPath, "--project", cwd, "--query", query, "--json"];
   if (Number.isInteger(maxResults) && maxResults > 0) args.push("--max-results", String(maxResults));
   if (Number.isInteger(maxTurns) && maxTurns > 0) args.push("--max-turns", String(maxTurns));
@@ -227,7 +285,35 @@ async function runYceEngineSearch({
         };
       }
       result.success = true;
-      if (result.result_present) return { search: result, error: null, durationMs };
+      if (result.result_present) {
+        if (cacheConfig.enabled && cacheKey) {
+          writeCacheEntry(
+            cacheConfig.dir,
+            cacheKey,
+            {
+              query,
+              files: result.files,
+              grep_patterns: result.grep_patterns,
+              raw_stdout: result.raw_stdout,
+              diagnostics: result.diagnostics,
+              exit_code: result.exit_code,
+              stderr_summary: result.stderr_summary,
+              success: result.success,
+              result_present: result.result_present,
+              empty_result: result.empty_result,
+            },
+            cacheConfig.ttlMs,
+          );
+          result.diagnostics = {
+            ...(result.diagnostics || {}),
+            cache_hit: false,
+            cache_age_ms: 0,
+            cache_fingerprint: cacheFingerprint,
+            cache_fingerprint_ms: cacheFingerprintMs,
+          };
+        }
+        return { search: result, error: null, durationMs };
+      }
       if (result.empty_result) {
         if (isLocalFallbackEnabled(env)) {
           const fallback = runLocalFallback();
