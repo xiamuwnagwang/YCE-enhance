@@ -1,6 +1,6 @@
 # yce-mcp：stdio MCP server
 
-把 YCE CLI 包成 MCP 工具，给只会走 MCP 的宿主用。协议正文仍是 `SKILL.md`：闸门、哨兵、读结果的规矩一条不变，MCP 只换了调用方式。子包在 `mcp/`，版本与 skill 对齐 `3.5.0`。
+把 YCE CLI 包成 MCP 工具，给只会走 MCP 的宿主用。协议正文仍是 `SKILL.md`：闸门、哨兵、读结果的规矩一条不变，MCP 只换了调用方式。子包在 `mcp/`，MCP 版本走自己的 `2.0` 序列（当前 `2.0.0`，与 skill 版本各自独立）。
 
 ## 安装
 

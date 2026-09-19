@@ -2,7 +2,7 @@
 
 stdio MCP server，把本仓的 YCE CLI（`scripts/yce.js`）包成 6 个工具。它只负责转发：每个工具都 `spawn` 一次 `scripts/yce.js`，不复制 `scripts/lib/orchestrator.js` 的分发逻辑，也不直连引擎。模式、参数表、闸门判据仍然只有 CLI 一个来源。
 
-版本与 skill 对齐：`3.5.0`。
+MCP 版本走自己的 `2.0` 序列：当前 `2.0.0`，与 skill 版本各自独立。
 
 ## 安装与启动
 

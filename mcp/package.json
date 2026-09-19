@@ -1,6 +1,6 @@
 {
   "name": "yce-mcp",
-  "version": "3.5.0",
+  "version": "2.0.0",
   "description": "stdio MCP server that exposes the YCE CLI (scripts/yce.js) as tools: search / enhance / network / plan / task / read-result.",
   "license": "GPL-3.0-or-later",
   "type": "module",
