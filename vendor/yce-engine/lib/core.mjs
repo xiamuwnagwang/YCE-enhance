@@ -764,10 +764,33 @@ function _filterTopDirsForLocalQuery(projectRoot, topDirs, query) {
 // never be reported as "YCE relay key lease failed". Failures are values, so
 // the caller can fall back to the local env key without any thrown error.
 
+// The two terminal verdicts /yce/jev-lease can return, mapped to the skip
+// reason each one lands on. 403 JEV_NOT_ENTITLED means this user has no screen
+// entitlement; 503 JEV_POOL_EXHAUSTED means the pool holds no usable entry at
+// all ("no money"). Both are the relay's final word, so the local env key must
+// stay untouched — reaching for it would quietly re-enable a screen the relay
+// just refused to fund. Everything else — 503 NO_JEV_KEY (every candidate is
+// merely cooling down), 503 JEV_SCHEDULER_UNAVAILABLE, 500
+// JEV_POOL_LOAD_FAILED, transport failures, and any code an older or newer
+// relay invents — is non-terminal and keeps the env fallback. That default
+// direction is deliberate: the relay fails closed, the engine fails open, so a
+// code the engine does not recognize never silently disables a paying user's
+// screen.
+const JEV_TERMINAL_LEASE_CODES = new Map([
+  ["JEV_NOT_ENTITLED", "not_entitled"],
+  ["JEV_POOL_EXHAUSTED", "pool_exhausted"],
+]);
+
+function _jevLeaseFailure(code, error) {
+  return { ok: false, code, error, terminal: JEV_TERMINAL_LEASE_CODES.has(code) };
+}
+
 async function _leaseJevKey() {
   const relayUrl = _normalizeRelayUrl(process.env.YCE_RELAY_URL) || DEFAULT_YCE_RELAY_ORIGIN;
   const relayToken = String(process.env.YCE_RELAY_TOKEN || "").trim();
-  if (!relayToken) return { ok: false, error: "missing relay token (set YCE_RELAY_TOKEN)" };
+  if (!relayToken) {
+    return _jevLeaseFailure("MISSING_RELAY_TOKEN", "missing relay token (set YCE_RELAY_TOKEN)");
+  }
 
   try {
     const response = await fetch(`${relayUrl}/yce/jev-lease`, {
@@ -780,18 +803,23 @@ async function _leaseJevKey() {
       body: JSON.stringify({}),
       signal: AbortSignal.timeout(JEV_LEASE_TIMEOUT_MS),
     });
-    // Every non-200 — 503 NO_JEV_KEY, 503 JEV_SCHEDULER_UNAVAILABLE and
-    // 500 JEV_POOL_LOAD_FAILED alike — becomes an error value the caller
-    // turns into an env fallback. Never a silent skip.
+    // Every non-200 becomes an error value carrying the relay's own code, so
+    // the caller can tell a terminal verdict from a transient one. Never a
+    // silent skip: the diagnostics always say what the relay answered.
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       const code = String(payload?.code || "").trim() || `HTTP ${response.status}`;
       const message = String(payload?.error || payload?.message || "").trim();
-      return { ok: false, error: message ? `${code}: ${message}` : code };
+      return _jevLeaseFailure(code, message ? `${code}: ${message}` : code);
     }
     const payload = await response.json().catch(() => ({}));
     const apiKey = String(payload?.api_key || "").trim();
-    if (!apiKey) return { ok: false, error: `HTTP ${response.status}: lease response carried no api_key` };
+    if (!apiKey) {
+      return _jevLeaseFailure(
+        "EMPTY_LEASE_RESPONSE",
+        `HTTP ${response.status}: lease response carried no api_key`,
+      );
+    }
     return {
       ok: true,
       apiKey,
@@ -803,7 +831,9 @@ async function _leaseJevKey() {
       selectionReason: String(payload?.selection_reason || "").trim(),
     };
   } catch (error) {
-    return { ok: false, error: `jev lease error: ${error?.message || String(error)}` };
+    // Timeouts and network errors mean the relay could not be reached at all,
+    // which says nothing about entitlement — keep the env fallback.
+    return _jevLeaseFailure("JEV_LEASE_TRANSPORT_ERROR", `jev lease error: ${error?.message || String(error)}`);
   }
 }
 
@@ -885,6 +915,10 @@ async function _runLocalBootstrapPhase({
   excludePaths,
   maxResults,
   noJevScreen = false,
+  // Pre-dispatched with the main /yce/lease-key response, so it costs no
+  // round trip of its own. null = this relay never said (old server, BYOK or
+  // a local YCE_API_KEY), which keeps the pre-W5 behavior.
+  jevScreenEnabled = null,
   onProgress,
 }) {
   const startedAt = Date.now();
@@ -914,6 +948,8 @@ async function _runLocalBootstrapPhase({
     keySource: null,
     keyId: null,
     leaseError: null,
+    // true|false from the relay, null when it never said.
+    entitled: typeof jevScreenEnabled === "boolean" ? jevScreenEnabled : null,
   };
   let jevPoolApplied = false;
 
@@ -921,6 +957,14 @@ async function _runLocalBootstrapPhase({
     jev.skipReason = "high_confidence";
   } else if (noJevScreen) {
     jev.skipReason = "disabled_by_flag";
+  } else if (jev.entitled === false) {
+    // The main lease already told us this user has no screen entitlement, so
+    // /yce/jev-lease could only answer 403. Not sending it is the whole point:
+    // an unentitled user pays zero extra round trips. keySource stays null
+    // because no key was ever reached for, and TYPESAFE_API_KEY is not read —
+    // "no entitlement" and "no money" must not quietly fall back to a local
+    // key.
+    jev.skipReason = "not_entitled";
   } else if (jevCandidates.length === 0) {
     // Checked before the lease: a key leased for a screen that will not run
     // holds a relay pool slot until its TTL expires.
@@ -930,8 +974,14 @@ async function _runLocalBootstrapPhase({
     // local env key is the fallback, and a relay failure is always recorded
     // on the diagnostics rather than degrading into a silent skip.
     const lease = await _leaseJevKey();
-    const envKey = String(process.env.TYPESAFE_API_KEY || "").trim();
     if (!lease.ok) jev.leaseError = lease.error;
+    // A terminal verdict ends the attempt right here. The env key is not even
+    // read: 403 JEV_NOT_ENTITLED and 503 JEV_POOL_EXHAUSTED are the relay
+    // saying this screen must not run, and a local key would override that.
+    const terminalSkipReason = lease.ok || !lease.terminal
+      ? null
+      : JEV_TERMINAL_LEASE_CODES.get(lease.code) || null;
+    const envKey = terminalSkipReason ? "" : String(process.env.TYPESAFE_API_KEY || "").trim();
     if (lease.ok) {
       jev.keySource = "relay";
       jev.keyId = lease.keyId || null;
@@ -940,7 +990,7 @@ async function _runLocalBootstrapPhase({
     }
     const apiKey = lease.ok ? lease.apiKey : envKey;
     if (!apiKey) {
-      jev.skipReason = "missing_api_key";
+      jev.skipReason = terminalSkipReason || "missing_api_key";
     } else {
       jev.attempted = true;
       onProgress?.(`[prerank] Jev choice screen candidates=${jevCandidates.length} key=${jev.keySource}`);
@@ -1446,6 +1496,14 @@ async function _requestRelayLease({
           : undefined,
         usageMode: String(payload?.usage_mode || "").trim() || undefined,
         validationSource: String(payload?.validation_source || "").trim() || undefined,
+        // Pre-dispatched Jev screen entitlement. Unlike the capability fields
+        // above this one is null (not undefined) when the server omits it: the
+        // receipt contract is true|false|null, and undefined would vanish from
+        // the JSON. A relay that predates the field leaves the engine on its
+        // old behavior — ask for the key and let the lease answer.
+        jevScreenEnabled: typeof payload?.jev_screen_enabled === "boolean"
+          ? payload.jev_screen_enabled
+          : null,
       };
     }
     return null;
@@ -1548,6 +1606,10 @@ function _usageContextFromLease(leased) {
     maxStreamCalls: leased.maxStreamCalls,
     usageMode: leased.usageMode,
     validationSource: leased.validationSource,
+    // Carried here rather than on credentialState so every re-lease point
+    // (JWT lifecycle retry, cross-key retry, rate-limit alternate, the
+    // failover helper) refreshes it through the one funnel they all share.
+    jevScreenEnabled: leased.jevScreenEnabled ?? null,
   };
 }
 
@@ -3170,6 +3232,9 @@ async function _searchImpl({
         excludePaths: effectiveExcludePaths,
         maxResults,
         noJevScreen,
+        // Already in hand from the main lease, before prerank — the screen
+        // gate costs no round trip of its own.
+        jevScreenEnabled: credentialState.usageContext?.jevScreenEnabled ?? null,
         onProgress,
       });
       log(`Local prerank: candidates=${bootstrapHints.prerankCandidates}, elapsed_ms=${bootstrapHints.prerankElapsedMs}, jev=${bootstrapHints.jev.success ? "ok" : bootstrapHints.jev.skipReason || "failed"}`);
@@ -3641,6 +3706,9 @@ function _buildStructuredDiagnostics(result, options) {
     jev_screen_input_tokens: meta.jevScreen?.inputTokens ?? null,
     jev_screen_output_tokens: meta.jevScreen?.outputTokens ?? null,
     jev_screen_top_probability: meta.jevScreen?.topProbability ?? null,
+    // ?? not ||: false is the state this field exists to report, and || would
+    // collapse it into null.
+    jev_screen_entitled: meta.jevScreen?.entitled ?? null,
     jev_screen_skip_reason: meta.jevScreen?.skipReason || null,
     jev_key_source: meta.jevScreen?.keySource || null,
     jev_key_id: meta.jevScreen?.keyId || null,

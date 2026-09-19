@@ -1108,6 +1108,7 @@ function serializeForStdout(payload, pretty = false) {
         ["jev-key-source", "jev_key_source"],
         ["jev-key-id", "jev_key_id"],
         ["jev-lease-error", "jev_lease_error"],
+        ["jev-screen-entitled", "jev_screen_entitled"],
         ["turns-used", "turns_used"],
         ["error-type", "error_type"],
         ["project-path", "project_path"],
