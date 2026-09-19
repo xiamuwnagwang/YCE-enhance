@@ -3,10 +3,10 @@
 /**
  * Content-addressed cache for yce-engine search results.
  *
- * Key = sha256(revision | fingerprint | cwd | query | max-results | max-turns
- * | engineScriptPath | bootstrap-mode). The fingerprint proves the workspace
- * didn't change since the cached call; the rest of the tuple proves the call
- * itself didn't change. Only the engine's raw payload is cached — never the
+ * Key = sha256(revision | fingerprint | cwd | query | every search option the
+ * adapter turns into engine argv). The fingerprint proves the workspace didn't
+ * change since the cached call; the rest of the tuple proves the call itself
+ * didn't change. Only the engine's raw payload is cached — never the
  * <code-context> body, which must be re-read from disk on every hit so a
  * cache hit can't serve stale file content.
  */
@@ -16,7 +16,12 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
-const CACHE_REVISION = "v1";
+// v2: the v1 key only carried query/max-results/max-turns/script/bootstrap-mode,
+// so calls that differed only in --exclude, --no-jev-screen, --tree-depth,
+// --repo-map-mode or any hotspot/bootstrap knob shared one entry and served
+// each other's results. Bumping the revision orphans every v1 entry instead of
+// letting a stale one be read under the new composition rules.
+const CACHE_REVISION = "v2";
 const DEFAULT_TTL_MS = 21600000; // 6h
 const DISABLED_VALUES = new Set(["0", "false", "no", "off"]);
 
@@ -229,17 +234,84 @@ function computeFingerprint(cwd) {
   return { fingerprint: plain, elapsedMs: Date.now() - startedAt, mode: "plain" };
 }
 
-function buildCacheKey({ fingerprint, cwd, query, maxResults, maxTurns, scriptPath, bootstrapMode }) {
-  const raw = [
+/**
+ * Every option below mirrors one `if (...)` guard in the adapter's argv
+ * builder, predicate for predicate. The predicates are deliberately not
+ * uniform — `maxResults`/`maxTurns` require a positive integer while
+ * `treeDepth`/`hotspotTopK` accept 0 (both have min:0 in buildSearchOptions) —
+ * and a shared truthiness test would fold `--tree-depth 0` into "unset",
+ * recreating the very collision this revision fixes.
+ *
+ * The invariant: the key may be finer than argv (a spurious miss just costs a
+ * re-run) but never coarser (a coarse key serves the wrong result).
+ */
+function argvInt(value) {
+  return Number.isInteger(value) ? value : null;
+}
+
+function argvPositiveInt(value) {
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function argvFlagString(value) {
+  return value ? String(value) : null;
+}
+
+function buildCacheKey({
+  fingerprint,
+  cwd,
+  query,
+  maxResults,
+  maxTurns,
+  maxCommands,
+  treeDepth,
+  excludePaths = [],
+  repoMapMode,
+  bootstrapEnabled,
+  bootstrapMode,
+  bootstrapTreeDepth,
+  hotspotTopK,
+  hotspotTreeDepth,
+  hotspotMaxBytes,
+  bootstrapMaxTurns,
+  bootstrapMaxCommands,
+  noJevScreen,
+  scriptPath,
+}) {
+  // Sorted on a copy: the caller hands over the same array it uses to build
+  // argv, where --exclude order is the user's business, not the key's.
+  const normalizedExcludes = [...new Set(
+    (Array.isArray(excludePaths) ? excludePaths : [excludePaths])
+      .filter((item) => item !== undefined && item !== null)
+      .map((item) => String(item)),
+  )].sort();
+
+  // JSON over a fixed-order array rather than a delimiter join: `query` is
+  // free-form user text and exclude globs are near-arbitrary, so any separator
+  // character is one a value could contain.
+  const raw = JSON.stringify([
     CACHE_REVISION,
     fingerprint,
     cwd,
     query,
-    maxResults,
-    maxTurns,
+    argvPositiveInt(maxResults),
+    argvPositiveInt(maxTurns),
+    argvInt(maxCommands),
+    argvInt(treeDepth),
+    normalizedExcludes,
+    argvFlagString(repoMapMode),
+    // Only an explicit false flips the engine to --no-bootstrap.
+    bootstrapEnabled === false,
+    argvFlagString(bootstrapMode),
+    argvInt(bootstrapTreeDepth),
+    argvInt(hotspotTopK),
+    argvInt(hotspotTreeDepth),
+    argvInt(hotspotMaxBytes),
+    argvInt(bootstrapMaxTurns),
+    argvInt(bootstrapMaxCommands),
+    noJevScreen === true,
     scriptPath,
-    bootstrapMode,
-  ].join("|");
+  ]);
   return sha256(raw);
 }
 

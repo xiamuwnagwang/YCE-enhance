@@ -26,9 +26,11 @@ const RELAY_TOKEN = "relay-token-fixture";
 const ENV_KEY = "local-env-typesafe-key";
 const SCREEN_ENDPOINT = "api.typesafe.ai";
 
-// Matches the semantic-screen invitation regex, so the jev block is reached
-// without depending on the local preranker reporting low confidence.
-const SCREEN_QUERY = "invalidate the cache entry for a leased key";
+// Shares no term with the fixture repo, so the local preranker reports zero
+// lexical hits and low confidence — the only thing that opens the jev block now
+// that the query regex special cases are gone. The fallback pool is the fixture
+// files in path order, so file_0 is still internal/cache.go.
+const SCREEN_QUERY = "how does the scheduler rotate telemetry buckets";
 
 const TEST_RELAY_STATE_FILE = join(tmpdir(), `yce-jev-entitlement-state-${process.pid}.json`);
 coreTest.setRelayStateFile(TEST_RELAY_STATE_FILE);

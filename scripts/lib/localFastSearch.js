@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
+const { createTokenizer, FALLBACK_PROFILE } = require("../../vendor/yce-engine/lib/lexicon.cjs");
 
 let cachedRgPath = null;
 
@@ -174,44 +175,9 @@ const CONFIG_FILES = new Set([
   "tsconfig.json",
 ]);
 
-function stem(word) {
-  if (!word || word.length < 3) return word;
-  return word
-    .replace(/^(.+)(ies)$/, "$1y")
-    .replace(/^(.+)([^aeiou])(es)$/, "$1$2")
-    .replace(/^(.+)([^aeiou])(s)$/, "$1$2")
-    .replace(/^(.+)(ing|edly|ally|ation|tion|ment|ness|ful|less|able|ible|ive|ity|ly|ed)$/, "$1");
-}
-
-function splitCamelCase(text) {
-  return String(text || "")
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
-}
-
-function tokenize(text, options = {}) {
-  const { minLen = 2 } = options;
-  const raw = splitCamelCase(text)
-    .toLowerCase()
-    .replace(/[^\w\s\-./@$:\u4e00-\u9fa5]/g, " ")
-    .split(/[\s\-./\\@$:]+/)
-    .filter(Boolean);
-
-  const out = [];
-  for (const token of raw) {
-    if (/^[\u4e00-\u9fa5]+$/.test(token)) {
-      for (let index = 0; index < token.length - 1; index += 1) {
-        const pair = token.slice(index, index + 2);
-        if (!STOP_WORDS.has(pair)) out.push(pair);
-      }
-      if (token.length >= 2 && !STOP_WORDS.has(token)) out.push(token);
-      continue;
-    }
-    if (token.length < minLen || STOP_WORDS.has(token)) continue;
-    out.push(stem(token));
-  }
-  return [...new Set(out)];
-}
+// Stemming, camelCase splitting and CJK bigram handling live in the engine's
+// shared lexicon so this layer and the prerank scorer cannot drift apart again.
+const tokenize = createTokenizer({ profile: FALLBACK_PROFILE, stopWords: STOP_WORDS });
 
 function extractQueryAnchors(query) {
   const anchors = [];

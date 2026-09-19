@@ -73,6 +73,34 @@ function parseStructuredPayload(stdout) {
   }
 }
 
+/**
+ * A cache hit runs no jev screen and asks the relay nothing, so every
+ * `jev_*` diagnostic in the cached blob describes the *earlier* run:
+ * attempted/success/elapsed/tokens/top-probability/skip-reason are that run's
+ * behavior, and key-source/key-id/lease-error/entitled are observations only
+ * that run's relay round trip could make. Replaying any of them would let a
+ * hit claim work this process never did.
+ *
+ * Stripped by `jev_` prefix rather than a fixed list so fields added later
+ * can't silently start leaking, and the replay marker is set afterwards so it
+ * can't sweep itself. Done on read, not on write: the cached blob stays a
+ * faithful record of the run that produced it.
+ */
+function stripReplayedJevDiagnostics(diagnostics) {
+  if (!diagnostics || typeof diagnostics !== "object") return {};
+  const kept = {};
+  let replayed = false;
+  for (const [key, value] of Object.entries(diagnostics)) {
+    if (key.startsWith("jev_")) {
+      replayed = true;
+      continue;
+    }
+    kept[key] = value;
+  }
+  if (replayed) kept.jev_screen_replayed = true;
+  return kept;
+}
+
 async function runYceEngineSearch({
   query,
   cwd,
@@ -159,10 +187,29 @@ async function runYceEngineSearch({
       fingerprint: cacheFingerprint,
       cwd,
       query,
+      // Everything below reaches the engine as argv, so everything below has
+      // to reach the key too — see buildCacheKey's coarse-vs-fine note.
+      // timeoutMs is the one argv exception: it is an execution budget, not a
+      // result-shape parameter, so it stays out of the key.
+      // codeContextEnabled/codeContextMaxTokens are deliberately absent: they
+      // never touch the engine payload, and <code-context> is rebuilt from
+      // disk on every hit anyway.
       maxResults,
       maxTurns,
-      scriptPath,
+      maxCommands,
+      treeDepth,
+      excludePaths,
+      repoMapMode,
+      bootstrapEnabled,
       bootstrapMode,
+      bootstrapTreeDepth,
+      hotspotTopK,
+      hotspotTreeDepth,
+      hotspotMaxBytes,
+      bootstrapMaxTurns,
+      bootstrapMaxCommands,
+      noJevScreen,
+      scriptPath,
     });
     const cached = readCacheEntry(cacheConfig.dir, cacheKey, cacheConfig.ttlMs);
     if (cached) {
@@ -187,7 +234,7 @@ async function runYceEngineSearch({
         );
       }
       hitResult.diagnostics = {
-        ...(hitResult.diagnostics || {}),
+        ...stripReplayedJevDiagnostics(hitResult.diagnostics),
         cache_hit: true,
         cache_age_ms: Date.now() - cached.storedAt,
         cache_fingerprint: cacheFingerprint,

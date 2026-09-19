@@ -17,6 +17,7 @@ import { readdirSync, readFileSync, existsSync, statSync } from "fs";
 import { join, resolve, relative, extname, basename, dirname } from "path";
 import { spawnSync } from "child_process";
 import { resolveRipgrepPath } from "./ripgrep.mjs";
+import { createTokenizer, stem, PRERANK_PROFILE } from "./lexicon.cjs";
 
 // ─── Constants ───────────────────────────────────────────────
 
@@ -29,6 +30,15 @@ const FILE_FALLBACK_CANDIDATES = 20;
 const FILE_MIN_SIGNAL_SCORE = 0.01;
 const FILE_RRF_WEIGHTS = [2, 1.5, 1];
 const FILE_LOW_CONFIDENCE_SCORE = 0.03;
+// Test files mention every query term without defining anything, so they crowd
+// the head of the fused list — 22.5% of the top 10 across the local eval set.
+// Only tests are demoted here. The directory-level NOISE_PATH_PATTERNS set is
+// deliberately not reused: whether vendor/, examples/ or migrations/ are noise
+// is repo-specific, and applying that set at file level measurably hurt (two
+// queries whose answer was rank 1 fell to 18 and 24).
+const FILE_TEST_PENALTY = 0.7;
+const TEST_DIR_PATTERN = /(^|\/)(test|tests|__tests__|spec)\//;
+const TEST_FILE_PATTERN = /(_test|\.test|\.spec)\.[^/]+$/;
 const STRUCTURE_PATH_WEIGHT = 8;
 const STRUCTURE_DECL_EXACT_WEIGHT = 6;
 const STRUCTURE_DECL_PREFIX_WEIGHT = 3;
@@ -42,6 +52,16 @@ const DECLARATION_PATTERNS = [
   /^\s*(?:CREATE|ALTER)\s+(?:TABLE|VIEW|FUNCTION|PROCEDURE|TYPE)\s+(?:IF\s+NOT\s+EXISTS\s+)?["`]?([A-Za-z_][\w$]*)/gim,
   /^\s*(?:@[A-Za-z_$][\w$]*\s+)?(?:public|private|protected|static|final|async|virtual|override\s+)*[A-Za-z_$][\w$<>[\], ?]*\s+([A-Za-z_$][\w$]*)\s*\([^\n]*\)\s*\{/gm,
 ];
+
+// `const|var` earns a declaration slot only when its right-hand side is a
+// function: a name bound to a function defines behavior, `const limit = 42`
+// names a value. The distinction is applied when the names are handed to the
+// semantic screen and to grep, not inside DECLARATION_PATTERNS — structure
+// scoring is calibrated on the broad extraction and measurably regresses when
+// the local bindings are taken away from it.
+const BOUND_NAME_PATTERN = /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)/gm;
+const FUNCTION_VALUED_BINDING_PATTERN =
+  /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\b|\([^)\n]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/gm;
 const rgPath = resolveRipgrepPath();
 
 // Field weights for BM25F (from research recommendations)
@@ -77,57 +97,13 @@ const STOPWORDS = new Set([
 
 // ─── Tokenization ─────────────────────────────────────────────
 
-// Stem patterns hoisted to module scope — avoids re-allocating 18 RegExp per call
-const STEM_PATTERNS = [
-  [/^(.+)(ies)$/, "$1y"],
-  [/^(.+)([^aeiou])(es)$/, "$1$2"],
-  [/^(.+)([^aeiou])(s)$/, "$1$2"],
-  [/^(.+)(ing)$/, "$1"],
-  [/^(.+)(edly)$/, "$1"],
-  [/^(.+)(ly)$/, "$1"],
-  [/^(.+)(ed)$/, "$1"],
-  [/^(.+)(ation)$/, "$1ate"],
-  [/^(.+)(tion)$/, "$1t"],
-  [/^(.+)(ment)$/, "$1"],
-  [/^(.+)(ness)$/, "$1"],
-  [/^(.+)(ful)$/, "$1"],
-  [/^(.+)(less)$/, "$1"],
-  [/^(.+)(able)$/, "$1"],
-  [/^(.+)(ible)$/, "$1"],
-  [/^(.+)(ally)$/, "$1al"],
-  [/^(.+)(ity)$/, "$1"],
-  [/^(.+)(ive)$/, "$1"],
-];
-
 /**
- * Basic Porter-like stemming (simplified)
+ * Tokenize text with stemming and stopword removal.
+ *
+ * The stemmer and the camelCase splitter live in lib/lexicon.cjs, shared with
+ * the offline fallback searcher so the two layers cannot drift apart again.
  */
-function stem(word) {
-  if (!word || word.length < 3) return word;
-  const w = word.toLowerCase();
-
-  for (const [pattern, replacement] of STEM_PATTERNS) {
-    if (pattern.test(w)) {
-      return w.replace(pattern, replacement);
-    }
-  }
-  return w;
-}
-
-/**
- * Tokenize text with stemming and stopword removal
- */
-function tokenize(text, options = {}) {
-  if (!text) return [];
-  const { keepCase = false, minLen = 2 } = options;
-
-  return text
-    .toLowerCase()
-    .replace(/[^\w\s\-./\\@]/g, " ")
-    .split(/[\s\-./\\]+/)
-    .filter(t => t.length >= minLen && !STOPWORDS.has(t))
-    .map(t => stem(keepCase ? t : t.toLowerCase()));
-}
+const tokenize = createTokenizer({ profile: PRERANK_PROFILE, stopWords: STOPWORDS });
 
 /**
  * Tokenize file path (handles code paths better)
@@ -895,18 +871,7 @@ function readFileForScoring(projectRoot, relPath) {
   }
 }
 
-function inferPreferredExtensions(query) {
-  const text = String(query || "");
-  if (/\bGo\s+(?:function|file|code)|\bGolang\b|\bGin\b/i.test(text) && !/admin\s+API\s+endpoint/i.test(text)) {
-    return new Set([".go"]);
-  }
-  if (/\b(?:TypeScript|TSX|React|Next\.js|route\.ts)\b/i.test(text)) {
-    return new Set([".ts", ".tsx", ".js", ".jsx", ".mjs"]);
-  }
-  return null;
-}
-
-function collectFileDocuments(projectRoot, topDirs = [], excludePaths = [], queryTerms = [], preferredExtensions = null) {
+function collectFileDocuments(projectRoot, topDirs = [], excludePaths = [], queryTerms = []) {
   const documents = [];
   const seen = new Set();
   const dirs = topDirs.length > 0 ? topDirs : ["."];
@@ -922,7 +887,6 @@ function collectFileDocuments(projectRoot, topDirs = [], excludePaths = [], quer
     for (const candidate of profile.file_paths || []) {
       const relPath = normalizeRelativePath(candidate);
       if (!relPath || seen.has(relPath) || isExcludedRelativePath(relPath, excludePaths)) continue;
-      if (preferredExtensions && !preferredExtensions.has(extname(relPath).toLowerCase())) continue;
       seen.add(relPath);
       const content = readFileForScoring(projectRoot, relPath);
       if (!content) continue;
@@ -943,7 +907,6 @@ function collectFileDocuments(projectRoot, topDirs = [], excludePaths = [], quer
     for (const candidate of rootProfile.file_paths || []) {
       const relPath = normalizeRelativePath(candidate);
       if (!relPath || seen.has(relPath) || isExcludedRelativePath(relPath, excludePaths)) continue;
-      if (preferredExtensions && !preferredExtensions.has(extname(relPath).toLowerCase())) continue;
       const content = readFileForScoring(projectRoot, relPath);
       if (!content) continue;
       seen.add(relPath);
@@ -974,6 +937,100 @@ function extractDeclarationNames(content) {
     }
   }
   return names;
+}
+
+const DECLARATION_NAME_LIMIT = 16;
+// Enough to show what a probe hit looks like without turning the screen input
+// back into a file dump.
+const PROBE_SNIPPET_LINES = 3;
+const PROBE_SNIPPET_CHARS = 160;
+
+function declarationOverlapScore(name, queryTerms) {
+  const tokens = splitIdentifier(name);
+  let score = 0;
+  for (const term of queryTerms) {
+    if (tokens.includes(term)) score += 2;
+    else if (tokens.some((token) => token.startsWith(term) || term.startsWith(token))) score += 1;
+  }
+  return score;
+}
+
+/**
+ * Which declarations of a file to expose is a ranking problem, not a
+ * truncation problem: taking the first N in file order hands the slots to
+ * whatever the file happens to define first. Rank by overlap with the query
+ * instead and keep file order as the tie-break, so the result stays
+ * deterministic.
+ */
+function selectDeclarationNames(names = [], queryTerms = [], limit = DECLARATION_NAME_LIMIT) {
+  if (names.length <= limit) return names.slice();
+  return names
+    .map((name, index) => ({ name, index, score: declarationOverlapScore(name, queryTerms) }))
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+    .slice(0, limit)
+    .map((item) => item.name);
+}
+
+/**
+ * Keep only the declaration names that actually touch the query. A grep for
+ * `message`, `config` or `details` matches the whole repository and costs a
+ * remote turn to learn nothing.
+ */
+export function selectQueryRelevantNames(names = [], queryTerms = []) {
+  if (queryTerms.length === 0) return [];
+  return names.filter((name) => declarationOverlapScore(name, queryTerms) > 0);
+}
+
+/**
+ * The first few lines a probe actually matched, carried on the candidate so a
+ * later semantic screen can quote real source without re-reading the file.
+ */
+function buildProbeSnippet(content, ranges = []) {
+  if (!Array.isArray(ranges) || ranges.length === 0) return [];
+  const lines = String(content || "").split("\n");
+  const snippet = [];
+  for (const [start] of ranges) {
+    for (let line = start; line < start + PROBE_SNIPPET_LINES && line <= lines.length; line += 1) {
+      const text = String(lines[line - 1] || "").trim().slice(0, PROBE_SNIPPET_CHARS);
+      if (!text) continue;
+      snippet.push({ line, text });
+      if (snippet.length >= PROBE_SNIPPET_LINES) return snippet;
+    }
+    if (snippet.length >= PROBE_SNIPPET_LINES) break;
+  }
+  return snippet;
+}
+
+function matchedNames(pattern, content) {
+  const names = new Set();
+  pattern.lastIndex = 0;
+  let match;
+  while ((match = pattern.exec(content)) !== null) {
+    const name = String(match[1] || "").trim();
+    if (name) names.add(name);
+    if (match[0] === "") pattern.lastIndex += 1;
+  }
+  return names;
+}
+
+/**
+ * Drop the names that are only ever bound to a plain value. What is left is
+ * the set of names that answer "what does this file define" — which is the
+ * question the semantic screen is asked, and the only kind of name worth
+ * spending a grep on.
+ */
+function extractBehaviorDeclarationNames(names, content) {
+  const bound = matchedNames(BOUND_NAME_PATTERN, content);
+  if (bound.size === 0) return names;
+  const functionValued = matchedNames(FUNCTION_VALUED_BINDING_PATTERN, content);
+  const kept = names.filter((name) => !bound.has(name) || functionValued.has(name));
+  // `export const handler = () => {}` never reaches DECLARATION_PATTERNS at
+  // all — the line starts with `export` — yet in modern JS/TS it is the most
+  // common shape a file uses to define the thing it is named after.
+  for (const name of functionValued) {
+    if (!kept.includes(name)) kept.push(name);
+  }
+  return kept;
 }
 
 function scoreStructure(queryTerms, relPath, declarationNames) {
@@ -1074,6 +1131,23 @@ function rrfFileFusion(rankings, weights = null) {
     .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
 }
 
+function isTestPath(relPath) {
+  const lower = String(relPath || "").toLowerCase();
+  return TEST_DIR_PATTERN.test(lower) || TEST_FILE_PATTERN.test(lower);
+}
+
+/**
+ * Demote test files after RRF fusion, then re-sort with the same tie-break the
+ * fusion uses.
+ */
+function applyTestFilePenalty(fused) {
+  return fused
+    .map((entry) => (isTestPath(entry.path)
+      ? { ...entry, score: entry.score * FILE_TEST_PENALTY }
+      : entry))
+    .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
+}
+
 /**
  * Score files using lexical BM25, declaration/path structure, and probe grep,
  * then fuse those rankings with the same RRF constant as directory scoring.
@@ -1085,8 +1159,7 @@ export function scoreFiles(query, projectRoot, topDirs = [], excludePaths = [], 
   const maxResults = Math.max(1, Number(options.maxResults) || 10);
   const candidateLimit = Math.max(FILE_FALLBACK_CANDIDATES, Number(options.candidateLimit) || maxResults);
   const queryTerms = tokenize(query);
-  const preferredExtensions = inferPreferredExtensions(query);
-  const documents = collectFileDocuments(projectRoot, topDirs, excludePaths, queryTerms, preferredExtensions);
+  const documents = collectFileDocuments(projectRoot, topDirs, excludePaths, queryTerms);
 
   if (documents.length === 0) {
     return {
@@ -1094,6 +1167,7 @@ export function scoreFiles(query, projectRoot, topDirs = [], excludePaths = [], 
       candidatePool: [],
       hotDirs: [],
       rgPatterns: queryTerms.slice(0, 30),
+      queryTerms,
       lexicalHits: 0,
       topScore: 0,
       lowConfidence: true,
@@ -1121,6 +1195,7 @@ export function scoreFiles(query, projectRoot, topDirs = [], excludePaths = [], 
   const probeHits = probeFileGrep(projectRoot, documents, queryTerms, excludePaths);
   for (const document of documents) {
     document.declarationNames = extractDeclarationNames(document.content);
+    document.behaviorNames = extractBehaviorDeclarationNames(document.declarationNames, document.content);
     document.structureScore = scoreStructure(queryTerms, document.path, document.declarationNames);
     document.probeScore = probeHits.has(document.path)
       ? Math.log(1 + probeHits.get(document.path).length)
@@ -1135,7 +1210,7 @@ export function scoreFiles(query, projectRoot, topDirs = [], excludePaths = [], 
     rankFiles(documents, "structureScore"),
     rankFiles(documents, "probeScore"),
   ];
-  const fused = rrfFileFusion(rankings, FILE_RRF_WEIGHTS);
+  const fused = applyTestFilePenalty(rrfFileFusion(rankings, FILE_RRF_WEIGHTS));
   const byPath = new Map(documents.map((document) => [document.path, document]));
   const candidatePool = fused.slice(0, candidateLimit).map((entry) => {
     const document = byPath.get(entry.path);
@@ -1150,7 +1225,8 @@ export function scoreFiles(query, projectRoot, topDirs = [], excludePaths = [], 
       lexicalScore: document.lexicalScore,
       structureScore: document.structureScore,
       probeScore: document.probeScore,
-      declarationNames: document.declarationNames.slice(0, 16),
+      declarationNames: selectDeclarationNames(document.behaviorNames, queryTerms),
+      snippet: buildProbeSnippet(document.content, document.ranges),
       reasons,
     };
   });
@@ -1161,7 +1237,10 @@ export function scoreFiles(query, projectRoot, topDirs = [], excludePaths = [], 
   const topScore = Number(candidatePool[0]?.score || 0);
   const hotDirs = [...new Set(candidatePool.slice(0, Math.max(1, maxResults)).map((candidate) => candidate.path.split("/")[0]).filter(Boolean))].slice(0, 12);
   const declarations = candidatePool.flatMap((candidate) => candidate.declarationNames || []);
-  const rgPatterns = [...new Set([...queryTerms, ...declarations])].filter((item) => item.length >= 3).slice(0, 30);
+  const rgPatterns = [...new Set([
+    ...queryTerms,
+    ...selectQueryRelevantNames(declarations, queryTerms),
+  ])].filter((item) => item.length >= 3).slice(0, 30);
 
   const semanticGap = /[\u3400-\u9fff]/.test(String(query || ""));
   return {
@@ -1177,11 +1256,13 @@ export function scoreFiles(query, projectRoot, topDirs = [], excludePaths = [], 
         lexicalScore: 0,
         structureScore: 0,
         probeScore: 0,
-        declarationNames: document.declarationNames.slice(0, 16),
+        declarationNames: selectDeclarationNames(document.behaviorNames, queryTerms),
+        snippet: buildProbeSnippet(document.content, document.ranges),
         reasons: [],
       })),
     hotDirs,
     rgPatterns,
+    queryTerms,
     lexicalHits,
     topScore,
     lowConfidence: lexicalHits === 0 || semanticGap || topScore < FILE_LOW_CONFIDENCE_SCORE,

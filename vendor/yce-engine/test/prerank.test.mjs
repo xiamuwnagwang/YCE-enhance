@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { scoreFiles } from "../lib/directory-scorer.mjs";
-import { buildFileSkeleton, screenCandidates } from "../lib/jevScreen.mjs";
+import { screenCandidates } from "../lib/jevScreen.mjs";
 import { __test as coreTest } from "../lib/core.mjs";
 
 test("file preranker fuses lexical, structure, and probe signals", (t) => {
@@ -75,7 +75,6 @@ test("Jev screen failures are returned as optional diagnostics", async () => {
   assert.equal(result.ok, false);
   assert.equal(result.skipped, true);
   assert.equal(result.reason, "missing_api_key");
-  assert.match(buildFileSkeleton("package main\nfunc Main() {}\n"), /func Main/);
 });
 
 test("Jev HTTP failures degrade without throwing", async (t) => {
@@ -235,4 +234,148 @@ test("tool-call parser repairs a bare simple string argument", () => {
   );
   assert.ok(parsed);
   assert.equal(parsed[2].command1.pattern, "networkSearchPath");
+});
+
+test("file prerank demotes test files below the source they exercise", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "yce-prerank-tests-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "internal"));
+  writeFileSync(join(root, "internal", "pool.go"), [
+    "package internal",
+    "// SelectUpstreamKey picks a key from the lease pool.",
+    "func SelectUpstreamKey(pool []string) string { return pool[0] }",
+  ].join("\n"));
+  // Repeats every query term more often than the implementation does, so on raw
+  // signal alone this file outranks it — that is exactly the crowding the
+  // penalty exists to undo.
+  writeFileSync(join(root, "internal", "pool_test.go"), [
+    "package internal",
+    "// covers SelectUpstreamKey: select upstream key from the lease pool",
+    "func TestSelectUpstreamKey(t *testing.T) { SelectUpstreamKey(nil) }",
+    "func TestSelectUpstreamKeyEmptyPool(t *testing.T) { SelectUpstreamKey(nil) }",
+    "func TestSelectUpstreamKeyLeasePool(t *testing.T) { SelectUpstreamKey(nil) }",
+  ].join("\n"));
+
+  const result = scoreFiles("select upstream key from lease pool", root, ["internal"], [], { maxResults: 5 });
+  const paths = result.candidatePool.map((candidate) => candidate.path);
+  assert.deepEqual(paths, ["internal/pool.go", "internal/pool_test.go"]);
+});
+
+test("declaration extraction keeps function-valued bindings and drops plain values", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "yce-declarations-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "internal"));
+  writeFileSync(join(root, "internal", "selector.js"), [
+    "const RETRY_LIMIT = 42;",
+    "const upstreamSelector = () => selectUpstreamKey();",
+    "export const selectUpstreamKey = function (pool) { return pool[0]; };",
+    "var leasePoolMessage = \"pool is empty\";",
+    "function selectLeasePool(keys) { return keys; }",
+    "class LeasePoolSelector {}",
+  ].join("\n"));
+
+  const result = scoreFiles("select upstream key from lease pool", root, ["internal"], [], { maxResults: 5 });
+  const names = result.candidatePool[0].declarationNames;
+  assert.ok(names.includes("selectUpstreamKey"), "a const bound to a function expression is a declaration");
+  assert.ok(names.includes("upstreamSelector"), "a const bound to an arrow function is a declaration");
+  assert.ok(names.includes("selectLeasePool"), "a plain function declaration is a declaration");
+  assert.ok(names.includes("LeasePoolSelector"), "a class declaration is a declaration");
+  assert.ok(!names.includes("RETRY_LIMIT"), "a const bound to a number is not a declaration");
+  assert.ok(!names.includes("leasePoolMessage"), "a var bound to a string is not a declaration");
+  // Only query-relevant names become grep patterns; a repo-wide word like
+  // "message" would cost a remote turn and match everything.
+  assert.ok(!result.rgPatterns.includes("leasePoolMessage"));
+});
+
+test("declaration slots go to the names that overlap the query, not to file order", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "yce-declaration-slots-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "internal"));
+  // 20 unrelated declarations first: in file order they would use up every one
+  // of the 16 slots before the function the query is about is ever reached.
+  const filler = Array.from({ length: 20 }, (_, index) => `function helper${index}() {}`);
+  writeFileSync(join(root, "internal", "late.js"), [
+    ...filler,
+    "function selectUpstreamKeyFromLeasePool(pool) { return pool[0]; }",
+  ].join("\n"));
+
+  const result = scoreFiles("select upstream key from lease pool", root, ["internal"], [], { maxResults: 5 });
+  const names = result.candidatePool[0].declarationNames;
+  assert.equal(names.length, 16);
+  assert.equal(names[0], "selectUpstreamKeyFromLeasePool");
+});
+
+test("candidates carry the matched probe lines so the screen needs no second read", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "yce-candidate-snippet-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "internal"));
+  writeFileSync(join(root, "internal", "pool.go"), [
+    "package internal",
+    "",
+    "func SelectUpstreamKey(pool []string) string { return pool[0] }",
+  ].join("\n"));
+
+  const candidate = scoreFiles("select upstream key", root, ["internal"], [], { maxResults: 5 }).candidatePool[0];
+  assert.ok(candidate.snippet.length > 0);
+  assert.ok(candidate.snippet.length <= 3);
+  assert.ok(candidate.snippet.every((entry) => Number.isInteger(entry.line) && entry.line > 0));
+  assert.ok(candidate.snippet.some((entry) => entry.text.includes("SelectUpstreamKey")));
+});
+
+test("the Jev screen input is built from declarations and matched lines, never from imports", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "yce-jev-criteria-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  // Present on disk, and deliberately import-heavy: if the screen still read
+  // files, those imports would be the whole skeleton.
+  writeFileSync(join(root, "scheduler.js"), [
+    "import { readFileSync } from \"node:fs\";",
+    "import { resolve } from \"node:path\";",
+    "export function selectUpstreamKey(pool) { return pool[0]; }",
+  ].join("\n"));
+
+  let captured = null;
+  await screenCandidates({
+    query: "select upstream key",
+    projectRoot: root,
+    candidates: [{
+      path: "scheduler.js",
+      declarationNames: ["selectUpstreamKey"],
+      snippet: [{ line: 3, text: "export function selectUpstreamKey(pool) { return pool[0]; }" }],
+    }],
+    apiKey: "fixture-typesafe-key",
+    fetchImpl: async (url, options) => {
+      captured = JSON.parse(options.body);
+      return new Response(JSON.stringify({
+        answers: { pick: { type: "choice", probabilities: { file_0: 0.9 } } },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+
+  const criterion = captured.questions.pick.criteria.file_0;
+  assert.match(criterion, /^scheduler\.js:/);
+  assert.match(criterion, /declares: selectUpstreamKey/);
+  assert.match(criterion, /L3: export function selectUpstreamKey/);
+  assert.doesNotMatch(criterion, /^\s*import\b/m, "import lines must not reach the screen");
+  assert.doesNotMatch(criterion, /node:fs/);
+});
+
+test("the test-file penalty leaves vendored code alone", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "yce-prerank-vendor-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "vendor"));
+  mkdirSync(join(root, "internal"));
+  const body = [
+    "package pool",
+    "// covers SelectUpstreamKey: select upstream key from the lease pool",
+    "func SelectUpstreamKey(pool []string) string { return pool[0] }",
+  ].join("\n");
+  writeFileSync(join(root, "vendor", "pool.go"), body);
+  writeFileSync(join(root, "internal", "pool_test.go"), body);
+
+  const result = scoreFiles("select upstream key from lease pool", root, ["vendor", "internal"], [], { maxResults: 5 });
+  const paths = result.candidatePool.map((candidate) => candidate.path);
+  // Identical content, so only the path class can separate them: whether a
+  // directory like vendor/, examples/ or migrations/ is noise is repo-specific,
+  // and demoting it at file level measurably hurt. Only tests are demoted.
+  assert.ok(paths.indexOf("vendor/pool.go") < paths.indexOf("internal/pool_test.go"));
 });

@@ -70,6 +70,7 @@ node ./scripts/validate-yce-result.mjs <file> --expect-sha256 <xml_sha256> --exp
 | `bootstrap-mode` / `bootstrap-remote-calls` | 生效的预排模式（`local`/`remote`）与远端 bootstrap 往返次数（本地预排下为 0） |
 | `prerank-candidates` / `prerank-elapsed-ms` / `prerank-total-elapsed-ms` / `prerank-lexical-hits` / `prerank-confidence` | 本地预排的候选数、打分耗时与置信度 |
 | `jev-screen-attempted` / `jev-screen-success` / `jev-screen-elapsed-ms` / `jev-screen-input-tokens` / `jev-screen-output-tokens` / `jev-screen-top-probability` / `jev-screen-skip-reason` / `jev-key-source` / `jev-key-id` / `jev-lease-error` | jev 补屏（TypeSafe Jev 判别）的执行状态、耗时、token 用量与 key 来源（`relay`/`env_fallback`/`none`）、租约错误 |
+| `answer-source` | `answer_source=local_prerank` 表示远端失败或给了空答案时返回的**本地预排降级池**，不是远端验证过的答案；此时 `success` 与退出码都不代表远端验证通过，原始错误仍在 `<errors>` 里。正常远端答案不输出这个字段。降级条目的行区间来自本地预排，没匹配到行的条目显示 `lines unknown`（不再伪造 `L1-1`） |
 
 正文时效约定：`<code-context>` 的正文永远在返回前从当前磁盘现读——结果缓存只存引擎 payload、不存正文，因此缓存命中也不会拿到过期的代码内容。
 

@@ -1104,12 +1104,22 @@ function serializeForStdout(payload, pretty = false) {
         ["jev-screen-input-tokens", "jev_screen_input_tokens"],
         ["jev-screen-output-tokens", "jev_screen_output_tokens"],
         ["jev-screen-top-probability", "jev_screen_top_probability"],
+        // false = screened, but the top probability sat under the floor, so
+        // the local ranking was kept.
+        ["jev-screen-reorder-applied", "jev_screen_reorder_applied"],
         ["jev-screen-skip-reason", "jev_screen_skip_reason"],
         ["jev-key-source", "jev_key_source"],
         ["jev-key-id", "jev_key_id"],
         ["jev-lease-error", "jev_lease_error"],
         ["jev-screen-entitled", "jev_screen_entitled"],
+        // Set only on a cache hit, where every other jev-* field is stripped:
+        // marks "this result carried jev diagnostics from an earlier run and
+        // they were dropped" — it says nothing about whether that run screened.
+        ["jev-screen-replayed", "jev_screen_replayed"],
         ["turns-used", "turns_used"],
+        // Present only when the remote loop failed and the engine handed back
+        // its local prerank pool instead of an empty answer.
+        ["answer-source", "answer_source"],
         ["error-type", "error_type"],
         ["project-path", "project_path"],
         ["ignore-file", "ignore_file"],

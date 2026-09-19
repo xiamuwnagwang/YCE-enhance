@@ -20,6 +20,7 @@ const repoRoot = resolve(__dirname, "..");
 const validator = join(repoRoot, "scripts", "validate-yce-result.mjs");
 const { runYceEngineSearch } = require("../scripts/lib/adapters/yceEngineSearch");
 const {
+  CACHE_REVISION,
   DEFAULT_TTL_MS,
   buildCacheKey,
   computeFingerprint,
@@ -71,7 +72,20 @@ function writeFakeEngine(dir) {
       "  process.exit(0);",
       "}",
       "const files = JSON.parse(process.env.FAKE_ENGINE_FILES || '[]');",
-      "const payload = { success: true, output: 'Found ' + files.length + ' relevant files.', result_present: true, empty_result: false, files, grep_patterns: ['needle'], diagnostics: { source: 'fake' }, error: null };",
+      "const diagnostics = { source: 'fake' };",
+      "if (process.env.FAKE_ENGINE_JEV === '1') {",
+      "  diagnostics.jev_screen_attempted = true;",
+      "  diagnostics.jev_screen_success = true;",
+      "  diagnostics.jev_screen_elapsed_ms = 417;",
+      "  diagnostics.jev_screen_input_tokens = 1200;",
+      "  diagnostics.jev_screen_output_tokens = 34;",
+      "  diagnostics.jev_screen_top_probability = 0.91;",
+      "  diagnostics.jev_screen_skip_reason = null;",
+      "  diagnostics.jev_key_source = 'pool';",
+      "  diagnostics.jev_key_id = 'key-abc';",
+      "  diagnostics.jev_screen_entitled = true;",
+      "}",
+      "const payload = { success: true, output: 'Found ' + files.length + ' relevant files.', result_present: true, empty_result: false, files, grep_patterns: ['needle'], diagnostics, error: null };",
       "if (process.argv.includes('--json')) console.log(JSON.stringify(payload));",
       "else console.log(payload.output);",
     ].join("\n"),
@@ -376,6 +390,115 @@ test("bootstrap mode is part of the cache key: local and remote never collide", 
   }
 });
 
+test("retrieval params are part of the cache key: different --exclude sets never share an entry", async () => {
+  const fixtureDir = mktemp("yce-cache-exclude-");
+  const cacheDir = mktemp("yce-cache-dir-");
+  const stateDir = mktemp("yce-cache-state-");
+  try {
+    gitInit(fixtureDir);
+    const sourcePath = join(fixtureDir, "target.js");
+    writeFileSync(sourcePath, "const marker = 1;\n");
+    gitCommitAll(fixtureDir, "init");
+
+    // The fake engine ignores --exclude, so the call counter is the only
+    // honest signal here: a hit means the key collapsed two different engine
+    // invocations into one entry. Nothing may be written into fixtureDir
+    // between calls or the fingerprint (not the key) would explain the miss.
+    const engine = writeFakeEngine(stateDir);
+    const counterPath = join(stateDir, "counter.txt");
+    const env = {
+      FAKE_ENGINE_COUNTER: counterPath,
+      FAKE_ENGINE_FILES: JSON.stringify([{ path: sourcePath, ranges: [[1, 1]] }]),
+    };
+    const withExcludes = (excludePaths) => ({
+      ...baseSearchArgs({ cwd: fixtureDir, scriptPath: engine, cacheDir, env }),
+      excludePaths,
+    });
+
+    const a1 = await runYceEngineSearch(withExcludes(["vendor/**"]));
+    assert.equal(a1.search.diagnostics.cache_hit, false);
+    assert.equal(counterValue(counterPath), 1);
+
+    const b1 = await runYceEngineSearch(withExcludes(["vendor/**", "dist/**"]));
+    assert.equal(b1.search.diagnostics.cache_hit, false, "a wider exclude set must not reuse the narrower set's entry");
+    assert.equal(counterValue(counterPath), 2);
+
+    // Both entries survive side by side, and each re-hits on its own params.
+    const a2 = await runYceEngineSearch(withExcludes(["vendor/**"]));
+    assert.equal(a2.search.diagnostics.cache_hit, true, "the first exclude set must still hit");
+    assert.equal(counterValue(counterPath), 2);
+
+    const b2 = await runYceEngineSearch(withExcludes(["dist/**", "vendor/**"]));
+    assert.equal(b2.search.diagnostics.cache_hit, true, "order must not matter: the key sorts the exclude set");
+    assert.equal(counterValue(counterPath), 2);
+
+    // --no-jev-screen changes what the engine does, so it changes the key too.
+    const screened = await runYceEngineSearch({ ...withExcludes(["vendor/**"]), noJevScreen: true });
+    assert.equal(screened.search.diagnostics.cache_hit, false, "--no-jev-screen must not reuse the screened entry");
+    assert.equal(counterValue(counterPath), 3);
+  } finally {
+    rmSync(fixtureDir, { recursive: true, force: true });
+    rmSync(cacheDir, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("cache hit never replays the cached run's jev screen as this run's behavior", async () => {
+  const fixtureDir = mktemp("yce-cache-jev-");
+  const cacheDir = mktemp("yce-cache-dir-");
+  const stateDir = mktemp("yce-cache-state-");
+  try {
+    gitInit(fixtureDir);
+    const sourcePath = join(fixtureDir, "target.js");
+    writeFileSync(sourcePath, "const marker = 1;\n");
+    gitCommitAll(fixtureDir, "init");
+
+    const engine = writeFakeEngine(stateDir);
+    const counterPath = join(stateDir, "counter.txt");
+    const env = {
+      FAKE_ENGINE_COUNTER: counterPath,
+      FAKE_ENGINE_JEV: "1",
+      FAKE_ENGINE_FILES: JSON.stringify([{ path: sourcePath, ranges: [[1, 1]] }]),
+    };
+    const args = () => baseSearchArgs({ cwd: fixtureDir, scriptPath: engine, cacheDir, env });
+
+    const miss = await runYceEngineSearch(args());
+    assert.equal(miss.search.diagnostics.cache_hit, false);
+    assert.equal(miss.search.diagnostics.jev_screen_attempted, true, "the real run does report its screen");
+    assert.equal(miss.search.diagnostics.jev_screen_replayed, undefined, "a real run is not a replay");
+
+    const hit = await runYceEngineSearch(args());
+    assert.equal(hit.search.diagnostics.cache_hit, true);
+    assert.equal(counterValue(counterPath), 1, "engine must not have run again");
+
+    // No jev_* field may survive: this process ran no screen and made no
+    // relay round trip, so it can assert neither behavior (attempted /
+    // success / elapsed / tokens / skip-reason) nor observation
+    // (key-source / key-id / entitled).
+    const leaked = Object.keys(hit.search.diagnostics).filter(
+      (key) => key.startsWith("jev_") && key !== "jev_screen_replayed",
+    );
+    assert.deepEqual(leaked, [], `cache hit leaked replayed jev fields: ${leaked.join(", ")}`);
+    assert.equal(hit.search.diagnostics.jev_screen_replayed, true, "the hit must say the jev data came from an earlier run");
+    // Non-jev diagnostics are still legitimately replayed.
+    assert.equal(hit.search.diagnostics.source, "fake");
+
+    // A cached run that never touched jev at all must not grow a replay marker.
+    const plainCacheDir = mktemp("yce-cache-jev-plain-");
+    const plainEnv = { ...env, FAKE_ENGINE_JEV: "0" };
+    const plainArgs = () => baseSearchArgs({ cwd: fixtureDir, scriptPath: engine, cacheDir: plainCacheDir, env: plainEnv });
+    await runYceEngineSearch(plainArgs());
+    const plainHit = await runYceEngineSearch(plainArgs());
+    assert.equal(plainHit.search.diagnostics.cache_hit, true);
+    assert.equal(plainHit.search.diagnostics.jev_screen_replayed, undefined, "no jev data cached means no replay marker");
+    rmSync(plainCacheDir, { recursive: true, force: true });
+  } finally {
+    rmSync(fixtureDir, { recursive: true, force: true });
+    rmSync(cacheDir, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("searchCache module: fingerprint stability, key composition, and expiry sweep", () => {
   const gitDir = mktemp("yce-cache-fp-git-");
   const plainDir = mktemp("yce-cache-fp-plain-");
@@ -403,18 +526,47 @@ test("searchCache module: fingerprint stability, key composition, and expiry swe
     assert.equal(resolveCacheConfig({ YCE_SEARCH_CACHE: "OFF" }).enabled, false);
     assert.equal(resolveCacheConfig({ YCE_SEARCH_CACHE_TTL_MS: "12345" }).ttlMs, 12345);
 
-    // key composition: bootstrap mode changes the key, nothing else does.
-    const keyA = buildCacheKey({
+    // key composition: same params in, same key out; any engine-visible
+    // param out, different key.
+    const baseKeyArgs = {
       fingerprint: "fp", cwd: "/x", query: "q", maxResults: 10, maxTurns: 3, scriptPath: "/engine.mjs", bootstrapMode: "local",
-    });
-    const keyB = buildCacheKey({
-      fingerprint: "fp", cwd: "/x", query: "q", maxResults: 10, maxTurns: 3, scriptPath: "/engine.mjs", bootstrapMode: "remote",
-    });
-    const keyA2 = buildCacheKey({
-      fingerprint: "fp", cwd: "/x", query: "q", maxResults: 10, maxTurns: 3, scriptPath: "/engine.mjs", bootstrapMode: "local",
-    });
+    };
+    const keyA = buildCacheKey(baseKeyArgs);
+    const keyB = buildCacheKey({ ...baseKeyArgs, bootstrapMode: "remote" });
+    const keyA2 = buildCacheKey({ ...baseKeyArgs });
     assert.notEqual(keyA, keyB);
     assert.equal(keyA, keyA2);
+
+    // v2: the key covers every option the adapter turns into engine argv.
+    // The key itself is a digest, so the revision is asserted through the
+    // exported constant rather than by substring-matching the hash.
+    assert.equal(CACHE_REVISION, "v2");
+    const distinguishes = (patch, label) =>
+      assert.notEqual(buildCacheKey({ ...baseKeyArgs, ...patch }), keyA, `${label} must change the key`);
+    distinguishes({ excludePaths: ["vendor/**"] }, "excludePaths");
+    distinguishes({ noJevScreen: true }, "noJevScreen");
+    distinguishes({ maxCommands: 8 }, "maxCommands");
+    distinguishes({ treeDepth: 2 }, "treeDepth");
+    distinguishes({ repoMapMode: "bootstrap_hotspot" }, "repoMapMode");
+    distinguishes({ bootstrapEnabled: false }, "bootstrapEnabled");
+    distinguishes({ bootstrapTreeDepth: 2 }, "bootstrapTreeDepth");
+    distinguishes({ hotspotTopK: 4 }, "hotspotTopK");
+    distinguishes({ hotspotTreeDepth: 2 }, "hotspotTreeDepth");
+    distinguishes({ hotspotMaxBytes: 65536 }, "hotspotMaxBytes");
+    distinguishes({ bootstrapMaxTurns: 2 }, "bootstrapMaxTurns");
+    distinguishes({ bootstrapMaxCommands: 9 }, "bootstrapMaxCommands");
+    // 0 is a reachable argv value for both (min:0 in buildSearchOptions), so
+    // it must not collapse into "unset" the way a truthiness test would.
+    distinguishes({ treeDepth: 0 }, "treeDepth=0");
+    distinguishes({ hotspotTopK: 0 }, "hotspotTopK=0");
+
+    // Exclude sets are order- and duplicate-insensitive, but content-sensitive.
+    const excludeKey = buildCacheKey({ ...baseKeyArgs, excludePaths: ["a/**", "b/**"] });
+    assert.equal(excludeKey, buildCacheKey({ ...baseKeyArgs, excludePaths: ["b/**", "a/**", "a/**"] }));
+    assert.notEqual(excludeKey, buildCacheKey({ ...baseKeyArgs, excludePaths: ["a/**"] }));
+
+    // code-context knobs never reach the engine payload, so they stay out.
+    assert.equal(keyA, buildCacheKey({ ...baseKeyArgs, codeContextEnabled: false, codeContextMaxTokens: 99 }));
 
     // TTL expiry on read: writeCacheEntry always stamps storedAt = now, so a
     // negative ttl is a reliable way to force "already expired" without
@@ -571,6 +723,7 @@ test("CLI end-to-end: cache-hit/cache-age-ms/cache-fingerprint land in the XML a
             YCE_RELAY_TOKEN: "",
             YCE_ENGINE_SCRIPT: engine,
             YCE_SEARCH_CACHE_DIR: cacheDir,
+            FAKE_ENGINE_JEV: "1",
             FAKE_ENGINE_FILES: JSON.stringify([{ path: sourcePath, ranges: [[1, 1]] }]),
             ...extraEnv,
           },
@@ -592,6 +745,7 @@ test("CLI end-to-end: cache-hit/cache-age-ms/cache-fingerprint land in the XML a
     const firstXml = readFileSync(resultFileOf(first), "utf8");
     assert.match(firstXml, /<cache-hit>false<\/cache-hit>/);
     assert.match(firstXml, /<cache-fingerprint>[a-f0-9]{64}<\/cache-fingerprint>/);
+    assert.match(firstXml, /<jev-screen-attempted>true<\/jev-screen-attempted>/, "a real run reports its own screen");
 
     const second = runCli(["--out", join(stateDir, "second.xml")]);
     assert.equal(second.status, 0, second.stderr);
@@ -599,6 +753,11 @@ test("CLI end-to-end: cache-hit/cache-age-ms/cache-fingerprint land in the XML a
     const secondXml = readFileSync(resultFileOf(second), "utf8");
     assert.match(secondXml, /<cache-hit>true<\/cache-hit>/);
     assert.match(secondXml, /<cache-age-ms>\d+<\/cache-age-ms>/);
+    // The served XML must not let a reader think this run screened anything.
+    assert.doesNotMatch(secondXml, /<jev-screen-attempted>/, "a hit must not replay the cached run's jev attempt");
+    assert.doesNotMatch(secondXml, /<jev-key-source>/);
+    assert.doesNotMatch(secondXml, /<jev-screen-entitled>/);
+    assert.match(secondXml, /<jev-screen-replayed>true<\/jev-screen-replayed>/);
     const durationMatch = secondXml.match(/<durations-ms>[\s\S]*?<search>(\d+)<\/search>/);
     assert.ok(durationMatch, secondXml);
     assert.ok(Number(durationMatch[1]) < 500, `expected <500ms, got ${durationMatch[1]}`);

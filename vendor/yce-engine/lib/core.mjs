@@ -11,7 +11,7 @@
  */
 
 import { readdirSync, statSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
-import { resolve, join, relative, sep, isAbsolute, dirname, extname } from "node:path";
+import { resolve, join, relative, sep, isAbsolute, dirname } from "node:path";
 import { gzipSync } from "node:zlib";
 import { randomUUID } from "node:crypto";
 import { platform, arch, release, version as osVersion, hostname, cpus, totalmem, homedir } from "node:os";
@@ -23,7 +23,7 @@ import {
   connectFrameDecode,
 } from "./protobuf.mjs";
 import { ToolExecutor } from "./executor.mjs";
-import { scoreDirectories, scoreFiles, tokenize as tokenizeBM25 } from "./directory-scorer.mjs";
+import { scoreDirectories, scoreFiles, selectQueryRelevantNames, tokenize as tokenizeBM25 } from "./directory-scorer.mjs";
 import { screenCandidates } from "./jevScreen.mjs";
 import { buildDirectoryTree } from "./tree-builder.mjs";
 
@@ -193,6 +193,13 @@ const REPO_MAP_OPTIMIZER_DEFAULTS = {
 
 const LOCAL_PRERANK_EXPOSED_CANDIDATES = 30;
 const LOCAL_JEV_MAX_CANDIDATES = 30;
+// The choice screen spreads one unit of probability over up to 30 candidates,
+// so a flat pool sits near 0.03 and a decided answer near 0.5+. Below this
+// floor Jev is not choosing, it is shrugging — and replacing the three local
+// signals with a shrug is how a correct lexical ranking gets scrambled. Under
+// the floor the probabilities are recorded and nothing is reordered. The value
+// is a constant rather than an inline literal because the A/B may move it.
+const JEV_TOP_PROBABILITY_FLOOR = 0.25;
 // The Jev screen is an optional prerank accelerator, so its key lease must not
 // become a new latency source: fail fast onto the local env key instead of
 // waiting out the 10s budget the main search lease can afford.
@@ -267,6 +274,17 @@ times with slightly different paths or excludes. One well-targeted search \
 is better than multiple overlapping ones.
 - PRIORITIZE READING over searching: Once you find a file path, read it \
 directly instead of searching for more variations of the same pattern.
+
+# VERIFIED LEADS FIRST
+- When the user message contains a "Local Prerank Verification Leads" \
+section, those paths have already been verified to exist on disk and come \
+with the line ranges that matched the problem statement. READ THEM FIRST \
+with \`readfile\` on the listed ranges, before any \`tree\` or \`rg\`.
+- Search only to close a gap the leads do not cover, or to rule a lead out. \
+Do not spend a turn rediscovering a path that is already listed.
+- Leads are ranked, not certain: a lead that turns out to be irrelevant \
+should be dropped from the ANSWER, not defended.
+- Preserve the exact path spelling from the leads in your final ANSWER.
 
 # FAST-SEARCH DEFAULTS (optimize rg/tree on large repos)
 - Start NARROW, then widen only if needed. Prefer searching likely code \
@@ -682,6 +700,50 @@ function _filterExistingCandidates(candidates = [], projectRoot) {
   return { accepted, rejected };
 }
 
+// Marks an answer whose files came from the local prerank pool rather than
+// from the remote loop, so a consumer can tell a degraded answer from a real
+// one without guessing from the error text.
+const LOCAL_PRERANK_ANSWER_SOURCE = "local_prerank";
+
+// A remote round that ends in a request error, a missing tool call, exhausted
+// turns or a second empty answer still leaves the engine holding the local
+// prerank pool: already ranked, already carrying line ranges, and already
+// screened by Jev when the screen ran. Reporting nothing throws that away, so
+// these paths hand the pool back instead. The original error travels with it
+// untouched — this is a degraded answer offered alongside the failure, not a
+// claim that the failure did not happen.
+function _localPrerankAnswerFiles(bootstrapHints, projectRoot, maxResults) {
+  if (bootstrapHints?.source !== "local") return [];
+  const pool = bootstrapHints.candidatePool || bootstrapHints.candidates || [];
+  const files = [];
+  const byPath = new Map();
+  for (const candidate of _filterExistingCandidates(pool, projectRoot).accepted) {
+    if (files.length >= Math.max(1, Number(maxResults) || 10)) break;
+    const rel = String(candidate?.path || "").replace(/^\/+/, "");
+    const fullPath = rel ? _resolveProjectPath(projectRoot, rel) : null;
+    if (!fullPath) continue;
+    const ranges = (Array.isArray(candidate.ranges) ? candidate.ranges : [])
+      .filter((range) => Array.isArray(range) && Number.isFinite(range[0]) && Number.isFinite(range[1]))
+      .map(([start, end]) => [start, end]);
+    // A candidate the prerank scored on its path or its directory alone has no
+    // matched lines to point at. Synthesising [[1, 1]] made that render as
+    // "L1-1", which reads as "the answer is on line 1" — it is not. Hand the
+    // empty range list through and let the renderer say the lines are unknown,
+    // the same wording the verification leads already use.
+    _mergeAnswerFile(files, byPath, { path: rel, full_path: fullPath, ranges });
+  }
+  return files;
+}
+
+// Renders an answer entry's line ranges for human output. Mirrors the wording
+// of _formatLocalPrerankCandidates so a range-less file reads the same whether
+// it arrives as a verification lead or as a degraded answer.
+function _formatAnswerRanges(ranges) {
+  return Array.isArray(ranges) && ranges.length
+    ? ranges.map(([start, end]) => `L${start}-${end}`).join(", ")
+    : "lines unknown";
+}
+
 function _formatLocalPrerankCandidates(candidates = [], maxCandidates = 20, projectRoot = null) {
   const source = projectRoot
     ? _filterExistingCandidates(candidates, projectRoot).accepted
@@ -736,23 +798,6 @@ function _selectJevCandidates(candidates = [], maxCandidates = 20, diversify = f
     if (selected.length >= maxCandidates) break;
   }
   return selected;
-}
-
-function _filterTopDirsForLocalQuery(projectRoot, topDirs, query) {
-  const text = String(query || "");
-  // "Gin" is also used in cross-stack route questions where the relevant
-  // implementation may live in a TypeScript app or shared library. Restrict
-  // to Go directories only when the query explicitly asks for Go code.
-  if (!/\bGo\s+(?:function|file|code)|\bGolang\b/i.test(text)) return topDirs;
-  const goDirs = topDirs.filter((dir) => {
-    try {
-      return readdirSync(join(projectRoot, dir), { withFileTypes: true })
-        .some((entry) => entry.isFile() && extname(entry.name).toLowerCase() === ".go");
-    } catch {
-      return false;
-    }
-  });
-  return goDirs.length > 0 ? goDirs : topDirs;
 }
 
 // ─── Jev screen key lease ──────────────────────────────────
@@ -922,11 +967,7 @@ async function _runLocalBootstrapPhase({
   onProgress,
 }) {
   const startedAt = Date.now();
-  const topDirs = _filterTopDirsForLocalQuery(
-    projectRoot,
-    _listTopLevelDirs(projectRoot, excludePaths),
-    query,
-  );
+  const topDirs = _listTopLevelDirs(projectRoot, excludePaths);
   const local = scoreFiles(query, projectRoot, topDirs, excludePaths, {
     maxResults,
     candidateLimit: Math.max(80, Number(maxResults) || 10),
@@ -934,7 +975,6 @@ async function _runLocalBootstrapPhase({
   const validatedCandidates = _filterExistingCandidates(local.candidatePool || [], projectRoot);
   let candidates = validatedCandidates.accepted;
   const jevCandidates = _selectJevCandidates(candidates, LOCAL_JEV_MAX_CANDIDATES, local.semanticGap === true);
-  const queryInvitesSemanticScreen = /retry|backoff|cache|invalidat/i.test(String(query || ""));
   const jev = {
     attempted: false,
     success: false,
@@ -942,6 +982,10 @@ async function _runLocalBootstrapPhase({
     inputTokens: null,
     outputTokens: null,
     topProbability: null,
+    // null = the screen never returned a ranking; false = it did but its top
+    // probability sat under JEV_TOP_PROBABILITY_FLOOR, so the local ranking
+    // was kept; true = the pool was reordered by Jev's probabilities.
+    reorderApplied: null,
     skipReason: null,
     // null until key acquisition is actually attempted, so W7 can tell
     // "never reached the screen" apart from "reached it and got nothing".
@@ -953,7 +997,7 @@ async function _runLocalBootstrapPhase({
   };
   let jevPoolApplied = false;
 
-  if (!local.lowConfidence && !queryInvitesSemanticScreen) {
+  if (!local.lowConfidence) {
     jev.skipReason = "high_confidence";
   } else if (noJevScreen) {
     jev.skipReason = "disabled_by_flag";
@@ -1026,6 +1070,11 @@ async function _runLocalBootstrapPhase({
       jev.topProbability = screened.topProbability ?? null;
       jev.skipReason = screened.ok ? null : screened.reason || "request_failed";
       if (screened.ok && Array.isArray(screened.candidates)) {
+        jev.reorderApplied = !(
+          Number.isFinite(screened.topProbability) && screened.topProbability < JEV_TOP_PROBABILITY_FLOOR
+        );
+      }
+      if (screened.ok && Array.isArray(screened.candidates) && jev.reorderApplied) {
         jevPoolApplied = true;
         const byPath = new Map(screened.candidates.map((item) => [item.path, item]));
         candidates = [...candidates].sort((left, right) => {
@@ -1049,9 +1098,15 @@ async function _runLocalBootstrapPhase({
 
   const selected = candidates.slice(0, Math.max(1, Number(maxResults) || 10));
   const hotDirs = [...new Set(selected.map((candidate) => String(candidate.path || "").split("/")[0]).filter(Boolean))].slice(0, 12);
+  // Same rule as the scorer's own patterns: a declaration name only earns a
+  // grep slot when it touches the query. Unfiltered, names like `message` or
+  // `config` turn a targeted search into a repository-wide one.
   const rgPatterns = [...new Set([
     ...(local.rgPatterns || []),
-    ...selected.flatMap((candidate) => candidate.declarationNames || []),
+    ...selectQueryRelevantNames(
+      selected.flatMap((candidate) => candidate.declarationNames || []),
+      local.queryTerms || [],
+    ),
   ])].filter((pattern) => String(pattern).length >= 3).slice(0, 30);
   const exposedCandidates = (jevPoolApplied || local.semanticGap
     ? (jevPoolApplied ? candidates : jevCandidates)
@@ -2772,10 +2827,14 @@ function buildOptimizedRepoMap({
     hotDirs = Array.isArray(bootstrapHints.hotDirs)
       ? bootstrapHints.hotDirs.slice(0, hotspotTopK || 8)
       : [];
-    pathSpines = Array.isArray(bootstrapHints.candidatePool)
-      ? bootstrapHints.candidatePool.map((candidate) => candidate.path).filter(Boolean).slice(0, 30)
-      : [];
-    log(`Local file scoring: hotDirs=[${hotDirs.join(",")}] pathSpines=${pathSpines.length}`);
+    // The candidate paths are deliberately NOT repeated here. They already
+    // ride in the "Local Prerank Verification Leads" section of the user
+    // message, with their line ranges and the reasons they scored; a second
+    // bare copy of the same 30 paths cost 1–2k tokens on every turn and told
+    // the model nothing the leads had not already said.
+    pathSpines = [];
+    const leadCount = Array.isArray(bootstrapHints.candidatePool) ? bootstrapHints.candidatePool.length : 0;
+    log(`Local file scoring: hotDirs=[${hotDirs.join(",")}] leads=${leadCount}`);
   } else try {
     const results = scoreDirectories(query, projectRoot, topDirs, excludePaths, {
       topK: hotspotTopK,
@@ -3241,6 +3300,52 @@ async function _searchImpl({
     }
   }
 
+  // Wraps a would-be empty outcome: keeps the error, the raw response and the
+  // meta the caller already built, and only fills in the files the local
+  // prerank phase had ranked all along. Declared here, right after the
+  // bootstrap phase that produces `bootstrapHints`, because the rate-limit
+  // settle below is the earliest failure exit and needs it too; it closes over
+  // nothing from the repo-map block, so sitting ahead of that block is safe.
+  // `extraMeta` is merged only when the fallback actually fires, which keeps
+  // the meta-less failure output of a caller with an empty pool untouched.
+  const withLocalPrerankFallback = (result, extraMeta = null) => {
+    if ((result.files || []).length > 0) return result;
+    const files = _localPrerankAnswerFiles(bootstrapHints, projectRoot, maxResults);
+    if (files.length === 0) return result;
+    log(`Local prerank fallback: returning ${files.length} pre-ranked files instead of an empty answer`);
+    return {
+      ...result,
+      files,
+      rg_patterns: [...new Set([
+        ...(result.rg_patterns || []),
+        ...(bootstrapHints?.rgPatterns || []),
+      ])],
+      _meta: { ...(result._meta || {}), ...(extraMeta || {}), answerSource: LOCAL_PRERANK_ANSWER_SOURCE },
+    };
+  };
+
+  // The rate-limit exits happen before the repo map is built, so the tree
+  // fields buildSearchMeta reports simply do not exist yet. This carries only
+  // what is true at this point: the error kind, where we are, and what the
+  // local prerank phase produced.
+  const buildRateLimitMeta = () => ({
+    errorCode: "RATE_LIMITED",
+    requestedTreeDepth: treeDepth,
+    projectRoot,
+    excludePaths: effectiveExcludePaths,
+    turnsUsed: 0,
+    bootstrapMode,
+    bootstrapRemoteCalls: bootstrapHints?.remoteCalls ?? 0,
+    prerankCandidates: bootstrapHints?.prerankCandidates ?? 0,
+    prerankElapsedMs: bootstrapHints?.prerankElapsedMs ?? 0,
+    prerankTotalElapsedMs: bootstrapHints?.prerankTotalElapsedMs ?? 0,
+    prerankLexicalHits: bootstrapHints?.prerankLexicalHits ?? null,
+    prerankConfidence: bootstrapHints?.prerankConfidence ?? null,
+    prerankCandidatePaths: bootstrapHints?.candidatePaths || [],
+    prerankCandidatePathsRejected: bootstrapHints?.candidatePathsRejected || [],
+    jevScreen: bootstrapHints?.jev || null,
+  });
+
   // Settle the advisory probe before the main loop. Only request-recovery
   // validation gets one bounded Key switch; ordinary 429s stop here. Skip if
   // bootstrap failover already replaced the probed key — the verdict belongs
@@ -3249,7 +3354,11 @@ async function _searchImpl({
     (credentialState.usageContext?.keyId || "") === probedKeyId;
   if (!(await rateLimitPromise) && probeStillRelevant) {
     const rateLimited = await handleRateLimited();
-    if (rateLimited) return rateLimited;
+    // A rate-limited exit still holds the local prerank pool. Hand it back on
+    // the same terms as the other degraded answers: the 429 or RELAY_POOL_BUSY
+    // error travels untouched, the pool fills `files`, and answer_source marks
+    // it as local. `null` means the alternate key worked, so it is not an exit.
+    if (rateLimited) return withLocalPrerankFallback(rateLimited, buildRateLimitMeta());
   }
 
   const { tree: repoMap, depth: actualDepth, sizeBytes: treeSizeBytes, fellBack, autoDepth, strategy: repoMapStrategy, hotDirs = [] } = buildOptimizedRepoMap({
@@ -3275,10 +3384,12 @@ async function _searchImpl({
       projectRoot,
     )
     : "";
-  const prioritizeLocalLeads = bootstrapHints?.source === "local" && /route.*registr|provider\s+api\s+key|cache|invalidat/i.test(String(query || ""));
-  const candidatePrefix = prioritizeLocalLeads && localCandidateSection ? `\n\n${localCandidateSection}` : "";
-  const candidateSuffix = !prioritizeLocalLeads && localCandidateSection ? `\n\n${localCandidateSection}` : "";
-  const userContent = `Problem Statement: ${query}${candidatePrefix}\n\nRepo Map (tree -L ${actualDepth} /codebase):\n\`\`\`text\n${repoMap}\n\`\`\`${candidateSuffix}`;
+  // Leads go directly under the problem statement, ahead of the repo map. They
+  // are the only part of this message that was verified against the disk, and
+  // burying them after a 120 KB tree is what left the remote loop rediscovering
+  // paths it had already been handed.
+  const candidatePrefix = localCandidateSection ? `\n\n${localCandidateSection}` : "";
+  const userContent = `Problem Statement: ${query}${candidatePrefix}\n\nRepo Map (tree -L ${actualDepth} /codebase):\n\`\`\`text\n${repoMap}\n\`\`\``;
 
   const messages = [
     { role: 5, content: systemPrompt },
@@ -3378,18 +3489,18 @@ async function _searchImpl({
           });
         } catch (retryErr) {
           const retryCode = retryErr.code || errCode;
-          return {
+          return withLocalPrerankFallback({
             files: [],
             error: `${retryCode}: ${retryErr.message} (retry after context trim also failed)`,
             _meta: buildSearchMeta(turn + 1, { errorCode: retryCode, contextTrimmed: true }),
-          };
+          });
         }
       } else {
-        return {
+        return withLocalPrerankFallback({
           files: [],
           error: `${errCode}: ${e.message}`,
           _meta: baseMeta,
-        };
+        });
       }
     }
 
@@ -3405,7 +3516,7 @@ async function _searchImpl({
 
     if (toolInfo === null) {
       if (thinking.startsWith("[Error]")) {
-        return { files: [], error: thinking, _meta: buildSearchMeta(turn + 1) };
+        return withLocalPrerankFallback({ files: [], error: thinking, _meta: buildSearchMeta(turn + 1) });
       }
       if (thinking.includes("[TOOL_CALLS]") && malformedToolCallRetries < 1) {
         malformedToolCallRetries += 1;
@@ -3417,7 +3528,7 @@ async function _searchImpl({
         log("Malformed tool call: requesting one strict-JSON retry");
         continue;
       }
-      return { files: [], raw_response: thinking, _meta: buildSearchMeta(turn + 1) };
+      return withLocalPrerankFallback({ files: [], raw_response: thinking, _meta: buildSearchMeta(turn + 1) });
     }
 
     const [toolName, toolArgs] = toolInfo;
@@ -3448,7 +3559,9 @@ async function _searchImpl({
       }
       result.rg_patterns = [...new Set(executor.collectedRgPatterns)];
       result._meta = buildSearchMeta(turn + 1, { answerPathValidation: result.pathValidation });
-      return result;
+      // A second empty answer is the end of the retry budget, not the end of
+      // what the engine knows.
+      return withLocalPrerankFallback(result);
     }
 
     if (toolName === "restricted_exec") {
@@ -3544,12 +3657,12 @@ async function _searchImpl({
     }
   }
 
-  return {
+  return withLocalPrerankFallback({
     files: [],
     error: "Max turns reached without getting an answer",
     rg_patterns: [...new Set(executor.collectedRgPatterns)],
     _meta: buildSearchMeta(totalApiCalls + compensatedTurns),
-  };
+  });
 }
 
 /**
@@ -3579,7 +3692,13 @@ function _formatSearchResult(result, options) {
     const meta = result._meta;
     let errMsg = `Error: ${result.error}`;
     if (meta) {
-      errMsg += `\n\n[diagnostic] error_type=${meta.errorCode || "unknown"}, tree_depth_used=${meta.treeDepth}, tree_size=${meta.treeSizeKB}KB`;
+      errMsg += `\n\n[diagnostic] error_type=${meta.errorCode || "unknown"}`;
+      // A failure that lands before the repo map is built (the rate-limit
+      // exits) has no tree to report. Print the tree fields only when they
+      // exist rather than emitting "tree_depth_used=undefined".
+      if (meta.treeDepth !== undefined) {
+        errMsg += `, tree_depth_used=${meta.treeDepth}, tree_size=${meta.treeSizeKB}KB`;
+      }
       if (meta.fellBack) errMsg += ` (auto fell back from requested depth)`;
       if (meta.contextTrimmed) errMsg += `, context_trimmed=true`;
       if (meta.projectRoot) errMsg += `\n[diagnostic] project_path=${meta.projectRoot}`;
@@ -3595,6 +3714,20 @@ function _formatSearchResult(result, options) {
       } else {
         errMsg += `\n[hint] If the error is payload-related, try a lower tree_depth value or add exclude_paths.`;
       }
+    }
+    // The remote loop failed, but the local prerank pool was handed back in its
+    // place. Listing it here is the whole point of that fallback: a caller
+    // reading only the formatted output must still see the files.
+    const fallbackFiles = result.files || [];
+    if (fallbackFiles.length > 0) {
+      errMsg += `\n\nFound ${fallbackFiles.length} relevant files (local prerank fallback; the remote search did not answer).`;
+      errMsg += "\n";
+      for (let i = 0; i < fallbackFiles.length; i++) {
+        const entry = fallbackFiles[i];
+        const rangesStr = _formatAnswerRanges(entry.ranges);
+        errMsg += `\n  [${i + 1}/${fallbackFiles.length}] ${entry.full_path} (${rangesStr})`;
+      }
+      if (meta?.answerSource) errMsg += `\n\n[diagnostic] answer_source=${meta.answerSource}`;
     }
     return errMsg;
   }
@@ -3620,7 +3753,7 @@ function _formatSearchResult(result, options) {
     parts.push("");
     for (let i = 0; i < files.length; i++) {
       const entry = files[i];
-      const rangesStr = entry.ranges.map(([s, e]) => `L${s}-${e}`).join(", ");
+      const rangesStr = _formatAnswerRanges(entry.ranges);
       parts.push(`  [${i + 1}/${n}] ${entry.full_path} (${rangesStr})`);
     }
   } else {
@@ -3656,6 +3789,9 @@ function _formatSearchResult(result, options) {
     if (Array.isArray(meta.prerankCandidatePathsRejected) && meta.prerankCandidatePathsRejected.length > 0) {
       parts.push(`[diagnostic] prerank_candidate_paths_rejected=${meta.prerankCandidatePathsRejected.join(", ")}`);
     }
+    if (meta.answerSource) {
+      parts.push(`[diagnostic] answer_source=${meta.answerSource}`);
+    }
   }
 
   return parts.join("\n");
@@ -3685,6 +3821,10 @@ function _buildStructuredDiagnostics(result, options) {
     bootstrap_max_turns: options.bootstrapMaxTurns ?? 2,
     bootstrap_max_commands: options.bootstrapMaxCommands ?? 6,
     turns_used: meta.turnsUsed ?? null,
+    // "remote" when the files came out of the remote loop's ANSWER, which is
+    // the normal case and stays null so existing consumers see no change;
+    // "local_prerank" when a failure path handed back the pre-ranked pool.
+    answer_source: meta.answerSource || null,
     error_type: meta.errorCode || null,
     project_path: meta.projectRoot || options.projectRoot || null,
     bootstrap_mode: meta.bootstrapMode || options.bootstrapMode || "local",
@@ -3706,6 +3846,9 @@ function _buildStructuredDiagnostics(result, options) {
     jev_screen_input_tokens: meta.jevScreen?.inputTokens ?? null,
     jev_screen_output_tokens: meta.jevScreen?.outputTokens ?? null,
     jev_screen_top_probability: meta.jevScreen?.topProbability ?? null,
+    // ?? not ||: false means "screened but too undecided to act on", which is
+    // exactly what this field exists to distinguish from "never screened".
+    jev_screen_reorder_applied: meta.jevScreen?.reorderApplied ?? null,
     // ?? not ||: false is the state this field exists to report, and || would
     // collapse it into null.
     jev_screen_entitled: meta.jevScreen?.entitled ?? null,
@@ -3770,6 +3913,8 @@ export const __test = {
   YceEngineError,
   runLocalBootstrapPhase: _runLocalBootstrapPhase,
   formatLocalPrerankCandidates: _formatLocalPrerankCandidates,
+  localPrerankAnswerFiles: _localPrerankAnswerFiles,
+  formatAnswerRanges: _formatAnswerRanges,
   selectJevCandidates: _selectJevCandidates,
   leaseJevKey: _leaseJevKey,
   reportJevUsage: _reportJevUsage,

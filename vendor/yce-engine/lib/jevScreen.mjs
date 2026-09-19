@@ -1,15 +1,14 @@
-import { readFileSync, statSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 
 const DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_CANDIDATES = 20;
 const DEFAULT_SKELETON_CHARS = 400;
-
-// Jev's screen input is a compact source skeleton rather than a full file.
-// Keep declarations, imports, package/module lines, routes, and comments that
-// look like headings; this is intentionally language-agnostic.
-const SKELETON_LINE_RE = /^\s*(?:package\b|import\b|from\b|using\b|include\b|(?:export\s+)?(?:async\s+)?function\b|func\b|def\b|class\b|type\b|struct\b|interface\b|trait\b|enum\b|module\b|namespace\b|protocol\b|const\b|var\b|CREATE\s+(?:TABLE|VIEW|FUNCTION|PROCEDURE)\b|ALTER\s+(?:TABLE|VIEW|FUNCTION|PROCEDURE)\b|[@#/]\s*[A-Z][^\n]*)/i;
+// A second trim on top of the preranker's own limit. The list arriving here is
+// already ranked by overlap with the query, so this keeps the strongest names
+// and only drops the tail — raising it past the preranker's limit buys nothing.
+const MAX_RECORD_DECLARATIONS = 12;
+const MAX_RECORD_SNIPPET_LINES = 3;
 
 function safeCandidatePath(projectRoot, candidatePath) {
   const root = resolve(projectRoot);
@@ -20,39 +19,31 @@ function safeCandidatePath(projectRoot, candidatePath) {
   return full;
 }
 
-export function buildFileSkeleton(content, maxChars = DEFAULT_SKELETON_CHARS) {
-  const lines = String(content || "").split(/\r?\n/);
-  const kept = [];
-  let used = 0;
-  for (const line of lines) {
-    if (!SKELETON_LINE_RE.test(line)) continue;
-    const normalized = line.trim().slice(0, 180);
-    if (!normalized) continue;
-    const next = kept.length > 0 ? `${kept.join("\n")}\n${normalized}` : normalized;
-    if (next.length > maxChars) break;
-    kept.push(normalized);
-    used = next.length;
-  }
-  if (kept.length === 0) {
-    return String(content || "").slice(0, maxChars);
-  }
-  return kept.join("\n").slice(0, Math.max(0, maxChars));
-}
-
-function readCandidateSkeleton(projectRoot, candidate, maxChars) {
-  const fullPath = safeCandidatePath(projectRoot, candidate?.path);
-  if (!fullPath) return null;
-  try {
-    const stat = statSync(fullPath);
-    if (!stat.isFile() || stat.size > 2 * 1024 * 1024) return null;
-    const content = readFileSync(fullPath, "utf8");
-    return {
-      path: String(candidate.path).replace(/\\/g, "/"),
-      skeleton: buildFileSkeleton(content, maxChars),
-    };
-  } catch {
-    return null;
-  }
+// The screen is asked which file *defines* the behavior in `goal`. A skeleton
+// of source lines cannot answer that: for JS/TS files it is usually nothing
+// but the import list, so the only real signal left is the path. What does
+// answer it is already computed by the preranker — the declaration names it
+// picked against the query and the first lines the probe actually matched —
+// so the record is assembled from the candidate itself and the file is never
+// re-read here.
+function buildCandidateRecord(projectRoot, candidate, maxChars) {
+  if (!safeCandidatePath(projectRoot, candidate?.path)) return null;
+  const path = String(candidate.path).replace(/\\/g, "/");
+  const declarations = (Array.isArray(candidate.declarationNames) ? candidate.declarationNames : [])
+    .map((name) => String(name || "").trim())
+    .filter(Boolean)
+    .slice(0, MAX_RECORD_DECLARATIONS);
+  const matched = (Array.isArray(candidate.snippet) ? candidate.snippet : [])
+    .filter((entry) => entry && Number.isFinite(Number(entry.line)) && String(entry.text || "").trim())
+    .slice(0, MAX_RECORD_SNIPPET_LINES)
+    .map((entry) => `  L${Number(entry.line)}: ${String(entry.text).trim()}`);
+  const sections = [];
+  if (declarations.length > 0) sections.push(`declares: ${declarations.join(", ")}`);
+  if (matched.length > 0) sections.push(`matched lines:\n${matched.join("\n")}`);
+  return {
+    path,
+    skeleton: sections.join("\n").slice(0, Math.max(0, Number(maxChars) || DEFAULT_SKELETON_CHARS)),
+  };
 }
 
 function normalizeProbabilities(answer, ids) {
@@ -95,8 +86,8 @@ export async function screenCandidates({
 
   const records = [];
   for (const candidate of candidates.slice(0, Math.max(1, Number(maxCandidates) || DEFAULT_MAX_CANDIDATES))) {
-    const record = readCandidateSkeleton(projectRoot, candidate, skeletonChars);
-    if (record && record.skeleton) records.push(record);
+    const record = buildCandidateRecord(projectRoot, candidate, skeletonChars);
+    if (record) records.push(record);
   }
   if (records.length === 0) {
     return { ok: false, skipped: true, reason: "no_candidates", elapsedMs: Date.now() - startedAt, inputTokens: null, candidates: [] };

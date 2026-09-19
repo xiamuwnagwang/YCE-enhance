@@ -8,9 +8,11 @@ import { __test as coreTest } from "../lib/core.mjs";
 
 const RELAY_URL = "https://relay.invalid";
 
-// A query that matches the semantic-screen invitation regex so the Jev block
-// is reached without depending on the local preranker reporting low confidence.
-const SCREEN_QUERY = "invalidate the cache entry for a leased key";
+// Shares no term with the fixture repo, so the local preranker reports zero
+// lexical hits and low confidence — the only thing that opens the jev block now
+// that the query regex special cases are gone. The fallback pool is the fixture
+// files in path order, so file_0 is still internal/cache.go.
+const SCREEN_QUERY = "how does the scheduler rotate telemetry buckets";
 
 function makeFixtureRepo(t) {
   const root = mkdtempSync(join(tmpdir(), "yce-jev-lease-"));
