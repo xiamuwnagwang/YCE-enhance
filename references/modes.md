@@ -60,6 +60,15 @@ Y-Plan 只规划不执行。默认超时 480s（`YCE_TIMEOUT_PLAN_MS`）。网�
 
 检索和联网始终走 YCE，不跟模型后端走。自备模型（`--plan-provider` / `YCE_YPLAN_*`）两种后端都能用：relay 送给远端 YCE，local 由本机 CLI 或直连 API 调用。走 local 时不需要单独配置增强 Key。
 
+## 检索链路的本地增强层
+
+search 在远端 agent 循环之外有四层本地能力，默认全开，可单独关闭：
+
+- **本地预排**（`--bootstrap-mode local`，默认）：BM25、声明结构分与 probe 命中三路 RRF 融合，产出候选文件与 rg 提示，替代原来的远端 bootstrap 阶段（诊断 `bootstrap-remote-calls=0` 即零远端往返）；`remote` 保留旧的远端预排行为。
+- **正文回传**：结果直接带 `<code-context>`（同文件相邻区间合并、短片段补行、每文件最多 3 段、总预算默认 6400 token），元素与预算说明见 [xml-contract.md](xml-contract.md)。`--no-context` 或 `YCE_CODE_CONTEXT=false` 关闭；`YCE_CODE_CONTEXT_MAX_TOKENS` 调预算。
+- **jev 补屏**：主结果候选不足时，用 TypeSafe Jev 判别模型对 top-20 骨架做一次批量补屏。key 先向 relay 租用，失败回退本机 `TYPESAFE_API_KEY`，两者皆无则跳过（来源记在诊断 `jev-key-source`）。`--no-jev-screen` 或 `YCE_JEV_SCREEN=false` 关闭。
+- **结果缓存**：对工作区做内容指纹（Git 仓 = 索引 + 脏文件清单 + 脏文件 stat；非 Git 目录 = 全量路径+大小+mtime），树和查询都没变时直接复用上次的引擎结果（实测重复查询 ~15s → 500ms 内），命中后 `<code-context>` 正文仍从当前磁盘现读，不会拿到过期内容。改动任何被跟踪文件、新增或修改未跟踪文件都会使缓存失效。TTL 默认 6 小时，过期条目读时惰性删除、写入时顺带清扫。`--no-cache` 或 `YCE_SEARCH_CACHE=off` 关闭；`YCE_SEARCH_CACHE_TTL_MS` 调 TTL（非正值回退默认）；`YCE_SEARCH_CACHE_DIR` 改缓存目录（缺省在结果目录旁 `yce-cache/`）。
+
 ## 常用参数
 
 | 参数 | 说明 |
@@ -77,6 +86,9 @@ Y-Plan 只规划不执行。默认超时 480s（`YCE_TIMEOUT_PLAN_MS`）。网�
 | `--stdout-xml` | 回到旧行为：完整 XML 打 stdout、不落盘、无哨兵保护，仅管道场景用 |
 | `--xml-pretty` | 美化 stdout XML（落盘文件始终美化）。`--json-pretty` 只是旧别名，不会输出 JSON |
 | `--no-search` | 只关闭增强阶段的外部搜索，**不会**阻止后续代码检索 |
+| `--bootstrap-mode <local\|remote>` | 检索预排模式，默认 `local`；`remote` 走旧的远端 bootstrap |
+| `--no-context` | 关闭 `<code-context>` 正文回传 |
+| `--no-cache` | 本次调用禁用检索结果缓存 |
 
 超时默认：search 180s、network 120s、plan 480s、auto enhance 60s、explicit enhance 300s。
 

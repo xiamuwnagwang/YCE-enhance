@@ -53,6 +53,26 @@ node ./scripts/validate-yce-result.mjs <file> --expect-sha256 <xml_sha256> --exp
 | `<task-context present created-now>` | 任务锚点复述 |
 | `<errors>` | 即使 success=true 也要看。`EMPTY_RESULT` 表示跑完但没搜到 |
 
+## `<search>` 内的结果元素与诊断
+
+| 标签 / 属性 | 含义 |
+|------------|------|
+| `<code-context budget-tokens used-tokens>` | 裁剪好的代码正文，拿到结果即可读，不必再自己去 Read 源文件。每个 `<file path start-line end-line>` 包一段 CDATA；超总预算的段只保留路径与行区间、不带正文。`--no-context` 或 `YCE_CODE_CONTEXT=false` 时整个元素不出现 |
+| `<related-symbols>` | grep 线索：出现在上面片段里、但定义不在已展示片段中的标识符，按被引用次数取前 8，每条 `<symbol name path line kind/>` 只给声明位置不给正文；在超过 15 个文件里都有声明的通用符号会被丢弃。无片段或没有可报告符号时整个元素不出现 |
+| `<diagnostics>` | 检索过程诊断，标量字段走白名单输出（取不到值时该行省略） |
+
+`<diagnostics>` 与本地增强层相关的字段：
+
+| 字段 | 含义 |
+|------|------|
+| `cache-hit` / `cache-age-ms` / `cache-fingerprint` / `cache-fingerprint-ms` | 结果缓存是否命中、条目年龄、工作区指纹及其耗时。开启缓存时 `cache-hit` 始终输出（未命中为 `false`） |
+| `related-symbols-elapsed-ms` | 关联符号一步的耗时（毫秒） |
+| `bootstrap-mode` / `bootstrap-remote-calls` | 生效的预排模式（`local`/`remote`）与远端 bootstrap 往返次数（本地预排下为 0） |
+| `prerank-candidates` / `prerank-elapsed-ms` / `prerank-total-elapsed-ms` / `prerank-lexical-hits` / `prerank-confidence` | 本地预排的候选数、打分耗时与置信度 |
+| `jev-screen-attempted` / `jev-screen-success` / `jev-screen-elapsed-ms` / `jev-screen-input-tokens` / `jev-screen-output-tokens` / `jev-screen-top-probability` / `jev-screen-skip-reason` / `jev-key-source` / `jev-key-id` / `jev-lease-error` | jev 补屏（TypeSafe Jev 判别）的执行状态、耗时、token 用量与 key 来源（`relay`/`env_fallback`/`none`）、租约错误 |
+
+正文时效约定：`<code-context>` 的正文永远在返回前从当前磁盘现读——结果缓存只存引擎 payload、不存正文，因此缓存命中也不会拿到过期的代码内容。
+
 ## 校验 JSON 与闸门
 
 `validate-yce-result.mjs` 用的是与 CLI 相同的实现（`scripts/lib/resultGate.js`），所以收据和事后复核不会互相矛盾。输出：
