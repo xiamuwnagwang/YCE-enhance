@@ -1111,6 +1111,10 @@ function serializeForStdout(payload, pretty = false) {
         ["jev-key-source", "jev_key_source"],
         ["jev-key-id", "jev_key_id"],
         ["jev-lease-error", "jev_lease_error"],
+        // true = the lease overlapped the local prerank (entitled users only),
+        // false = sent after prerank, null = never sent.
+        ["jev-lease-prefetched", "jev_lease_prefetched"],
+        ["jev-lease-elapsed-ms", "jev_lease_elapsed_ms"],
         ["jev-screen-entitled", "jev_screen_entitled"],
         // Set only on a cache hit, where every other jev-* field is stripped:
         // marks "this result carried jev diagnostics from an earlier run and

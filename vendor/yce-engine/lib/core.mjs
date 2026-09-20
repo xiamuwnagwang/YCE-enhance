@@ -834,14 +834,16 @@ function _jevLeaseFailure(code, error) {
   return { ok: false, code, error, terminal: JEV_TERMINAL_LEASE_CODES.has(code) };
 }
 
-async function _leaseJevKey() {
+async function _leaseJevKey({ timeoutMs = JEV_LEASE_TIMEOUT_MS, signal = null } = {}) {
   const relayUrl = _normalizeRelayUrl(process.env.YCE_RELAY_URL) || DEFAULT_YCE_RELAY_ORIGIN;
   const relayToken = String(process.env.YCE_RELAY_TOKEN || "").trim();
   if (!relayToken) {
     return _jevLeaseFailure("MISSING_RELAY_TOKEN", "missing relay token (set YCE_RELAY_TOKEN)");
   }
 
+  const startedAt = Date.now();
   try {
+    const timeoutSignal = AbortSignal.timeout(Math.max(250, Number(timeoutMs) || JEV_LEASE_TIMEOUT_MS));
     const response = await fetch(`${relayUrl}/yce/jev-lease`, {
       method: "POST",
       headers: {
@@ -850,7 +852,7 @@ async function _leaseJevKey() {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({}),
-      signal: AbortSignal.timeout(JEV_LEASE_TIMEOUT_MS),
+      signal: signal ? AbortSignal.any([timeoutSignal, signal]) : timeoutSignal,
     });
     // Every non-200 becomes an error value carrying the relay's own code, so
     // the caller can tell a terminal verdict from a transient one. Never a
@@ -859,15 +861,18 @@ async function _leaseJevKey() {
       const payload = await response.json().catch(() => ({}));
       const code = String(payload?.code || "").trim() || `HTTP ${response.status}`;
       const message = String(payload?.error || payload?.message || "").trim();
-      return _jevLeaseFailure(code, message ? `${code}: ${message}` : code);
+      return { ..._jevLeaseFailure(code, message ? `${code}: ${message}` : code), elapsedMs: Date.now() - startedAt };
     }
     const payload = await response.json().catch(() => ({}));
     const apiKey = String(payload?.api_key || "").trim();
     if (!apiKey) {
-      return _jevLeaseFailure(
-        "EMPTY_LEASE_RESPONSE",
-        `HTTP ${response.status}: lease response carried no api_key`,
-      );
+      return {
+        ..._jevLeaseFailure(
+          "EMPTY_LEASE_RESPONSE",
+          `HTTP ${response.status}: lease response carried no api_key`,
+        ),
+        elapsedMs: Date.now() - startedAt,
+      };
     }
     return {
       ok: true,
@@ -878,11 +883,15 @@ async function _leaseJevKey() {
       relayToken,
       leaseExpiresAt: String(payload?.lease_expires_at || "").trim(),
       selectionReason: String(payload?.selection_reason || "").trim(),
+      elapsedMs: Date.now() - startedAt,
     };
   } catch (error) {
     // Timeouts and network errors mean the relay could not be reached at all,
     // which says nothing about entitlement — keep the env fallback.
-    return _jevLeaseFailure("JEV_LEASE_TRANSPORT_ERROR", `jev lease error: ${error?.message || String(error)}`);
+    return {
+      ..._jevLeaseFailure("JEV_LEASE_TRANSPORT_ERROR", `jev lease error: ${error?.message || String(error)}`),
+      elapsedMs: Date.now() - startedAt,
+    };
   }
 }
 
@@ -971,6 +980,19 @@ async function _runLocalBootstrapPhase({
   onProgress,
 }) {
   const startedAt = Date.now();
+  const entitled = typeof jevScreenEnabled === "boolean" ? jevScreenEnabled : null;
+  // The relay's jev lease is only a Redis lease_id→entry record plus a
+  // lease_count statistic — it holds no pool slot and no user concurrency
+  // budget (verified against jev_lease.go / tinyfishscheduler). So when the
+  // relay has explicitly said this user is entitled, the lease can be sent
+  // before the local prerank and overlap its 0.4–2.4s instead of adding its
+  // own 0.3–2.2s afterwards. An unused prefetched lease costs the relay one
+  // lease_count increment and nothing else; no usage receipt is sent for it.
+  // A null entitlement (old relay, BYOK) keeps the sequential path: those
+  // users have the env-key fallback and the relay never promised anything.
+  const prefetchLease = entitled === true && !noJevScreen && process.env.YCE_JEV_LEASE_PREFETCH !== "0";
+  const prefetchAbort = prefetchLease ? new AbortController() : null;
+  const prefetchedLease = prefetchLease ? _leaseJevKey({ signal: prefetchAbort.signal }) : null;
   const topDirs = _listTopLevelDirs(projectRoot, excludePaths);
   const local = scoreFiles(query, projectRoot, topDirs, excludePaths, {
     maxResults,
@@ -996,13 +1018,25 @@ async function _runLocalBootstrapPhase({
     keySource: null,
     keyId: null,
     leaseError: null,
+    // true = the lease was sent before prerank and overlapped it; false = it
+    // was sent after prerank decided the screen would run; null = never sent.
+    leasePrefetched: null,
+    leaseElapsedMs: null,
     // true|false from the relay, null when it never said.
-    entitled: typeof jevScreenEnabled === "boolean" ? jevScreenEnabled : null,
+    entitled,
   };
   let jevPoolApplied = false;
+  // Nothing awaits a prefetched lease the screen will not use; the fetch is
+  // aborted so a slow relay does not keep this process alive for nothing.
+  const discardPrefetchedLease = () => {
+    if (!prefetchedLease) return;
+    prefetchAbort.abort();
+    prefetchedLease.catch(() => {});
+  };
 
   if (!local.lowConfidence) {
     jev.skipReason = "high_confidence";
+    discardPrefetchedLease();
   } else if (noJevScreen) {
     jev.skipReason = "disabled_by_flag";
   } else if (jev.entitled === false) {
@@ -1014,14 +1048,15 @@ async function _runLocalBootstrapPhase({
     // key.
     jev.skipReason = "not_entitled";
   } else if (jevCandidates.length === 0) {
-    // Checked before the lease: a key leased for a screen that will not run
-    // holds a relay pool slot until its TTL expires.
     jev.skipReason = "no_candidates";
+    discardPrefetchedLease();
   } else {
     // Lease first, use second. The relay pool is the preferred source, the
     // local env key is the fallback, and a relay failure is always recorded
     // on the diagnostics rather than degrading into a silent skip.
-    const lease = await _leaseJevKey();
+    jev.leasePrefetched = Boolean(prefetchedLease);
+    const lease = prefetchedLease ? await prefetchedLease : await _leaseJevKey();
+    jev.leaseElapsedMs = Number.isFinite(lease.elapsedMs) ? lease.elapsedMs : null;
     if (!lease.ok) jev.leaseError = lease.error;
     // A terminal verdict ends the attempt right here. The env key is not even
     // read: 403 JEV_NOT_ENTITLED and 503 JEV_POOL_EXHAUSTED are the relay
@@ -3879,6 +3914,8 @@ function _buildStructuredDiagnostics(result, options) {
     jev_key_source: meta.jevScreen?.keySource || null,
     jev_key_id: meta.jevScreen?.keyId || null,
     jev_lease_error: meta.jevScreen?.leaseError || null,
+    jev_lease_prefetched: typeof meta.jevScreen?.leasePrefetched === "boolean" ? meta.jevScreen.leasePrefetched : null,
+    jev_lease_elapsed_ms: Number.isFinite(meta.jevScreen?.leaseElapsedMs) ? meta.jevScreen.leaseElapsedMs : null,
   };
 }
 

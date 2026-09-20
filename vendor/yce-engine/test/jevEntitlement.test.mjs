@@ -258,6 +258,80 @@ test("an entitled user does send exactly one lease request and screens on the po
   assert.equal(result.jev.success, true);
   assert.equal(calls.screen.length, 1);
   assert.equal(calls.screen[0], "Bearer pooled-jev-key");
+  // Entitled users get the lease sent before the local prerank so its round
+  // trip overlaps the scoring instead of following it.
+  assert.equal(result.jev.leasePrefetched, true);
+  assert.ok(Number.isFinite(result.jev.leaseElapsedMs));
+});
+
+// The prefetch must overlap the prerank, and a prefetched lease the screen
+// does not use must never turn into a screen call or a usage receipt — the
+// relay bills the lease as issued (lease_count) and nothing else.
+test("an entitled user's lease is sent before prerank finishes and is discarded when the screen is skipped", async (t) => {
+  const root = makeFixtureRepo(t);
+  let leaseSignal = null;
+  const { calls, fetchImpl } = countingFetch({
+    jevLease: () => jsonResponse({ api_key: "pooled-jev-key", key_id: "pool-entry-7", lease_id: "jev-lease-7" }),
+  });
+  const capturingFetch = (url, options = {}) => {
+    if (String(url).endsWith("/yce/jev-lease")) leaseSignal = options.signal || null;
+    return fetchImpl(url, options);
+  };
+  installEnvironment(t, { fetchImpl: capturingFetch });
+
+  // "InvalidateCache" is a declaration in the fixture, so the prerank is high
+  // confidence and the screen is skipped — but the lease had already left.
+  const result = await coreTest.runLocalBootstrapPhase({
+    query: "InvalidateCache lease key",
+    projectRoot: root,
+    excludePaths: [],
+    maxResults: 5,
+    jevScreenEnabled: true,
+  });
+  await coreTest.flushUsageReports();
+
+  assert.equal(result.jev.skipReason, "high_confidence");
+  assert.equal(calls.jevLease, 1);
+  assert.equal(calls.screen.length, 0);
+  assert.equal(result.jev.leasePrefetched, null);
+  assert.equal(result.jev.keySource, null);
+  assert.ok(leaseSignal && leaseSignal.aborted, "unused prefetched lease is aborted");
+});
+
+test("YCE_JEV_LEASE_PREFETCH=0 restores the sequential lease for entitled users", async (t) => {
+  const root = makeFixtureRepo(t);
+  const { calls, fetchImpl } = countingFetch({
+    jevLease: () => jsonResponse({ api_key: "pooled-jev-key", key_id: "pool-entry-8", lease_id: "jev-lease-8" }),
+  });
+  installEnvironment(t, { fetchImpl });
+  const previous = process.env.YCE_JEV_LEASE_PREFETCH;
+  process.env.YCE_JEV_LEASE_PREFETCH = "0";
+  t.after(() => {
+    if (previous === undefined) delete process.env.YCE_JEV_LEASE_PREFETCH;
+    else process.env.YCE_JEV_LEASE_PREFETCH = previous;
+  });
+
+  const skipped = await coreTest.runLocalBootstrapPhase({
+    query: "InvalidateCache lease key",
+    projectRoot: root,
+    excludePaths: [],
+    maxResults: 5,
+    jevScreenEnabled: true,
+  });
+  assert.equal(skipped.jev.skipReason, "high_confidence");
+  assert.equal(calls.jevLease, 0, "no speculative lease when prefetch is off");
+
+  const screened = await coreTest.runLocalBootstrapPhase({
+    query: SCREEN_QUERY,
+    projectRoot: root,
+    excludePaths: [],
+    maxResults: 5,
+    jevScreenEnabled: true,
+  });
+  await coreTest.flushUsageReports();
+  assert.equal(calls.jevLease, 1);
+  assert.equal(screened.jev.leasePrefetched, false);
+  assert.equal(screened.jev.success, true);
 });
 
 // The eighth shape's second half: a missing YCE_RELAY_TOKEN also sends zero
