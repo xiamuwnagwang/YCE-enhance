@@ -73,6 +73,12 @@ function writeFakeEngine(dir) {
       "}",
       "const files = JSON.parse(process.env.FAKE_ENGINE_FILES || '[]');",
       "const diagnostics = { source: 'fake' };",
+      "diagnostics.early_answer_prompt = true;",
+      "diagnostics.prerank_index_mode = 'disk';",
+      "diagnostics.prerank_index_hits = 42;",
+      "diagnostics.prerank_index_misses = 0;",
+      "diagnostics.prerank_index_load_ms = 3;",
+      "diagnostics.prerank_index_save_ms = 0;",
       "if (process.env.FAKE_ENGINE_JEV === '1') {",
       "  diagnostics.jev_screen_attempted = true;",
       "  diagnostics.jev_screen_success = true;",
@@ -745,6 +751,9 @@ test("CLI end-to-end: cache-hit/cache-age-ms/cache-fingerprint land in the XML a
     const firstXml = readFileSync(resultFileOf(first), "utf8");
     assert.match(firstXml, /<cache-hit>false<\/cache-hit>/);
     assert.match(firstXml, /<cache-fingerprint>[a-f0-9]{64}<\/cache-fingerprint>/);
+    assert.match(firstXml, /<early-answer-prompt>true<\/early-answer-prompt>/);
+    assert.match(firstXml, /<prerank-index-mode>disk<\/prerank-index-mode>/);
+    assert.match(firstXml, /<prerank-index-hits>42<\/prerank-index-hits>/);
     assert.match(firstXml, /<jev-screen-attempted>true<\/jev-screen-attempted>/, "a real run reports its own screen");
 
     const second = runCli(["--out", join(stateDir, "second.xml")]);

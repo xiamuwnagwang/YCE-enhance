@@ -53,6 +53,17 @@ node ./scripts/validate-yce-result.mjs "<result_file>" --expect-sha256 <xml_sha2
 - `plan` 只产出 Markdown 计划，不改文件、不跑命令。计划输入不只来自网页：可包含任务、历史、手工 `search_context`、`--with-search` 的仓库代码上下文，以及显式开启的外部 web search；拿到计划后是否执行由用户决定。
 - 详情：[modes.md](references/modes.md)、[network-search.md](references/network-search.md)
 
+## 检索性能开关
+
+| 变量 | 默认 | 作用 |
+|------|------|------|
+| `YCE_JEV_LEASE_PREFETCH` | 开 | `0` 恢复预排完成后再申请 jev 租约 |
+| `YCE_PRERANK_INDEX` | 开 | `0` 禁用持久预排索引并恢复逐文件读取 |
+| `YCE_PRERANK_INDEX_DIR` | `~/.cache/yce-engine/prerank-index` | 覆盖预排索引目录 |
+| `YCE_PRERANK_CJK` | 开 | `0` 恢复不产生中文二元组的旧 tokenizer |
+| `YCE_DEFER_USAGE_FLUSH` | 开 | `0`/`false`/`off`/`no` 让父进程继续等待 usage 回执 |
+| `YCE_EARLY_ANSWER` | 关 | `1` 启用“证据充分后尽早作答”提示；3×12 双臂 A/B 未测得耗时收益，因此不默认开启 |
+
 ## 敏感信息
 
 禁止：

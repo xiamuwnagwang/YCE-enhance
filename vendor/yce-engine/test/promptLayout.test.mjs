@@ -15,6 +15,16 @@ process.on("exit", () => {
 
 const QUERY = "select upstream key from the lease pool";
 
+function withEarlyAnswerEnv(t, value) {
+  const previous = process.env.YCE_EARLY_ANSWER;
+  t.after(() => {
+    if (previous === undefined) delete process.env.YCE_EARLY_ANSWER;
+    else process.env.YCE_EARLY_ANSWER = previous;
+  });
+  if (value === undefined) delete process.env.YCE_EARLY_ANSWER;
+  else process.env.YCE_EARLY_ANSWER = value;
+}
+
 function makeFixtureRepo(t) {
   const root = mkdtempSync(join(tmpdir(), "yce-prompt-layout-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -97,4 +107,41 @@ test("the system prompt tells the model to read the verified leads first", async
     systemPrompt.indexOf("# VERIFIED LEADS FIRST") < systemPrompt.indexOf("# SOME EXAMPLES OF WORKFLOWS"),
     "the leads rule must come before the MAP/ANCHOR/TRACE workflow it overrides",
   );
+});
+
+test("YCE_EARLY_ANSWER=1 tells the model to answer as soon as it is grounded", async (t) => {
+  withEarlyAnswerEnv(t, "1");
+  const strings = await captureFirstRequest(t, makeFixtureRepo(t));
+  const systemPrompt = strings.find((value) => value.includes("# THINKING RULES"));
+  assert.ok(systemPrompt, "the system prompt never reached the request");
+  const leadsAt = systemPrompt.indexOf("# VERIFIED LEADS FIRST");
+  const earlyAt = systemPrompt.indexOf("# ANSWER AS SOON AS YOU ARE GROUNDED");
+  const fastAt = systemPrompt.indexOf("# FAST-SEARCH DEFAULTS");
+  assert.ok(earlyAt > 0, "the early-answer section is missing from the default prompt");
+  assert.ok(leadsAt >= 0 && leadsAt < earlyAt);
+  assert.ok(earlyAt < fastAt);
+  assert.match(systemPrompt, /call the `answer` tool/);
+  assert.doesNotMatch(systemPrompt, /Use tool calls liberally/);
+});
+
+test("YCE_EARLY_ANSWER=0 restores the pre-W6 prompt text", (t) => {
+  withEarlyAnswerEnv(t, "0");
+  const off = __test.buildSystemPrompt(3, 8, 10);
+  assert.doesNotMatch(off, /# ANSWER AS SOON AS YOU ARE GROUNDED/);
+  assert.match(off, /- Use tool calls liberally and purposefully to ground/);
+  assert.doesNotMatch(off, /\{(early_answer_section|tool_call_adverb|max_turns|max_commands|max_results)\}/);
+  assert.match(off, /your final ANSWER\.\n\n# FAST-SEARCH DEFAULTS/);
+  delete process.env.YCE_EARLY_ANSWER;
+  assert.equal(__test.buildSystemPrompt(3, 8, 10), off, "the inconclusive A/B keeps the default arm off");
+});
+
+test("the early-answer switch changes nothing but its own section and the adverb", (t) => {
+  withEarlyAnswerEnv(t, "1");
+  const on = __test.buildSystemPrompt(3, 8, 10);
+  process.env.YCE_EARLY_ANSWER = "0";
+  const off = __test.buildSystemPrompt(3, 8, 10);
+  const normalized = on
+    .replace(/# ANSWER AS SOON AS YOU ARE GROUNDED\n[\s\S]*?\n\n(?=# FAST-SEARCH DEFAULTS)/, "")
+    .replace("- Use tool calls purposefully", "- Use tool calls liberally and purposefully");
+  assert.equal(normalized, off);
 });

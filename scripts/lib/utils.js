@@ -245,6 +245,7 @@ function buildYceEngineEnv(merged) {
     "YCE_PRERANK_INDEX",
     "YCE_PRERANK_INDEX_DIR",
     "YCE_DEFER_USAGE_FLUSH",
+    "YCE_EARLY_ANSWER",
   ];
 
   for (const key of passthroughKeys) {
@@ -1091,6 +1092,7 @@ function serializeForStdout(payload, pretty = false) {
         ["max-turns", "max_turns"],
         ["max-commands", "max_commands"],
         ["max-results", "max_results"],
+        ["early-answer-prompt", "early_answer_prompt"],
         ["timeout-ms", "timeout_ms"],
         ["bootstrap-enabled", "bootstrap_enabled"],
         ["bootstrap-tree-depth", "bootstrap_tree_depth"],

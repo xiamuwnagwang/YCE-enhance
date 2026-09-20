@@ -270,7 +270,7 @@ directory, not \`.
 
 # THINKING RULES
 - Think step-by-step. Plan, reason, and reflect before each tool call.
-- Use tool calls liberally and purposefully to ground every conclusion \
+- Use tool calls {tool_call_adverb} to ground every conclusion \
 in real code, not assumptions.
 - If a command fails, rethink and try something different; do not \
 complain to the user.
@@ -290,7 +290,7 @@ Do not spend a turn rediscovering a path that is already listed.
 - Leads are ranked, not certain: a lead that turns out to be irrelevant \
 should be dropped from the ANSWER, not defended.
 - Preserve the exact path spelling from the leads in your final ANSWER.
-
+{early_answer_section}
 # FAST-SEARCH DEFAULTS (optimize rg/tree on large repos)
 - Start NARROW, then widen only if needed. Prefer searching likely code \
 roots first (e.g., \`src/\`, \`lib/\`, \`app/\`, \`packages/\`, \`services/\`) \
@@ -387,6 +387,19 @@ to provide some output. An empty answer is always better than a misleading one.
 # RESULT COUNT
 Aim to return at most {max_results} files in your answer. Focus on the most \
 relevant files first. If fewer files are relevant, return fewer.
+`;
+
+const EARLY_ANSWER_SECTION = `
+# ANSWER AS SOON AS YOU ARE GROUNDED
+- The turn budget is a ceiling, not a quota. As soon as you have \`readfile\`d \
+the code that defines the behavior the request is about and you know the paths \
+and line ranges, call the \`answer\` tool. Do not spend a remaining turn just \
+because it exists.
+- Re-reading a lead you already read, or searching for a synonym of something \
+you already confirmed in the code, adds no evidence and costs a turn.
+- The one thing you may NOT do is answer from the repo map or the lead list \
+alone: at least one candidate file must have been read with \`readfile\` before \
+you answer.
 `;
 
 const FINAL_FORCE_ANSWER =
@@ -559,10 +572,22 @@ function _trimMessages(messages, state = {}) {
  * @param {number} maxTurns
  * @param {number} maxCommands
  * @param {number} maxResults
+ * @param {boolean} [earlyAnswer]
  * @returns {string}
  */
-function buildSystemPrompt(maxTurns = 3, maxCommands = 8, maxResults = 10) {
+function _earlyAnswerPromptEnabled() {
+  return process.env.YCE_EARLY_ANSWER === "1";
+}
+
+function buildSystemPrompt(
+  maxTurns = 3,
+  maxCommands = 8,
+  maxResults = 10,
+  earlyAnswer = _earlyAnswerPromptEnabled(),
+) {
   return SYSTEM_PROMPT_TEMPLATE
+    .replaceAll("{early_answer_section}", earlyAnswer ? EARLY_ANSWER_SECTION : "")
+    .replaceAll("{tool_call_adverb}", earlyAnswer ? "purposefully" : "liberally and purposefully")
     .replaceAll("{max_turns}", String(maxTurns))
     .replaceAll("{max_commands}", String(maxCommands))
     .replaceAll("{max_results}", String(maxResults));
@@ -3343,7 +3368,8 @@ async function _searchImpl({
   const executor = new ToolExecutor(projectRoot);
   const toolDefs = getToolDefinitions(maxCommands);
   const effectiveMaxTurns = maxTurns;
-  const systemPrompt = buildSystemPrompt(effectiveMaxTurns, maxCommands, maxResults);
+  const earlyAnswerPrompt = _earlyAnswerPromptEnabled();
+  const systemPrompt = buildSystemPrompt(effectiveMaxTurns, maxCommands, maxResults, earlyAnswerPrompt);
 
   let bootstrapHints = null;
   if (bootstrapEnabled) {
@@ -3410,6 +3436,7 @@ async function _searchImpl({
     projectRoot,
     excludePaths: effectiveExcludePaths,
     turnsUsed: 0,
+    earlyAnswerPrompt,
     bootstrapMode,
     bootstrapRemoteCalls: bootstrapHints?.remoteCalls ?? 0,
     prerankCandidates: bootstrapHints?.prerankCandidates ?? 0,
@@ -3507,6 +3534,7 @@ async function _searchImpl({
     hotDirs,
     excludePaths: effectiveExcludePaths,
     turnsUsed,
+    earlyAnswerPrompt,
     bootstrapMode,
     bootstrapRemoteCalls: bootstrapHints?.remoteCalls ?? 0,
     prerankCandidates: bootstrapHints?.prerankCandidates ?? 0,
@@ -3901,6 +3929,7 @@ function _buildStructuredDiagnostics(result, options) {
     max_turns: options.maxTurns ?? 3,
     max_commands: options.maxCommands ?? 8,
     max_results: options.maxResults ?? 10,
+    early_answer_prompt: meta.earlyAnswerPrompt ?? _earlyAnswerPromptEnabled(),
     timeout_ms: options.timeoutMs ?? 30000,
     bootstrap_enabled: options.bootstrapEnabled !== false,
     bootstrap_tree_depth: options.bootstrapTreeDepth ?? 1,
@@ -4020,6 +4049,7 @@ export const __test = {
   formatLocalPrerankCandidates: _formatLocalPrerankCandidates,
   localPrerankAnswerFiles: _localPrerankAnswerFiles,
   formatAnswerRanges: _formatAnswerRanges,
+  buildSystemPrompt,
   selectJevCandidates: _selectJevCandidates,
   leaseJevKey: _leaseJevKey,
   reportJevUsage: _reportJevUsage,
