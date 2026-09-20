@@ -202,8 +202,12 @@ const LOCAL_JEV_MAX_CANDIDATES = 30;
 const JEV_TOP_PROBABILITY_FLOOR = 0.25;
 // The Jev screen is an optional prerank accelerator, so its key lease must not
 // become a new latency source: fail fast onto the local env key instead of
-// waiting out the 10s budget the main search lease can afford.
-const JEV_LEASE_TIMEOUT_MS = 2000;
+// waiting out the 10s budget the main search lease can afford. The budget has
+// to clear the relay's real latency, though: production /yce/jev-lease measured
+// 0.33-2.2s (2026-09-20, server-side time, connect 1ms), and at 2000ms the
+// lease timed out on 3/3 entitled CLI runs — for pooled users there is no env
+// key behind the fallback, so "fail fast" meant the screen never ran at all.
+const JEV_LEASE_TIMEOUT_MS = 4000;
 
 function _mergeExcludePaths(excludePaths = []) {
   const merged = [...DEFAULT_EXCLUDE_PATHS];
@@ -2992,12 +2996,34 @@ function _mergeAnswerFile(files, byPath, entry) {
   return true;
 }
 
+// The model writes ranges by hand and occasionally inverts or truncates one
+// (`15851-1600` for what was meant as `1585-1600`). Such a range cannot be
+// read back from disk, so it is dropped here rather than carried into the
+// result text where the caller would try to open it.
+function _parseAnswerRanges(fileBody) {
+  const ranges = [];
+  let invalid = 0;
+  const rangeRegex = /<range>(\d+)-(\d+)<\/range>/g;
+  let rm;
+  while ((rm = rangeRegex.exec(fileBody)) !== null) {
+    const start = parseInt(rm[1], 10);
+    const end = parseInt(rm[2], 10);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 1 || end < start) {
+      invalid += 1;
+      continue;
+    }
+    ranges.push([start, end]);
+  }
+  return { ranges, invalid };
+}
+
 function _parseAnswer(xmlText, projectRoot, knownCandidates = [], validatePaths = true) {
   const files = [];
   const byPath = new Map();
   const mergedPaths = [];
   const removedPaths = [];
   const correctedPaths = [];
+  let invalidRanges = 0;
   const resolvedRoot = resolve(projectRoot);
   const fileRegex = /<file\s+path=(["'])([^"']+)\1>([\s\S]*?)<\/file>/g;
   let fm;
@@ -3009,13 +3035,9 @@ function _parseAnswer(xmlText, projectRoot, knownCandidates = [], validatePaths 
       const fullPath = resolve(projectRoot, rel);
       const relToRoot = relative(resolvedRoot, fullPath);
       if (relToRoot === ".." || relToRoot.startsWith(`..${sep}`) || isAbsolute(relToRoot)) continue;
-      const ranges = [];
-      const rangeRegex = /<range>(\d+)-(\d+)<\/range>/g;
-      let rm;
-      while ((rm = rangeRegex.exec(fm[3])) !== null) {
-        ranges.push([parseInt(rm[1], 10), parseInt(rm[2], 10)]);
-      }
-      if (_mergeAnswerFile(files, byPath, { path: rel, full_path: fullPath, ranges })) mergedPaths.push(rel);
+      const parsed = _parseAnswerRanges(fm[3]);
+      invalidRanges += parsed.invalid;
+      if (_mergeAnswerFile(files, byPath, { path: rel, full_path: fullPath, ranges: parsed.ranges })) mergedPaths.push(rel);
       continue;
     }
     if (!_resolveProjectPath(projectRoot, originalRel)) {
@@ -3038,14 +3060,10 @@ function _parseAnswer(xmlText, projectRoot, knownCandidates = [], validatePaths 
       continue;
     }
 
-    const ranges = [];
-    const rangeRegex = /<range>(\d+)-(\d+)<\/range>/g;
-    let rm;
-    while ((rm = rangeRegex.exec(fm[3])) !== null) {
-      ranges.push([parseInt(rm[1], 10), parseInt(rm[2], 10)]);
-    }
+    const parsed = _parseAnswerRanges(fm[3]);
+    invalidRanges += parsed.invalid;
 
-    if (_mergeAnswerFile(files, byPath, { path: rel, full_path: fullPath, ranges })) mergedPaths.push(rel);
+    if (_mergeAnswerFile(files, byPath, { path: rel, full_path: fullPath, ranges: parsed.ranges })) mergedPaths.push(rel);
   }
   return {
     files,
@@ -3053,6 +3071,7 @@ function _parseAnswer(xmlText, projectRoot, knownCandidates = [], validatePaths 
       removed: [...new Set(removedPaths)],
       corrected: correctedPaths,
       merged: [...new Set(mergedPaths)],
+      invalidRanges,
     },
   };
 }
@@ -3786,6 +3805,9 @@ function _formatSearchResult(result, options) {
     if (pathValidation && Array.isArray(pathValidation.merged) && pathValidation.merged.length > 0) {
       parts.push(`[diagnostic] answer_path_validation_merged=${pathValidation.merged.join(", ")}`);
     }
+    if (pathValidation && Number(pathValidation.invalidRanges) > 0) {
+      parts.push(`[diagnostic] answer_invalid_ranges_dropped=${pathValidation.invalidRanges}`);
+    }
     if (Array.isArray(meta.prerankCandidatePathsRejected) && meta.prerankCandidatePathsRejected.length > 0) {
       parts.push(`[diagnostic] prerank_candidate_paths_rejected=${meta.prerankCandidatePathsRejected.join(", ")}`);
     }
@@ -3839,6 +3861,7 @@ function _buildStructuredDiagnostics(result, options) {
     answer_path_validation: {
       removed: Array.isArray(meta.answerPathValidation?.removed) ? meta.answerPathValidation.removed : [],
       corrected: Array.isArray(meta.answerPathValidation?.corrected) ? meta.answerPathValidation.corrected : [],
+      invalid_ranges: Number(meta.answerPathValidation?.invalidRanges) || 0,
     },
     jev_screen_attempted: meta.jevScreen?.attempted === true,
     jev_screen_success: meta.jevScreen?.success === true,

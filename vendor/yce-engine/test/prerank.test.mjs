@@ -166,6 +166,42 @@ test("candidate injection filters missing paths and answer parsing records valid
   assert.deepEqual(remoteCompatible.files.map((entry) => entry.path), ["internal/not_present.go"]);
 });
 
+test("answer parsing drops inverted or zero-based ranges and counts them", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "yce-answer-ranges-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "lib"));
+  writeFileSync(join(root, "lib", "db.ts"), "export const x = 1;\n");
+
+  // Seen in production on 2026-09-20: `15851-1600` for what was meant as 1585-1600.
+  const parsed = coreTest.parseAnswer([
+    "<ANSWER>",
+    '  <file path="/codebase/lib/db.ts"><range>15851-1600</range><range>0-5</range><range>10650-10660</range></file>',
+    "</ANSWER>",
+  ].join("\n"), root, [{ path: "lib/db.ts" }]);
+  assert.deepEqual(parsed.files.map((entry) => entry.path), ["lib/db.ts"]);
+  assert.deepEqual(parsed.files[0].ranges, [[10650, 10660]]);
+  assert.equal(parsed.pathValidation.invalidRanges, 2);
+
+  // A file whose every range is invalid stays in the answer with no ranges.
+  const allInvalid = coreTest.parseAnswer(
+    '<ANSWER><file path="/codebase/lib/db.ts"><range>9-3</range></file></ANSWER>',
+    root,
+    [{ path: "lib/db.ts" }],
+  );
+  assert.deepEqual(allInvalid.files[0].ranges, []);
+  assert.equal(allInvalid.pathValidation.invalidRanges, 1);
+
+  // The remote-compatible path applies the same rule.
+  const remote = coreTest.parseAnswer(
+    '<ANSWER><file path="/codebase/lib/db.ts"><range>5-1</range><range>1-5</range></file></ANSWER>',
+    root,
+    [],
+    false,
+  );
+  assert.deepEqual(remote.files[0].ranges, [[1, 5]]);
+  assert.equal(remote.pathValidation.invalidRanges, 1);
+});
+
 test("answer parsing folds repeated paths into one entry with merged ranges", (t) => {
   const root = mkdtempSync(join(tmpdir(), "yce-answer-dedup-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
