@@ -165,6 +165,52 @@ test("cache hit: second identical call skips the engine, reuses files/grep_patte
   }
 });
 
+test("YCE_PRERANK_CJK rollback uses a distinct result-cache entry", async () => {
+  const fixtureDir = mktemp("yce-cache-cjk-arm-");
+  const cacheDir = mktemp("yce-cache-dir-");
+  const stateDir = mktemp("yce-cache-state-");
+  try {
+    gitInit(fixtureDir);
+    const sourcePath = join(fixtureDir, "target.js");
+    writeFileSync(sourcePath, "// 缓存失效\n");
+    gitCommitAll(fixtureDir, "init");
+    const engine = writeFakeEngine(stateDir);
+    const counterPath = join(stateDir, "counter.txt");
+    const common = {
+      FAKE_ENGINE_COUNTER: counterPath,
+      FAKE_ENGINE_FILES: JSON.stringify([{ path: sourcePath, ranges: [[1, 1]] }]),
+    };
+
+    const enabled = await runYceEngineSearch(baseSearchArgs({
+      cwd: fixtureDir,
+      scriptPath: engine,
+      cacheDir,
+      env: { ...common, YCE_PRERANK_CJK: "1" },
+    }));
+    const disabled = await runYceEngineSearch(baseSearchArgs({
+      cwd: fixtureDir,
+      scriptPath: engine,
+      cacheDir,
+      env: { ...common, YCE_PRERANK_CJK: "0" },
+    }));
+    const disabledHit = await runYceEngineSearch(baseSearchArgs({
+      cwd: fixtureDir,
+      scriptPath: engine,
+      cacheDir,
+      env: { ...common, YCE_PRERANK_CJK: "0" },
+    }));
+
+    assert.equal(enabled.search.diagnostics.cache_hit, false);
+    assert.equal(disabled.search.diagnostics.cache_hit, false, "the rollback arm must not reuse the enabled result");
+    assert.equal(disabledHit.search.diagnostics.cache_hit, true);
+    assert.equal(counterValue(counterPath), 2);
+  } finally {
+    rmSync(fixtureDir, { recursive: true, force: true });
+    rmSync(cacheDir, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("invalidation: tracked-file edit, new untracked file, and untracked-file content edit each force a miss", async () => {
   const fixtureDir = mktemp("yce-cache-invalidate-");
   const cacheDir = mktemp("yce-cache-dir-");
@@ -561,6 +607,7 @@ test("searchCache module: fingerprint stability, key composition, and expiry swe
     distinguishes({ hotspotMaxBytes: 65536 }, "hotspotMaxBytes");
     distinguishes({ bootstrapMaxTurns: 2 }, "bootstrapMaxTurns");
     distinguishes({ bootstrapMaxCommands: 9 }, "bootstrapMaxCommands");
+    distinguishes({ prerankCjkEnabled: false }, "prerankCjkEnabled=false");
     // 0 is a reachable argv value for both (min:0 in buildSearchOptions), so
     // it must not collapse into "unset" the way a truthiness test would.
     distinguishes({ treeDepth: 0 }, "treeDepth=0");

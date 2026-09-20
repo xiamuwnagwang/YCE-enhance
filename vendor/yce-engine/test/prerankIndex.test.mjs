@@ -162,6 +162,25 @@ test("a corrupt index file is ignored and rebuilt", (t) => {
   assert.equal(saved.projectRoot, resolve(root));
 });
 
+test("a structurally corrupt matching entry is treated as a miss and rebuilt", (t) => {
+  const root = makeFixture(t);
+  useIndexEnv(t);
+  const cold = run(root);
+  const indexPath = prerankIndexPath(root);
+  const saved = JSON.parse(readFileSync(indexPath, "utf-8"));
+  saved.entries["src/lease_scheduler.js"].decl = { bad: true };
+  writeFileSync(indexPath, JSON.stringify(saved));
+  indexTest.clearMemoryCache();
+
+  const repaired = run(root);
+  const off = disabledRun(root);
+  assert.equal(repaired.indexMisses, 1);
+  assert.equal(repaired.indexHits, cold.indexMisses - 1);
+  assert.deepEqual(comparable(repaired), comparable(off));
+  const rewritten = JSON.parse(readFileSync(indexPath, "utf-8"));
+  assert.ok(Array.isArray(rewritten.entries["src/lease_scheduler.js"].decl));
+});
+
 test("an index written by another tokenizer version is discarded", (t) => {
   const root = makeFixture(t);
   useIndexEnv(t);

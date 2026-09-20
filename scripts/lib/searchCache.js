@@ -277,6 +277,7 @@ function buildCacheKey({
   bootstrapMaxTurns,
   bootstrapMaxCommands,
   noJevScreen,
+  prerankCjkEnabled,
   scriptPath,
 }) {
   // Sorted on a copy: the caller hands over the same array it uses to build
@@ -311,6 +312,8 @@ function buildCacheKey({
     argvInt(bootstrapMaxTurns),
     argvInt(bootstrapMaxCommands),
     noJevScreen === true,
+    // Default-on runtime switch: only explicit false selects the rollback arm.
+    prerankCjkEnabled === false,
     scriptPath,
   ]);
   return sha256(raw);

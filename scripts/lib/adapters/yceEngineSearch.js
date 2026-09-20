@@ -180,6 +180,9 @@ async function runYceEngineSearch({
   }
 
   const cacheConfig = resolveCacheConfig(env || {});
+  const prerankCjkEnabled = String(
+    env?.YCE_PRERANK_CJK ?? process.env.YCE_PRERANK_CJK ?? "",
+  ).trim() !== "0";
   let cacheKey = null;
   let cacheFingerprint = null;
   let cacheFingerprintMs = 0;
@@ -214,6 +217,7 @@ async function runYceEngineSearch({
       bootstrapMaxTurns,
       bootstrapMaxCommands,
       noJevScreen,
+      prerankCjkEnabled,
       scriptPath,
     });
     const cached = readCacheEntry(cacheConfig.dir, cacheKey, cacheConfig.ttlMs);

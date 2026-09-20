@@ -94,6 +94,22 @@ class PrerankIndex {
     if (!entry || typeof entry !== "object" || entry.size !== size || entry.mtimeMs !== mtimeMs) {
       return null;
     }
+    const validSkip = entry.skip === 1;
+    const validProfile = !entry.skip
+      && Number.isInteger(entry.len)
+      && entry.len >= 0
+      && entry.tf
+      && typeof entry.tf === "object"
+      && !Array.isArray(entry.tf)
+      && Array.isArray(entry.decl)
+      && entry.decl.every((name) => typeof name === "string")
+      && Array.isArray(entry.beh)
+      && entry.beh.every((name) => typeof name === "string");
+    if (!validSkip && !validProfile) {
+      this.entries.delete(relPath);
+      this.dirty = true;
+      return null;
+    }
     this.hits += 1;
     const previousSeenAt = Number(entry.seenAt) || 0;
     entry.seenAt = this.now;
