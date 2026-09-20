@@ -37,22 +37,34 @@ function splitCamelCase(text) {
 const CJK_ONLY = /^[\u4e00-\u9fa5]+$/;
 const NO_STOP_WORDS = new Set();
 
+function isCjkToken(token) {
+  return CJK_ONLY.test(String(token || ""));
+}
+
 /**
  * Character classes differ between the two consumers, so each one picks a
  * profile instead of the profiles being merged into one permissive default.
  */
 
-// Used by the prerank scorer. `\w` without the /u flag excludes CJK, so a
-// Chinese query tokenizes to nothing here — that is load-bearing, not an
-// oversight: zero `lexicalHits` plus `semanticGap` is exactly how the prerank
-// hands a Chinese query to the semantic screen. Widening this class to CJK
-// would silently change that routing.
-const PRERANK_PROFILE = {
-  strip: /[^\w\s\-./\\@]/g,
-  split: /[\s\-./\\]+/,
-  cjkBigrams: false,
-  unique: false,
-};
+// Routing is decided by scoreFiles' semanticGap/lowConfidence flags, not by an
+// empty token list. Keeping CJK here lets BM25, structure and probe signals rank
+// Chinese comments and UI strings before the semantic screen runs.
+const PRERANK_CJK_ENABLED = String(process.env.YCE_PRERANK_CJK || "").trim() !== "0";
+
+const PRERANK_PROFILE = PRERANK_CJK_ENABLED
+  ? {
+      strip: /[^\w\s\-./\\@\u4e00-\u9fa5]/g,
+      split: /[\s\-./\\]+/,
+      cjkBigrams: true,
+      cjkBoundarySplit: true,
+      unique: false,
+    }
+  : {
+      strip: /[^\w\s\-./\\@]/g,
+      split: /[\s\-./\\]+/,
+      cjkBigrams: false,
+      unique: false,
+    };
 
 // Used by the offline fallback searcher, which has no semantic screen behind it
 // and so does its own CJK bigram splitting. It also treats `@ $ :` as
@@ -64,9 +76,8 @@ const FALLBACK_PROFILE = {
   unique: true,
 };
 
-// The prerank disk index stores tokenized profiles keyed on this number. Bump
-// it whenever the tokenizer or PRERANK_PROFILE changes.
-const TOKENIZER_VERSION = 1;
+// The disabled arm keeps W4's numeric version so a pre-W5 index remains valid.
+const TOKENIZER_VERSION = PRERANK_CJK_ENABLED ? "v2-cjk" : 1;
 
 function tokenize(text, options = {}) {
   if (!text) return [];
@@ -76,11 +87,13 @@ function tokenize(text, options = {}) {
     minLen = 2,
   } = options;
 
-  const raw = splitCamelCase(text)
-    .toLowerCase()
-    .replace(profile.strip, " ")
-    .split(profile.split)
-    .filter(Boolean);
+  let normalized = splitCamelCase(text).toLowerCase().replace(profile.strip, " ");
+  if (profile.cjkBoundarySplit) {
+    normalized = normalized
+      .replace(/([\u4e00-\u9fa5])([^\u4e00-\u9fa5\s])/g, "$1 $2")
+      .replace(/([^\u4e00-\u9fa5\s])([\u4e00-\u9fa5])/g, "$1 $2");
+  }
+  const raw = normalized.split(profile.split).filter(Boolean);
 
   const out = [];
   for (const token of raw) {
@@ -89,7 +102,7 @@ function tokenize(text, options = {}) {
         const pair = token.slice(index, index + 2);
         if (!stopWords.has(pair)) out.push(pair);
       }
-      if (token.length >= 2 && !stopWords.has(token)) out.push(token);
+      if (token.length > 2 && !stopWords.has(token)) out.push(token);
       continue;
     }
     if (token.length < minLen || stopWords.has(token)) continue;
@@ -115,6 +128,7 @@ module.exports = {
   splitCamelCase,
   tokenize,
   createTokenizer,
+  isCjkToken,
   PRERANK_PROFILE,
   FALLBACK_PROFILE,
   TOKENIZER_VERSION,

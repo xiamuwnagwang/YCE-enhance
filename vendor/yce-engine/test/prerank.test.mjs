@@ -4,7 +4,8 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { scoreFiles } from "../lib/directory-scorer.mjs";
+import { scoreFiles, selectProbePatternTerms } from "../lib/directory-scorer.mjs";
+import { isCjkToken } from "../lib/lexicon.cjs";
 import { screenCandidates } from "../lib/jevScreen.mjs";
 import { __test as coreTest } from "../lib/core.mjs";
 
@@ -414,4 +415,80 @@ test("the test-file penalty leaves vendored code alone", (t) => {
   // directory like vendor/, examples/ or migrations/ is noise is repo-specific,
   // and demoting it at file level measurably hurt. Only tests are demoted.
   assert.ok(paths.indexOf("vendor/pool.go") < paths.indexOf("internal/pool_test.go"));
+});
+
+test("a Chinese query ranks the file whose comment matches above an unrelated one", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "yce-prerank-cjk-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "internal"));
+  const matching = [
+    "package internal",
+    "",
+    "// 缓存失效 时清空 key 池快照。",
+    "func ResetSnapshot() {}",
+  ].join("\n");
+  const unrelated = "package internal\n// 渲染健康检查页面。\nfunc RenderHealth() string { return \"ok\" }";
+  writeFileSync(join(root, "internal", "cache_invalidation.go"), matching);
+  writeFileSync(join(root, "internal", "unrelated.go"), unrelated);
+
+  const result = scoreFiles("缓存失效", root, ["internal"], [], { maxResults: 5 });
+  assert.equal(result.candidatePool[0].path, "internal/cache_invalidation.go");
+  assert.equal(result.lexicalHits, 1);
+  assert.ok(result.candidatePool[0].lexicalScore > 0);
+  assert.ok(result.candidatePool[0].probeScore > 0);
+  assert.deepEqual(result.candidatePool[0].ranges, [[3, 3]]);
+  assert.ok(result.rgPatterns.includes("缓存失效"));
+  assert.ok(result.rgPatterns.every((pattern) => matching.includes(pattern)));
+});
+
+test("an English-only corpus leaves a Chinese query at zero lexical hits and low confidence", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "yce-prerank-cjk-empty-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "internal"));
+  writeFileSync(join(root, "internal", "pool.go"), "package internal\nfunc SelectPool() {}\n");
+  const result = scoreFiles("缓存失效", root, ["internal"], [], { maxResults: 5 });
+  assert.equal(result.lexicalHits, 0);
+  assert.equal(result.lowConfidence, true);
+  assert.equal(result.semanticGap, true);
+  assert.deepEqual(result.rgPatterns, []);
+  assert.ok(result.queryTerms.length > 0);
+});
+
+test("a Chinese query still reaches a directory whose path spine cannot match", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "yce-prerank-cjk-large-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "app"));
+  for (let index = 0; index < 201; index += 1) {
+    writeFileSync(join(root, "app", `mod_${index}.ts`), `export const value${index} = ${index};\n`);
+  }
+  writeFileSync(join(root, "app", "target.ts"), "// 缓存失效 时清空快照\nexport function resetSnapshot() {}\n");
+
+  const previous = process.env.YCE_PRERANK_INDEX;
+  process.env.YCE_PRERANK_INDEX = "0";
+  t.after(() => {
+    if (previous === undefined) delete process.env.YCE_PRERANK_INDEX;
+    else process.env.YCE_PRERANK_INDEX = previous;
+  });
+  const result = scoreFiles("缓存失效", root, ["app"], [], { maxResults: 5 });
+  assert.ok(result.candidatePool.length > 0);
+  assert.equal(result.candidatePool[0].path, "app/target.ts");
+});
+
+test("probe terms keep English first and pick corpus-present CJK by idf", () => {
+  assert.deepEqual(
+    selectProbePatternTerms(["lease", "密钥", "钥池", "调度"], { lease: 1, 密钥: 0.5, 调度: 2 }),
+    ["lease", "调度", "密钥"],
+  );
+  const ascii = Array.from({ length: 12 }, (_, index) => `term${index}`);
+  assert.deepEqual(selectProbePatternTerms(ascii, {}), ascii.slice(0, 8));
+});
+
+test("a long CJK run is not offered as a grep lead", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "yce-prerank-cjk-patterns-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, "provider.ts"), "// 网络供应商 设置\nexport const provider = true;\n");
+  const result = scoreFiles("管理后台的网络供应商设置在哪", root, ["."], [], { maxResults: 5 });
+  const cjk = result.rgPatterns.filter(isCjkToken);
+  assert.ok(cjk.every((pattern) => pattern.length <= 4));
+  assert.ok(cjk.length <= 6);
 });

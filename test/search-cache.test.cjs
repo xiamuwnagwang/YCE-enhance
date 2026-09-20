@@ -537,10 +537,10 @@ test("searchCache module: fingerprint stability, key composition, and expiry swe
     assert.notEqual(keyA, keyB);
     assert.equal(keyA, keyA2);
 
-    // v2: the key covers every option the adapter turns into engine argv.
+    // v3: the key also invalidates rankings created before CJK bigrams.
     // The key itself is a digest, so the revision is asserted through the
     // exported constant rather than by substring-matching the hash.
-    assert.equal(CACHE_REVISION, "v2");
+    assert.equal(CACHE_REVISION, "v3");
     const distinguishes = (patch, label) =>
       assert.notEqual(buildCacheKey({ ...baseKeyArgs, ...patch }), keyA, `${label} must change the key`);
     distinguishes({ excludePaths: ["vendor/**"] }, "excludePaths");

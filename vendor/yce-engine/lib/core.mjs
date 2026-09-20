@@ -24,6 +24,7 @@ import {
 } from "./protobuf.mjs";
 import { ToolExecutor } from "./executor.mjs";
 import { scoreDirectories, scoreFiles, selectQueryRelevantNames, tokenize as tokenizeBM25 } from "./directory-scorer.mjs";
+import { isCjkToken } from "./lexicon.cjs";
 import { screenCandidates } from "./jevScreen.mjs";
 import { buildDirectoryTree } from "./tree-builder.mjs";
 
@@ -1146,7 +1147,9 @@ async function _runLocalBootstrapPhase({
       selected.flatMap((candidate) => candidate.declarationNames || []),
       local.queryTerms || [],
     ),
-  ])].filter((pattern) => String(pattern).length >= 3).slice(0, 30);
+  ])].filter((pattern) => (
+    isCjkToken(pattern) ? String(pattern).length >= 2 : String(pattern).length >= 3
+  )).slice(0, 30);
   const exposedCandidates = (jevPoolApplied || local.semanticGap
     ? (jevPoolApplied ? candidates : jevCandidates)
     : candidates).slice(0, LOCAL_PRERANK_EXPOSED_CANDIDATES);

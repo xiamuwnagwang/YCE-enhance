@@ -1,8 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 
-import { stem, splitCamelCase, tokenize as lexTokenize, PRERANK_PROFILE, FALLBACK_PROFILE } from "../lib/lexicon.cjs";
+import {
+  stem,
+  splitCamelCase,
+  tokenize as lexTokenize,
+  PRERANK_PROFILE,
+  FALLBACK_PROFILE,
+} from "../lib/lexicon.cjs";
 import { tokenize } from "../lib/directory-scorer.mjs";
 
 const require = createRequire(import.meta.url);
@@ -25,12 +33,21 @@ test("camelCase and consecutive capitals split into separate tokens", () => {
   assert.deepEqual(tokenize("parseHTTPResponse"), ["parse", "http", "response"]);
 });
 
-test("the prerank profile keeps CJK out of the local lexicon", () => {
-  // Zero lexical hits plus semanticGap is how a Chinese query is handed to the
-  // semantic screen. Letting CJK through here would silently reroute it.
-  assert.deepEqual(tokenize("缓存失效"), []);
-  assert.deepEqual(lexTokenize("缓存失效", { profile: PRERANK_PROFILE }), []);
-  // The offline fallback layer has no screen behind it, so it does split CJK.
+test("the prerank profile splits CJK into bigrams plus the whole run", () => {
+  // Chinese routing still comes from scoreFiles' semanticGap/lowConfidence;
+  // these tokens only improve the local lexical, structure and probe signals.
+  assert.deepEqual(tokenize("缓存失效"), ["缓存", "存失", "失效", "缓存失效"]);
+  assert.deepEqual(
+    lexTokenize("缓存失效", { profile: PRERANK_PROFILE }),
+    ["缓存", "存失", "失效", "缓存失效"],
+  );
+  assert.deepEqual(tokenize("失效"), ["失效"]);
+  assert.deepEqual(tokenize("jev权益闸"), ["jev", "权益", "益闸", "权益闸"]);
+  assert.deepEqual(tokenize("单"), []);
+  assert.deepEqual(
+    tokenize("缓存失效，清空快照。"),
+    ["缓存", "存失", "失效", "缓存失效", "清空", "空快", "快照", "清空快照"],
+  );
   assert.ok(lexTokenize("缓存失效", { profile: FALLBACK_PROFILE }).includes("缓存"));
 });
 
@@ -52,7 +69,7 @@ test("the prerank scorer and the offline fallback searcher share one lexicon", (
   }
 });
 
-test("the fallback profile's separators and CJK bigrams are pinned to a golden vector", () => {
+test("the profiles' separators and CJK bigrams are pinned to a golden vector", () => {
   // FALLBACK_PROFILE is the only place `@ $ :` are separators and the only
   // place CJK is split into bigrams. Both are load-bearing for the offline
   // searcher and neither is observable from the prerank side, so they are
@@ -70,14 +87,29 @@ test("the fallback profile's separators and CJK bigrams are pinned to a golden v
     ["user", "example", "com", "path", "to", "file", "mj"],
   );
 
-  // The same inputs under the prerank profile: `@` stays inside the token and
-  // CJK produces nothing at all. If these two ever converge, the Chinese-query
-  // routing into the semantic screen has silently changed.
-  assert.deepEqual(lexTokenize("a@b$c:d 缓存失效", { profile: PRERANK_PROFILE }), ["a@b"]);
+  // The prerank profile keeps `@` inside a token while sharing CJK bigrams.
+  assert.deepEqual(
+    lexTokenize("a@b$c:d 缓存失效", { profile: PRERANK_PROFILE }),
+    ["a@b", "缓存", "存失", "失效", "缓存失效"],
+  );
   assert.deepEqual(
     lexTokenize("screenCandidates@relay:v2 键池失效", { profile: PRERANK_PROFILE }),
-    ["screen", "candidates@relay", "v2"],
+    ["screen", "candidates@relay", "v2", "键池", "池失", "失效", "键池失效"],
   );
+});
+
+test("YCE_PRERANK_CJK=0 restores the pre-W5 prerank tokenizer", () => {
+  const lexiconPath = fileURLToPath(new URL("../lib/lexicon.cjs", import.meta.url));
+  const script = [
+    "const { tokenize, PRERANK_PROFILE, TOKENIZER_VERSION } = require(process.argv[1]);",
+    "console.log(JSON.stringify({ tokens: tokenize('缓存失效', { profile: PRERANK_PROFILE }), version: TOKENIZER_VERSION }));",
+  ].join("\n");
+  const result = spawnSync(process.execPath, ["-e", script, lexiconPath], {
+    env: { ...process.env, YCE_PRERANK_CJK: "0" },
+    encoding: "utf-8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { tokens: [], version: 1 });
 });
 
 test("stopwords and the minimum length still apply", () => {

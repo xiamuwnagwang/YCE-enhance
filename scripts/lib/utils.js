@@ -237,7 +237,7 @@ function buildYceEngineEnv(merged) {
   if (relayUrl) childEnv.YCE_RELAY_URL = relayUrl;
   if (relayToken) childEnv.YCE_RELAY_TOKEN = relayToken;
 
-  const passthroughKeys = ["YCE_API_KEY", "YCE_LOCAL_FALLBACK", "TYPESAFE_API_KEY"];
+  const passthroughKeys = ["YCE_API_KEY", "YCE_LOCAL_FALLBACK", "TYPESAFE_API_KEY", "YCE_PRERANK_CJK"];
 
   for (const key of passthroughKeys) {
     if (hasOwn(merged, key) && isNonEmptyString(merged[key])) {

@@ -21,7 +21,8 @@ const { spawnSync } = require("node:child_process");
 // --repo-map-mode or any hotspot/bootstrap knob shared one entry and served
 // each other's results. Bumping the revision orphans every v1 entry instead of
 // letting a stale one be read under the new composition rules.
-const CACHE_REVISION = "v2";
+// v3: W5 added CJK bigrams, so v2 Chinese-query rankings are stale.
+const CACHE_REVISION = "v3";
 const DEFAULT_TTL_MS = 21600000; // 6h
 const DISABLED_VALUES = new Set(["0", "false", "no", "off"]);
 

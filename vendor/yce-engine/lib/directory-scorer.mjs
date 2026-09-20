@@ -17,7 +17,7 @@ import { readdirSync, readFileSync, existsSync, statSync } from "fs";
 import { join, resolve, relative, extname, basename, dirname } from "path";
 import { spawnSync } from "child_process";
 import { resolveRipgrepPath } from "./ripgrep.mjs";
-import { createTokenizer, stem, PRERANK_PROFILE } from "./lexicon.cjs";
+import { createTokenizer, stem, isCjkToken, PRERANK_PROFILE } from "./lexicon.cjs";
 import { openPrerankIndex } from "./prerank-index.mjs";
 
 // ─── Constants ───────────────────────────────────────────────
@@ -31,6 +31,8 @@ const FILE_FALLBACK_CANDIDATES = 20;
 const FILE_MIN_SIGNAL_SCORE = 0.01;
 const FILE_RRF_WEIGHTS = [2, 1.5, 1];
 const FILE_LOW_CONFIDENCE_SCORE = 0.03;
+const FILE_RG_MAX_CJK_PATTERNS = 6;
+const FILE_RG_MAX_CJK_LENGTH = 4;
 // Test files mention every query term without defining anything, so they crowd
 // the head of the fused list — 22.5% of the top 10 across the local eval set.
 // Only tests are demoted here. The directory-level NOISE_PATH_PATTERNS set is
@@ -910,7 +912,8 @@ function enumerateScorableFiles(projectRoot, topDirs = [], excludePaths = [], qu
   for (const dir of dirs) {
     const profile = buildDirectoryProfile(projectRoot, dir, excludePaths, 8);
     const profileText = `${dir} ${profile.path_tokens_text || ""}`.toLowerCase();
-    const pathRelevant = queryTerms.length === 0 || queryTerms.some((term) => profileText.includes(term));
+    const pathTerms = queryTerms.filter((term) => !isCjkToken(term));
+    const pathRelevant = pathTerms.length === 0 || pathTerms.some((term) => profileText.includes(term));
     // Large sibling applications can contain thousands of generated or
     // unrelated files. Keep small directories for recall, but avoid reading
     // every file in a large directory when its path spine has no query term.
@@ -1198,12 +1201,19 @@ function documentRanges(projectRoot, document, queryTerms) {
   return document.ranges;
 }
 
-function probeFileGrep(projectRoot, documents, queryTerms, excludePaths = []) {
+function selectProbePatternTerms(queryTerms, idf) {
+  const ascii = queryTerms.filter((term) => !isCjkToken(term));
+  const cjk = [...new Set(queryTerms.filter((term) => isCjkToken(term)))]
+    .filter((term) => idf && idf[term] !== undefined)
+    .sort((left, right) => (idf[right] - idf[left]) || left.localeCompare(right));
+  return [...ascii.slice(0, FILE_PROBE_MAX_TERMS), ...cjk].slice(0, FILE_PROBE_MAX_TERMS);
+}
+
+function probeFileGrep(projectRoot, documents, queryTerms, excludePaths = [], idf = null) {
   const hits = new Map();
   if (queryTerms.length === 0 || documents.length === 0) return hits;
 
-  const pattern = queryTerms
-    .slice(0, FILE_PROBE_MAX_TERMS)
+  const pattern = selectProbePatternTerms(queryTerms, idf)
     .map((term) => String(term).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
     .join("|");
   if (!pattern) return hits;
@@ -1305,7 +1315,7 @@ export function scoreFiles(query, projectRoot, topDirs = [], excludePaths = [], 
       candidates: [],
       candidatePool: [],
       hotDirs: [],
-      rgPatterns: queryTerms.slice(0, 30),
+      rgPatterns: queryTerms.filter((term) => !isCjkToken(term)).slice(0, 30),
       queryTerms,
       lexicalHits: 0,
       topScore: 0,
@@ -1362,7 +1372,7 @@ export function scoreFiles(query, projectRoot, topDirs = [], excludePaths = [], 
   }
   for (const document of documents) lexicalDocs.push({ path: document.path, score: document.lexicalScore });
 
-  const probeHits = probeFileGrep(projectRoot, documents, queryTerms, excludePaths);
+  const probeHits = probeFileGrep(projectRoot, documents, queryTerms, excludePaths, idf);
   for (const document of documents) {
     if (document.declarationNames === undefined) {
       document.declarationNames = extractDeclarationNames(document.content);
@@ -1409,10 +1419,14 @@ export function scoreFiles(query, projectRoot, topDirs = [], excludePaths = [], 
   const topScore = Number(candidatePool[0]?.score || 0);
   const hotDirs = [...new Set(candidatePool.slice(0, Math.max(1, maxResults)).map((candidate) => candidate.path.split("/")[0]).filter(Boolean))].slice(0, 12);
   const declarations = candidatePool.flatMap((candidate) => candidate.declarationNames || []);
+  const cjkPatterns = [...new Set(queryTerms.filter((term) => isCjkToken(term)))]
+    .filter((term) => term.length <= FILE_RG_MAX_CJK_LENGTH && idf[term] !== undefined)
+    .slice(0, FILE_RG_MAX_CJK_PATTERNS);
   const rgPatterns = [...new Set([
-    ...queryTerms,
+    ...queryTerms.filter((term) => !isCjkToken(term)),
+    ...cjkPatterns,
     ...selectQueryRelevantNames(declarations, queryTerms),
-  ])].filter((item) => item.length >= 3).slice(0, 30);
+  ])].filter((item) => (isCjkToken(item) ? item.length >= 2 : item.length >= 3)).slice(0, 30);
 
   const semanticGap = /[\u3400-\u9fff]/.test(String(query || ""));
   if (index) index.save(documents.length);
@@ -1666,4 +1680,4 @@ export function quickScore(query, topDirs, profiles) {
   return scored;
 }
 
-export { tokenize, tokenizePath, stem, computeIDF };
+export { tokenize, tokenizePath, stem, computeIDF, selectProbePatternTerms };
