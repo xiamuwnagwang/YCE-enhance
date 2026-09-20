@@ -101,6 +101,12 @@ class PrerankIndex {
       && entry.tf
       && typeof entry.tf === "object"
       && !Array.isArray(entry.tf)
+      && Object.values(entry.tf).every((value) => (
+        (Number.isInteger(value) && value > 0)
+        // Plain-object accumulation deliberately preserves prototype-key
+        // collisions such as `constructor` as strings for off/cold/warm parity.
+        || typeof value === "string"
+      ))
       && Array.isArray(entry.decl)
       && entry.decl.every((name) => typeof name === "string")
       && Array.isArray(entry.beh)

@@ -181,6 +181,25 @@ test("a structurally corrupt matching entry is treated as a miss and rebuilt", (
   assert.ok(Array.isArray(rewritten.entries["src/lease_scheduler.js"].decl));
 });
 
+test("a matching entry with a nested term-frequency value is rebuilt", (t) => {
+  const root = makeFixture(t);
+  useIndexEnv(t);
+  const cold = run(root);
+  const indexPath = prerankIndexPath(root);
+  const saved = JSON.parse(readFileSync(indexPath, "utf-8"));
+  saved.entries["src/lease_scheduler.js"].tf.lease = { toString: null, valueOf: null };
+  writeFileSync(indexPath, JSON.stringify(saved));
+  indexTest.clearMemoryCache();
+
+  const repaired = run(root);
+  const off = disabledRun(root);
+  assert.equal(repaired.indexMisses, 1);
+  assert.equal(repaired.indexHits, cold.indexMisses - 1);
+  assert.deepEqual(comparable(repaired), comparable(off));
+  const rewritten = JSON.parse(readFileSync(indexPath, "utf-8"));
+  assert.equal(typeof rewritten.entries["src/lease_scheduler.js"].tf.lease, "number");
+});
+
 test("an index written by another tokenizer version is discarded", (t) => {
   const root = makeFixture(t);
   useIndexEnv(t);
