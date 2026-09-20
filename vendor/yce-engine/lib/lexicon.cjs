@@ -64,6 +64,10 @@ const FALLBACK_PROFILE = {
   unique: true,
 };
 
+// The prerank disk index stores tokenized profiles keyed on this number. Bump
+// it whenever the tokenizer or PRERANK_PROFILE changes.
+const TOKENIZER_VERSION = 1;
+
 function tokenize(text, options = {}) {
   if (!text) return [];
   const {
@@ -113,4 +117,5 @@ module.exports = {
   createTokenizer,
   PRERANK_PROFILE,
   FALLBACK_PROFILE,
+  TOKENIZER_VERSION,
 };

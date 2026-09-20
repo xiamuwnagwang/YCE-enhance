@@ -18,6 +18,7 @@ import { join, resolve, relative, extname, basename, dirname } from "path";
 import { spawnSync } from "child_process";
 import { resolveRipgrepPath } from "./ripgrep.mjs";
 import { createTokenizer, stem, PRERANK_PROFILE } from "./lexicon.cjs";
+import { openPrerankIndex } from "./prerank-index.mjs";
 
 // ─── Constants ───────────────────────────────────────────────
 
@@ -324,6 +325,10 @@ function bm25FieldScore(queryTerms, fieldTerms, avgLen, fieldLen, idf) {
   const termFreqs = {};
   fieldTerms.forEach(t => { termFreqs[t] = (termFreqs[t] || 0) + 1; });
 
+  return bm25TermFrequencyScore(queryTerms, termFreqs, avgLen, fieldLen, idf);
+}
+
+function bm25TermFrequencyScore(queryTerms, termFreqs, avgLen, fieldLen, idf) {
   let score = 0;
   for (const term of queryTerms) {
     const tf = termFreqs[term] || 0;
@@ -336,6 +341,32 @@ function bm25FieldScore(queryTerms, fieldTerms, avgLen, fieldLen, idf) {
   }
 
   return score;
+}
+
+function buildTermFrequencies(tokens) {
+  const termFreqs = {};
+  for (const token of tokens) termFreqs[token] = (termFreqs[token] || 0) + 1;
+  return termFreqs;
+}
+
+function mergeTermFrequencies(contentTermFreqs, pathTokens) {
+  const merged = { ...contentTermFreqs };
+  for (const token of pathTokens) merged[token] = (merged[token] || 0) + 1;
+  return merged;
+}
+
+function computeIDFFromTermFrequencies(termFrequencies, pathTokenLists) {
+  const docCount = termFrequencies.length;
+  const termDocCount = {};
+  const idf = {};
+  for (let index = 0; index < docCount; index += 1) {
+    const unique = new Set([...Object.keys(termFrequencies[index]), ...pathTokenLists[index]]);
+    for (const term of unique) termDocCount[term] = (termDocCount[term] || 0) + 1;
+  }
+  for (const [term, count] of Object.entries(termDocCount)) {
+    idf[term] = Math.log((docCount - count + 0.5) / (count + 0.5) + 1);
+  }
+  return idf;
 }
 
 /**
@@ -871,8 +902,8 @@ function readFileForScoring(projectRoot, relPath) {
   }
 }
 
-function collectFileDocuments(projectRoot, topDirs = [], excludePaths = [], queryTerms = []) {
-  const documents = [];
+function enumerateScorableFiles(projectRoot, topDirs = [], excludePaths = [], queryTerms = []) {
+  const paths = [];
   const seen = new Set();
   const dirs = topDirs.length > 0 ? topDirs : ["."];
 
@@ -888,13 +919,7 @@ function collectFileDocuments(projectRoot, topDirs = [], excludePaths = [], quer
       const relPath = normalizeRelativePath(candidate);
       if (!relPath || seen.has(relPath) || isExcludedRelativePath(relPath, excludePaths)) continue;
       seen.add(relPath);
-      const content = readFileForScoring(projectRoot, relPath);
-      if (!content) continue;
-      documents.push({
-        path: relPath,
-        content,
-        pathTokens: tokenizePath(relPath),
-      });
+      paths.push(relPath);
     }
   }
 
@@ -907,11 +932,96 @@ function collectFileDocuments(projectRoot, topDirs = [], excludePaths = [], quer
     for (const candidate of rootProfile.file_paths || []) {
       const relPath = normalizeRelativePath(candidate);
       if (!relPath || seen.has(relPath) || isExcludedRelativePath(relPath, excludePaths)) continue;
-      const content = readFileForScoring(projectRoot, relPath);
-      if (!content) continue;
       seen.add(relPath);
-      documents.push({ path: relPath, content, pathTokens: tokenizePath(relPath) });
+      paths.push(relPath);
     }
+  }
+
+  return paths;
+}
+
+function collectFileDocuments(projectRoot, topDirs = [], excludePaths = [], queryTerms = []) {
+  const documents = [];
+  for (const relPath of enumerateScorableFiles(projectRoot, topDirs, excludePaths, queryTerms)) {
+    const content = readFileForScoring(projectRoot, relPath);
+    if (!content) continue;
+    documents.push({ path: relPath, content, pathTokens: tokenizePath(relPath) });
+  }
+
+  return documents;
+}
+
+function statForScoring(projectRoot, relPath) {
+  try {
+    const stat = statSync(join(projectRoot, relPath));
+    if (!stat.isFile() || stat.size === 0 || stat.size > FILE_SCORE_MAX_BYTES) return null;
+    return stat;
+  } catch {
+    return null;
+  }
+}
+
+function readFileForScoringWithReason(projectRoot, relPath) {
+  try {
+    const fullPath = join(projectRoot, relPath);
+    const stat = statSync(fullPath);
+    if (!stat.isFile() || stat.size > FILE_SCORE_MAX_BYTES) return { content: "", reason: "stat" };
+    const content = readFileSync(fullPath, "utf-8");
+    if (content.includes("\u0000")) return { content: "", reason: "binary" };
+    return { content, reason: content ? "" : "empty" };
+  } catch {
+    return { content: "", reason: "error" };
+  }
+}
+
+function collectIndexedFileDocuments(projectRoot, topDirs, excludePaths, queryTerms, index) {
+  const documents = [];
+  for (const relPath of enumerateScorableFiles(projectRoot, topDirs, excludePaths, queryTerms)) {
+    const stat = statForScoring(projectRoot, relPath);
+    if (!stat) continue;
+    const cached = index.get(relPath, stat.size, stat.mtimeMs);
+    if (cached) {
+      if (cached.skip) continue;
+      documents.push({
+        path: relPath,
+        content: null,
+        pathTokens: tokenizePath(relPath),
+        contentTermFreqs: cached.tf,
+        contentLength: cached.len,
+        declarationNames: cached.decl,
+        behaviorNames: cached.beh,
+      });
+      continue;
+    }
+
+    const { content, reason } = readFileForScoringWithReason(projectRoot, relPath);
+    if (!content) {
+      if (reason === "binary") index.putSkip(relPath, stat.size, stat.mtimeMs);
+      else index.countMiss();
+      continue;
+    }
+
+    const contentTokens = tokenize(content.slice(0, FILE_SCORE_MAX_BYTES));
+    const contentTermFreqs = buildTermFrequencies(contentTokens);
+    const declarationNames = extractDeclarationNames(content);
+    const behaviorNames = extractBehaviorDeclarationNames(declarationNames, content);
+    index.put(relPath, {
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      len: contentTokens.length,
+      tf: contentTermFreqs,
+      decl: declarationNames,
+      beh: behaviorNames,
+    });
+    documents.push({
+      path: relPath,
+      content,
+      pathTokens: tokenizePath(relPath),
+      contentTermFreqs,
+      contentLength: contentTokens.length,
+      declarationNames,
+      behaviorNames,
+    });
   }
 
   return documents;
@@ -1070,6 +1180,24 @@ function buildLineRanges(content, queryTerms, probeLines = []) {
   return ranges.slice(0, 6);
 }
 
+function documentContent(projectRoot, document) {
+  if (document.content === null) {
+    document.content = readFileForScoring(projectRoot, document.path);
+  }
+  return document.content;
+}
+
+function documentRanges(projectRoot, document, queryTerms) {
+  if (document.ranges === undefined) {
+    document.ranges = buildLineRanges(
+      documentContent(projectRoot, document),
+      queryTerms,
+      document.probeLines || [],
+    );
+  }
+  return document.ranges;
+}
+
 function probeFileGrep(projectRoot, documents, queryTerms, excludePaths = []) {
   const hits = new Map();
   if (queryTerms.length === 0 || documents.length === 0) return hits;
@@ -1159,9 +1287,20 @@ export function scoreFiles(query, projectRoot, topDirs = [], excludePaths = [], 
   const maxResults = Math.max(1, Number(options.maxResults) || 10);
   const candidateLimit = Math.max(FILE_FALLBACK_CANDIDATES, Number(options.candidateLimit) || maxResults);
   const queryTerms = tokenize(query);
-  const documents = collectFileDocuments(projectRoot, topDirs, excludePaths, queryTerms);
+  const index = openPrerankIndex(projectRoot);
+  const documents = index
+    ? collectIndexedFileDocuments(projectRoot, topDirs, excludePaths, queryTerms, index)
+    : collectFileDocuments(projectRoot, topDirs, excludePaths, queryTerms);
+  const indexStats = () => ({
+    indexMode: index ? index.mode : "off",
+    indexHits: index ? index.hits : 0,
+    indexMisses: index ? index.misses : 0,
+    indexLoadMs: index ? index.loadMs : 0,
+    indexSaveMs: index ? index.saveMs : 0,
+  });
 
   if (documents.length === 0) {
+    if (index) index.save(0);
     return {
       candidates: [],
       candidatePool: [],
@@ -1173,34 +1312,66 @@ export function scoreFiles(query, projectRoot, topDirs = [], excludePaths = [], 
       lowConfidence: true,
       semanticGap: /[\u3400-\u9fff]/.test(String(query || "")),
       elapsedMs: Date.now() - startedAt,
+      ...indexStats(),
     };
   }
 
   const lexicalDocs = [];
-  const lexicalCorpus = [];
-  for (const document of documents) {
-    const contentTokens = tokenize(document.content.slice(0, FILE_SCORE_MAX_BYTES));
-    const tokens = [...contentTokens, ...document.pathTokens];
-    document.lexicalTokens = tokens;
-    lexicalCorpus.push(tokens);
+  let idf;
+  if (index) {
+    const termFrequencies = [];
+    const pathTokenLists = [];
+    for (const document of documents) {
+      document.lexicalTermFreqs = mergeTermFrequencies(document.contentTermFreqs, document.pathTokens);
+      document.lexicalLength = document.contentLength + document.pathTokens.length;
+      termFrequencies.push(document.lexicalTermFreqs);
+      pathTokenLists.push(document.pathTokens);
+    }
+    idf = computeIDFFromTermFrequencies(termFrequencies, pathTokenLists);
+    const avgLength = documents.reduce((sum, document) => sum + document.lexicalLength, 0)
+      / Math.max(1, documents.length);
+    for (const document of documents) {
+      document.lexicalScore = bm25TermFrequencyScore(
+        queryTerms,
+        document.lexicalTermFreqs,
+        avgLength || 1,
+        document.lexicalLength || 1,
+        idf,
+      );
+    }
+  } else {
+    const lexicalCorpus = [];
+    for (const document of documents) {
+      const contentTokens = tokenize(document.content.slice(0, FILE_SCORE_MAX_BYTES));
+      const tokens = [...contentTokens, ...document.pathTokens];
+      document.lexicalTokens = tokens;
+      lexicalCorpus.push(tokens);
+    }
+    idf = computeIDF(lexicalCorpus);
+    const avgLength = lexicalCorpus.reduce((sum, terms) => sum + terms.length, 0)
+      / Math.max(1, lexicalCorpus.length);
+    for (const document of documents) {
+      document.lexicalScore = bm25FieldScore(
+        queryTerms,
+        document.lexicalTokens,
+        avgLength || 1,
+        document.lexicalTokens.length || 1,
+        idf,
+      );
+    }
   }
-  const idf = computeIDF(lexicalCorpus);
-  const avgLength = lexicalCorpus.reduce((sum, terms) => sum + terms.length, 0) / Math.max(1, lexicalCorpus.length);
-
-  for (const document of documents) {
-    document.lexicalScore = bm25FieldScore(queryTerms, document.lexicalTokens, avgLength || 1, document.lexicalTokens.length || 1, idf);
-    lexicalDocs.push({ path: document.path, score: document.lexicalScore });
-  }
+  for (const document of documents) lexicalDocs.push({ path: document.path, score: document.lexicalScore });
 
   const probeHits = probeFileGrep(projectRoot, documents, queryTerms, excludePaths);
   for (const document of documents) {
-    document.declarationNames = extractDeclarationNames(document.content);
-    document.behaviorNames = extractBehaviorDeclarationNames(document.declarationNames, document.content);
+    if (document.declarationNames === undefined) {
+      document.declarationNames = extractDeclarationNames(document.content);
+      document.behaviorNames = extractBehaviorDeclarationNames(document.declarationNames, document.content);
+    }
     document.structureScore = scoreStructure(queryTerms, document.path, document.declarationNames);
-    document.probeScore = probeHits.has(document.path)
-      ? Math.log(1 + probeHits.get(document.path).length)
-      : 0;
-    document.ranges = buildLineRanges(document.content, queryTerms, probeHits.get(document.path) || []);
+    document.probeLines = probeHits.get(document.path) || [];
+    document.probeScore = probeHits.has(document.path) ? Math.log(1 + document.probeLines.length) : 0;
+    if (!index) document.ranges = buildLineRanges(document.content, queryTerms, document.probeLines);
   }
 
   const rankings = [
@@ -1214,19 +1385,20 @@ export function scoreFiles(query, projectRoot, topDirs = [], excludePaths = [], 
   const byPath = new Map(documents.map((document) => [document.path, document]));
   const candidatePool = fused.slice(0, candidateLimit).map((entry) => {
     const document = byPath.get(entry.path);
+    const ranges = documentRanges(projectRoot, document, queryTerms);
     const reasons = [];
     if (document.lexicalScore > 0) reasons.push(`bm25=${document.lexicalScore.toFixed(2)}`);
     if (document.structureScore > 0) reasons.push(`structure=${document.structureScore.toFixed(2)}`);
     if (document.probeScore > 0) reasons.push(`probe=${document.probeScore.toFixed(2)}`);
     return {
       path: entry.path,
-      ranges: document.ranges,
+      ranges,
       score: entry.score,
       lexicalScore: document.lexicalScore,
       structureScore: document.structureScore,
       probeScore: document.probeScore,
       declarationNames: selectDeclarationNames(document.behaviorNames, queryTerms),
-      snippet: buildProbeSnippet(document.content, document.ranges),
+      snippet: buildProbeSnippet(documentContent(projectRoot, document), ranges),
       reasons,
     };
   });
@@ -1243,23 +1415,27 @@ export function scoreFiles(query, projectRoot, topDirs = [], excludePaths = [], 
   ])].filter((item) => item.length >= 3).slice(0, 30);
 
   const semanticGap = /[\u3400-\u9fff]/.test(String(query || ""));
+  if (index) index.save(documents.length);
   return {
     candidates: selected,
     candidatePool: positive ? candidatePool : documents
       .slice()
       .sort((a, b) => a.path.localeCompare(b.path))
       .slice(0, candidateLimit)
-      .map((document) => ({
-        path: document.path,
-        ranges: document.ranges,
-        score: 0,
-        lexicalScore: 0,
-        structureScore: 0,
-        probeScore: 0,
-        declarationNames: selectDeclarationNames(document.behaviorNames, queryTerms),
-        snippet: buildProbeSnippet(document.content, document.ranges),
-        reasons: [],
-      })),
+      .map((document) => {
+        const ranges = documentRanges(projectRoot, document, queryTerms);
+        return {
+          path: document.path,
+          ranges,
+          score: 0,
+          lexicalScore: 0,
+          structureScore: 0,
+          probeScore: 0,
+          declarationNames: selectDeclarationNames(document.behaviorNames, queryTerms),
+          snippet: buildProbeSnippet(documentContent(projectRoot, document), ranges),
+          reasons: [],
+        };
+      }),
     hotDirs,
     rgPatterns,
     queryTerms,
@@ -1268,6 +1444,7 @@ export function scoreFiles(query, projectRoot, topDirs = [], excludePaths = [], 
     lowConfidence: lexicalHits === 0 || semanticGap || topScore < FILE_LOW_CONFIDENCE_SCORE,
     semanticGap,
     elapsedMs: Date.now() - startedAt,
+    ...indexStats(),
   };
 }
 
