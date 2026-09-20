@@ -242,6 +242,31 @@ function maskKey(key) {
   return `${key.slice(0, 8)}...${key.slice(-6)}`;
 }
 
+const USAGE_FLUSH_EXIT_CAP_MS = 15000;
+const STDOUT_WRITE_CAP_MS = 2000;
+const DEFER_DISABLED_VALUES = new Set(["0", "false", "off", "no"]);
+
+function deferUsageFlushEnabled(env) {
+  return !DEFER_DISABLED_VALUES.has(String(env?.YCE_DEFER_USAGE_FLUSH ?? "").trim().toLowerCase());
+}
+
+function withCap(promise, capMs) {
+  return new Promise((resolveCap) => {
+    const timer = setTimeout(resolveCap, capMs);
+    Promise.resolve(promise).catch(() => {}).finally(() => {
+      clearTimeout(timer);
+      resolveCap();
+    });
+  });
+}
+
+function writeLine(text) {
+  return withCap(
+    new Promise((done) => { process.stdout.write(`${text}\n`, () => done()); }),
+    STDOUT_WRITE_CAP_MS,
+  );
+}
+
 async function loadCore() {
   if (!existsSync(CORE_PATH)) {
     throw new Error(
@@ -305,7 +330,7 @@ async function main() {
   }
 
   try {
-    const { searchWithContent, searchWithDetails, extractKeyInfo } = await loadCore();
+    const { searchWithContent, searchWithDetails, searchWithDetailsDeferred, extractKeyInfo } = await loadCore();
 
     if (opts.checkKey) {
       const result = await extractKeyInfo();
@@ -353,11 +378,23 @@ async function main() {
     };
 
     if (opts.json) {
-      const details = await searchWithDetails(searchOptions);
+      const deferred = deferUsageFlushEnabled(process.env)
+        && typeof searchWithDetailsDeferred === "function";
+      if (!deferred) {
+        const details = await searchWithDetails(searchOptions);
+        details.diagnostics.ignore_file = ignore.path;
+        details.diagnostics.ignore_patterns = ignore.patterns;
+        console.log(JSON.stringify(details));
+        return;
+      }
+      const { details, usageFlushed } = await searchWithDetailsDeferred(searchOptions);
       details.diagnostics.ignore_file = ignore.path;
       details.diagnostics.ignore_patterns = ignore.patterns;
-      console.log(JSON.stringify(details));
-      return;
+      process.stdout.on("error", () => {});
+      process.stderr.on("error", () => {});
+      await writeLine(JSON.stringify(details));
+      await withCap(usageFlushed, USAGE_FLUSH_EXIT_CAP_MS);
+      process.exit(0);
     }
 
     console.log(await searchWithContent(searchOptions));

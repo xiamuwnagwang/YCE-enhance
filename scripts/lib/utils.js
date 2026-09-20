@@ -237,7 +237,15 @@ function buildYceEngineEnv(merged) {
   if (relayUrl) childEnv.YCE_RELAY_URL = relayUrl;
   if (relayToken) childEnv.YCE_RELAY_TOKEN = relayToken;
 
-  const passthroughKeys = ["YCE_API_KEY", "YCE_LOCAL_FALLBACK", "TYPESAFE_API_KEY", "YCE_PRERANK_CJK"];
+  const passthroughKeys = [
+    "YCE_API_KEY",
+    "YCE_LOCAL_FALLBACK",
+    "TYPESAFE_API_KEY",
+    "YCE_PRERANK_CJK",
+    "YCE_PRERANK_INDEX",
+    "YCE_PRERANK_INDEX_DIR",
+    "YCE_DEFER_USAGE_FLUSH",
+  ];
 
   for (const key of passthroughKeys) {
     if (hasOwn(merged, key) && isNonEmptyString(merged[key])) {
@@ -1098,6 +1106,11 @@ function serializeForStdout(payload, pretty = false) {
         ["prerank-total-elapsed-ms", "prerank_total_elapsed_ms"],
         ["prerank-lexical-hits", "prerank_lexical_hits"],
         ["prerank-confidence", "prerank_confidence"],
+        ["prerank-index-mode", "prerank_index_mode"],
+        ["prerank-index-hits", "prerank_index_hits"],
+        ["prerank-index-misses", "prerank_index_misses"],
+        ["prerank-index-load-ms", "prerank_index_load_ms"],
+        ["prerank-index-save-ms", "prerank_index_save_ms"],
         ["jev-screen-attempted", "jev_screen_attempted"],
         ["jev-screen-success", "jev_screen_success"],
         ["jev-screen-elapsed-ms", "jev_screen_elapsed_ms"],
@@ -1132,6 +1145,7 @@ function serializeForStdout(payload, pretty = false) {
         ["cache-fingerprint", "cache_fingerprint"],
         ["cache-fingerprint-ms", "cache_fingerprint_ms"],
         ["related-symbols-elapsed-ms", "related_symbols_elapsed_ms"],
+        ["usage-flush-detached", "usage_flush_detached"],
       ];
       pushLine(2, `<diagnostics>`);
       for (const [tagName, key] of scalarFields) {
@@ -1302,8 +1316,22 @@ function serializeForStdout(payload, pretty = false) {
   return pretty ? lines.join("\n") : lines.join("");
 }
 
+function completeJsonLine(buffer) {
+  if (!buffer.startsWith("{")) return null;
+  const end = buffer.indexOf("\n");
+  if (end < 0) return null;
+  const line = buffer.slice(0, end);
+  try {
+    const parsed = JSON.parse(line);
+    if (!parsed || typeof parsed !== "object") return null;
+  } catch {
+    return null;
+  }
+  return line;
+}
+
 function runCommand(command, args, options = {}) {
-  const { cwd, timeoutMs, env } = options;
+  const { cwd, timeoutMs, env, resolveOnJsonLine = false } = options;
 
   return new Promise((resolve) => {
     const child = spawn(command, args, {
@@ -1325,13 +1353,35 @@ function runCommand(command, args, options = {}) {
         }, timeoutMs)
       : null;
 
-    child.stdout.on("data", (chunk) => {
+    const onStdout = (chunk) => {
       stdout += chunk.toString();
-    });
+      if (!resolveOnJsonLine || settled) return;
+      const line = completeJsonLine(stdout);
+      if (line === null) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      child.stdout.removeListener("data", onStdout);
+      child.stderr.removeListener("data", onStderr);
+      child.stdout.resume();
+      child.stderr.resume();
+      child.stdout.unref?.();
+      child.stderr.unref?.();
+      child.unref();
+      resolve({
+        ok: true,
+        stdout: line,
+        stderr,
+        exitCode: null,
+        timedOut: false,
+        signal: null,
+        spawnError: null,
+        detached: true,
+      });
+    };
 
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
+    const onStderr = (chunk) => { stderr += chunk.toString(); };
+    child.stdout.on("data", onStdout);
+    child.stderr.on("data", onStderr);
 
     child.on("error", (error) => {
       if (settled) return;
@@ -1345,6 +1395,7 @@ function runCommand(command, args, options = {}) {
         timedOut,
         signal: null,
         spawnError: error,
+        detached: false,
       });
     });
 
@@ -1360,6 +1411,7 @@ function runCommand(command, args, options = {}) {
         timedOut,
         signal,
         spawnError: null,
+        detached: false,
       });
     });
   });

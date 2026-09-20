@@ -23,6 +23,11 @@ function isLocalFallbackEnabled(env) {
   return String(env?.YCE_LOCAL_FALLBACK || "").trim().toLowerCase() === "true";
 }
 
+const DEFER_DISABLED_VALUES = new Set(["0", "false", "off", "no"]);
+function isDeferUsageFlushEnabled(env) {
+  return !DEFER_DISABLED_VALUES.has(String(env?.YCE_DEFER_USAGE_FLUSH ?? "").trim().toLowerCase());
+}
+
 function mapYceEngineFailure(text) {
   const t = text || "";
   if (/relay key lease failed/i.test(t)) {
@@ -273,11 +278,17 @@ async function runYceEngineSearch({
   }
   args.push(bootstrapEnabled === false ? "--no-bootstrap" : "--bootstrap-enabled");
 
+  const detachOnJsonLine = isDeferUsageFlushEnabled(env);
   const startedAt = Date.now();
-  const commandResult = await runCommand("node", args, { cwd, timeoutMs, env });
+  const commandResult = await runCommand("node", args, {
+    cwd,
+    timeoutMs,
+    env,
+    resolveOnJsonLine: detachOnJsonLine,
+  });
   const durationMs = Date.now() - startedAt;
 
-  result.exit_code = commandResult.exitCode;
+  result.exit_code = commandResult.detached === true ? 0 : commandResult.exitCode;
   result.stderr_summary = summarizeText(commandResult.stderr);
   const payload = parseStructuredPayload(commandResult.stdout);
   result.raw_stdout = payload ? payload.output || null : commandResult.stdout || null;
@@ -321,7 +332,7 @@ async function runYceEngineSearch({
     return failWithLocalFallback("EXEC_ERROR", commandResult.spawnError.message);
   }
 
-  if (commandResult.exitCode === 0) {
+  if (commandResult.exitCode === 0 || commandResult.detached === true) {
     if (payload) {
       if (payload.success !== true) {
         const mapped = mapYceEngineFailure(payload.error || payload.output || commandResult.stderr);
@@ -332,6 +343,10 @@ async function runYceEngineSearch({
         };
       }
       result.success = true;
+      const markDetached = () => {
+        if (commandResult.detached !== true) return;
+        result.diagnostics = { ...(result.diagnostics || {}), usage_flush_detached: true };
+      };
       if (result.result_present) {
         if (cacheConfig.enabled && cacheKey) {
           writeCacheEntry(
@@ -359,8 +374,10 @@ async function runYceEngineSearch({
             cache_fingerprint_ms: cacheFingerprintMs,
           };
         }
+        markDetached();
         return { search: result, error: null, durationMs };
       }
+      markDetached();
       if (result.empty_result) {
         if (isLocalFallbackEnabled(env)) {
           const fallback = runLocalFallback();

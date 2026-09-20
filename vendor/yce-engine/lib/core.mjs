@@ -1168,6 +1168,11 @@ async function _runLocalBootstrapPhase({
     prerankCandidates: selected.length,
     prerankLexicalHits: local.lexicalHits,
     prerankConfidence: local.lowConfidence ? "low" : "high",
+    prerankIndexMode: local.indexMode,
+    prerankIndexHits: local.indexHits,
+    prerankIndexMisses: local.indexMisses,
+    prerankIndexLoadMs: local.indexLoadMs,
+    prerankIndexSaveMs: local.indexSaveMs,
     localScoreElapsedMs: local.elapsedMs,
     candidatePaths: exposedCandidates.map((candidate) => candidate.path),
     candidatePathsRejected: validatedCandidates.rejected,
@@ -3146,6 +3151,20 @@ export async function search(options) {
   }
 }
 
+async function _searchDeferred(options) {
+  const runState = {};
+  let result;
+  try {
+    result = await _searchImpl(options, runState);
+  } catch (error) {
+    if (runState.credentialState) _clearRelayCredentialState(runState.credentialState);
+    await _flushUsageReports();
+    throw error;
+  }
+  if (runState.credentialState) _clearRelayCredentialState(runState.credentialState);
+  return { result, usageFlushed: _flushUsageReports().catch(() => {}) };
+}
+
 async function _searchImpl({
   query,
   projectRoot,
@@ -3398,6 +3417,11 @@ async function _searchImpl({
     prerankTotalElapsedMs: bootstrapHints?.prerankTotalElapsedMs ?? 0,
     prerankLexicalHits: bootstrapHints?.prerankLexicalHits ?? null,
     prerankConfidence: bootstrapHints?.prerankConfidence ?? null,
+    prerankIndexMode: bootstrapHints?.prerankIndexMode || "off",
+    prerankIndexHits: bootstrapHints?.prerankIndexHits ?? 0,
+    prerankIndexMisses: bootstrapHints?.prerankIndexMisses ?? 0,
+    prerankIndexLoadMs: bootstrapHints?.prerankIndexLoadMs ?? 0,
+    prerankIndexSaveMs: bootstrapHints?.prerankIndexSaveMs ?? 0,
     prerankCandidatePaths: bootstrapHints?.candidatePaths || [],
     prerankCandidatePathsRejected: bootstrapHints?.candidatePathsRejected || [],
     jevScreen: bootstrapHints?.jev || null,
@@ -3490,6 +3514,11 @@ async function _searchImpl({
     prerankTotalElapsedMs: bootstrapHints?.prerankTotalElapsedMs ?? 0,
     prerankLexicalHits: bootstrapHints?.prerankLexicalHits ?? null,
     prerankConfidence: bootstrapHints?.prerankConfidence ?? null,
+    prerankIndexMode: bootstrapHints?.prerankIndexMode || "off",
+    prerankIndexHits: bootstrapHints?.prerankIndexHits ?? 0,
+    prerankIndexMisses: bootstrapHints?.prerankIndexMisses ?? 0,
+    prerankIndexLoadMs: bootstrapHints?.prerankIndexLoadMs ?? 0,
+    prerankIndexSaveMs: bootstrapHints?.prerankIndexSaveMs ?? 0,
     prerankCandidatePaths: bootstrapHints?.candidatePaths || [],
     prerankCandidatePathsRejected: bootstrapHints?.candidatePathsRejected || [],
     jevScreen: bootstrapHints?.jev || null,
@@ -3894,6 +3923,11 @@ function _buildStructuredDiagnostics(result, options) {
     prerank_total_elapsed_ms: meta.prerankTotalElapsedMs ?? 0,
     prerank_lexical_hits: meta.prerankLexicalHits ?? null,
     prerank_confidence: meta.prerankConfidence || null,
+    prerank_index_mode: meta.prerankIndexMode || "off",
+    prerank_index_hits: meta.prerankIndexHits ?? 0,
+    prerank_index_misses: meta.prerankIndexMisses ?? 0,
+    prerank_index_load_ms: meta.prerankIndexLoadMs ?? 0,
+    prerank_index_save_ms: meta.prerankIndexSaveMs ?? 0,
     prerank_candidate_paths: Array.isArray(meta.prerankCandidatePaths) ? meta.prerankCandidatePaths : [],
     prerank_candidate_paths_rejected: Array.isArray(meta.prerankCandidatePathsRejected) ? meta.prerankCandidatePathsRejected : [],
     answer_path_validation: {
@@ -3922,8 +3956,7 @@ function _buildStructuredDiagnostics(result, options) {
   };
 }
 
-export async function searchWithDetails(options) {
-  const result = await search(options);
+function _searchDetailsFrom(result, options) {
   const files = (result.files || []).map((entry) => ({
     path: entry.full_path,
     ranges: Array.isArray(entry.ranges) ? entry.ranges : [],
@@ -3940,6 +3973,15 @@ export async function searchWithDetails(options) {
     diagnostics: _buildStructuredDiagnostics(result, options),
     error: result.error || null,
   };
+}
+
+export async function searchWithDetails(options) {
+  return _searchDetailsFrom(await search(options), options);
+}
+
+export async function searchWithDetailsDeferred(options) {
+  const { result, usageFlushed } = await _searchDeferred(options);
+  return { details: _searchDetailsFrom(result, options), usageFlushed };
 }
 
 export async function searchWithContent(options) {
@@ -3997,6 +4039,7 @@ export const __test = {
   unaryRequest: _unaryRequest,
   classifyError: _classifyError,
   flushUsageReports: _flushUsageReports,
+  searchDeferred: _searchDeferred,
   leaseReusable: _leaseReusable,
   accumulateLeaseUsage: _accumulateLeaseUsage,
   releaseLeaseUsage: _releaseLeaseUsage,
