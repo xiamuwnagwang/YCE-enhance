@@ -66,7 +66,7 @@ search 在远端 agent 循环之外有四层本地能力，默认全开，可单
 
 - **本地预排**（`--bootstrap-mode local`，默认）：BM25、声明结构分与 probe 命中三路 RRF 融合，产出候选文件与 rg 提示，替代原来的远端 bootstrap 阶段（诊断 `bootstrap-remote-calls=0` 即零远端往返）；`remote` 保留旧的远端预排行为。
 - **正文回传**：结果直接带 `<code-context>`（同文件相邻区间合并、短片段补行、每文件最多 3 段、总预算默认 6400 token），元素与预算说明见 [xml-contract.md](xml-contract.md)。`--no-context` 或 `YCE_CODE_CONTEXT=false` 关闭；`YCE_CODE_CONTEXT_MAX_TOKENS` 调预算。
-- **jev 补屏**：主结果候选不足时，用 TypeSafe Jev 判别模型对 top-20 骨架做一次批量补屏。key 先向 relay 租用，失败回退本机 `TYPESAFE_API_KEY`，两者皆无则跳过（来源记在诊断 `jev-key-source`）。`--no-jev-screen` 或 `YCE_JEV_SCREEN=false` 关闭。
+- **jev 补屏**：主结果候选不足时，用 TypeSafe Jev 判别模型对 top-20 骨架做一次批量补屏。key 先向 relay 租用，失败回退本机 `TYPESAFE_API_KEY`，两者皆无则跳过（来源记在诊断 `jev-key-source`）。租约除 key 外还可下发 `base_url` 与 `model`：用户自备 jev、或池条目钉了第三方端点时，补屏按这两个字段打到对应端点与模型；租约不带它们或值为空时，落回官方 `https://api.typesafe.ai/v1/systemone` 与 `jev-latest`。`--no-jev-screen` 或 `YCE_JEV_SCREEN=false` 关闭。
 - **结果缓存**：对工作区做内容指纹（Git 仓 = 索引 + 脏文件清单 + 脏文件 stat；非 Git 目录 = 全量路径+大小+mtime），树和查询都没变时直接复用上次的引擎结果（实测重复查询 ~15s → 500ms 内），命中后 `<code-context>` 正文仍从当前磁盘现读，不会拿到过期内容。改动任何被跟踪文件、新增或修改未跟踪文件都会使缓存失效。TTL 默认 6 小时，过期条目读时惰性删除、写入时顺带清扫。`--no-cache` 或 `YCE_SEARCH_CACHE=off` 关闭；`YCE_SEARCH_CACHE_TTL_MS` 调 TTL（非正值回退默认）；`YCE_SEARCH_CACHE_DIR` 改缓存目录（缺省在结果目录旁 `yce-cache/`）。
 
 ## 常用参数
