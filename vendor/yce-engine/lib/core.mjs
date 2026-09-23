@@ -909,6 +909,8 @@ async function _leaseJevKey({ timeoutMs = JEV_LEASE_TIMEOUT_MS, signal = null } 
       relayToken,
       leaseExpiresAt: String(payload?.lease_expires_at || "").trim(),
       selectionReason: String(payload?.selection_reason || "").trim(),
+      baseUrl: String(payload?.base_url || "").trim(),
+      model: String(payload?.model || "").trim(),
       elapsedMs: Date.now() - startedAt,
     };
   } catch (error) {
@@ -1113,6 +1115,8 @@ async function _runLocalBootstrapPhase({
           timeoutMs: 5000,
           maxCandidates: LOCAL_JEV_MAX_CANDIDATES,
           skeletonChars: 400,
+          ...(lease.ok && lease.baseUrl ? { endpoint: lease.baseUrl } : {}),
+          ...(lease.ok && lease.model ? { model: lease.model } : {}),
         });
       } finally {
         // Failure receipts matter as much as success ones: they are what lets

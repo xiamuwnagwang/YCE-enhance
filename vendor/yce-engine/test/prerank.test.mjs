@@ -66,6 +66,41 @@ test("Jev screen sends one batched choice request and maps probabilities", async
   }
 });
 
+test("Jev screen honors a caller-supplied endpoint and model, falling back to defaults on blank input", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "yce-jev-screen-model-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, "scheduler.go"), "package main\nfunc SelectKey() string { return \"key\" }\n");
+
+  function screen(overrides) {
+    let captured = null;
+    const call = screenCandidates({
+      query: "choose an upstream key",
+      projectRoot: root,
+      candidates: [{ path: "scheduler.go" }],
+      apiKey: "fixture-typesafe-key",
+      fetchImpl: async (url, options) => {
+        captured = { url, body: JSON.parse(options.body) };
+        return new Response(JSON.stringify({
+          answers: { pick: { type: "choice", probabilities: { file_0: 0.9 }, confidence: 0.9 } },
+          usage: { input_tokens: 10, output_tokens: 0 },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+      ...overrides,
+    });
+    return call.then(() => captured);
+  }
+
+  const custom = await screen({ endpoint: "https://jev.family-pool.invalid/v1/systemone", model: "jev-family-v2" });
+  assert.equal(custom.url, "https://jev.family-pool.invalid/v1/systemone");
+  assert.equal(custom.body.model, "jev-family-v2");
+
+  const blankModel = await screen({ model: "   " });
+  assert.equal(blankModel.body.model, "jev-latest");
+
+  const nonStringModel = await screen({ model: 42 });
+  assert.equal(nonStringModel.body.model, "jev-latest");
+});
+
 test("Jev screen failures are returned as optional diagnostics", async () => {
   const result = await screenCandidates({
     query: "any query",

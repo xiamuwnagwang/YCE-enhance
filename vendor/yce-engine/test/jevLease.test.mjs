@@ -39,6 +39,8 @@ function jevScreenResponse({ inputTokens = 210, outputTokens = 12 } = {}) {
   }), { status: 200, headers: { "content-type": "application/json" } });
 }
 
+const DEFAULT_JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
+
 // Restores every process-wide seam this suite borrows: the three env vars and
 // globalThis.fetch are shared by all tests in this file's process.
 function installEnvironment(t, { envKey, fetchImpl }) {
@@ -85,7 +87,7 @@ test("relay lease supplies the Jev key and the run reports its token usage", asy
         calls.usage.push(JSON.parse(options.body));
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       }
-      calls.screen.push({ url: target, headers: options.headers });
+      calls.screen.push({ url: target, headers: options.headers, body: JSON.parse(options.body) });
       return jevScreenResponse();
     },
   });
@@ -112,6 +114,10 @@ test("relay lease supplies the Jev key and the run reports its token usage", asy
   // The screen ran on the leased key, not the local env key.
   assert.equal(calls.screen.length, 1);
   assert.equal(calls.screen[0].headers.Authorization, "Bearer pooled-jev-key");
+  // The lease response carried no base_url/model, so the screen falls back to
+  // the built-in defaults byte-for-byte — unchanged from pre-W4 behavior.
+  assert.equal(calls.screen[0].url, DEFAULT_JEV_ENDPOINT);
+  assert.equal(calls.screen[0].body.model, "jev-latest");
 
   assert.equal(calls.usage.length, 1);
   assert.equal(calls.usage[0].key_id, "pool-entry-7");
@@ -120,6 +126,51 @@ test("relay lease supplies the Jev key and the run reports its token usage", asy
   assert.equal(calls.usage[0].input_tokens, 210);
   assert.equal(calls.usage[0].output_tokens, 12);
   assert.equal(typeof calls.usage[0].duration_ms, "number");
+});
+
+test("a lease carrying base_url and model routes the screen to the leased endpoint and model", async (t) => {
+  const root = makeFixtureRepo(t);
+  const calls = { lease: [], screen: [], usage: [] };
+  const LEASED_ENDPOINT = "https://jev.family-pool.invalid/v1/systemone";
+  installEnvironment(t, {
+    envKey: "env-key-should-not-be-used",
+    fetchImpl: async (url, options) => {
+      const target = String(url);
+      if (target.endsWith("/yce/jev-lease")) {
+        calls.lease.push({ options, body: JSON.parse(options.body) });
+        return new Response(JSON.stringify({
+          api_key: "pooled-jev-key",
+          key_id: "pool-entry-11",
+          lease_id: "jev-lease-11",
+          base_url: LEASED_ENDPOINT,
+          model: "jev-family-v2",
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (target.endsWith("/yce/jev-usage")) {
+        calls.usage.push(JSON.parse(options.body));
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      calls.screen.push({ url: target, headers: options.headers, body: JSON.parse(options.body) });
+      return jevScreenResponse();
+    },
+  });
+
+  const result = await coreTest.runLocalBootstrapPhase({
+    query: SCREEN_QUERY,
+    projectRoot: root,
+    excludePaths: [],
+    maxResults: 5,
+  });
+  await coreTest.flushUsageReports();
+
+  assert.equal(result.jev.keySource, "relay");
+  assert.equal(result.jev.attempted, true);
+  assert.equal(result.jev.success, true);
+  assert.equal(calls.screen.length, 1);
+  assert.equal(calls.screen[0].headers.Authorization, "Bearer pooled-jev-key");
+  // The lease's base_url/model steer the screen request, not the built-ins.
+  assert.equal(calls.screen[0].url, LEASED_ENDPOINT);
+  assert.equal(calls.screen[0].body.model, "jev-family-v2");
 });
 
 test("a 500 JEV_POOL_LOAD_FAILED lease falls back to the env key and records the error", async (t) => {
@@ -140,7 +191,7 @@ test("a 500 JEV_POOL_LOAD_FAILED lease falls back to the env key and records the
         calls.usage += 1;
         return new Response("{}", { status: 200 });
       }
-      calls.screen.push({ headers: options.headers });
+      calls.screen.push({ url: target, headers: options.headers, body: JSON.parse(options.body) });
       return jevScreenResponse({ inputTokens: 99, outputTokens: 3 });
     },
   });
@@ -163,6 +214,10 @@ test("a 500 JEV_POOL_LOAD_FAILED lease falls back to the env key and records the
   assert.equal(result.jev.skipReason, null);
   assert.equal(calls.screen.length, 1);
   assert.equal(calls.screen[0].headers.Authorization, "Bearer local-env-typesafe-key");
+  // The failed lease carried no base_url/model (it never even reached a
+  // 200 response), so the env-key fallback still hits the official endpoint.
+  assert.equal(calls.screen[0].url, DEFAULT_JEV_ENDPOINT);
+  assert.equal(calls.screen[0].body.model, "jev-latest");
   // No lease was issued, so there is nothing to report usage against.
   assert.equal(calls.usage, 0);
 });

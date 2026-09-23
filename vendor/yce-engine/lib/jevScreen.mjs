@@ -1,6 +1,7 @@
 import { relative, resolve, sep } from "node:path";
 
 const DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
+const DEFAULT_MODEL = "jev-latest";
 const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_CANDIDATES = 20;
 const DEFAULT_SKELETON_CHARS = 400;
@@ -70,6 +71,7 @@ export async function screenCandidates({
   candidates = [],
   apiKey = "",
   endpoint = DEFAULT_ENDPOINT,
+  model = DEFAULT_MODEL,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   maxCandidates = DEFAULT_MAX_CANDIDATES,
   skeletonChars = DEFAULT_SKELETON_CHARS,
@@ -97,8 +99,9 @@ export async function screenCandidates({
   const criteria = Object.fromEntries(records.map((record, index) => [
     ids[index], `${record.path}:\n${record.skeleton}`,
   ]));
+  const resolvedModel = (typeof model === "string" ? model.trim() : "") || DEFAULT_MODEL;
   const body = {
-    model: "jev-latest",
+    model: resolvedModel,
     state: { goal: String(query || "") },
     questions: {
       pick: {
