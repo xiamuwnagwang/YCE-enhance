@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { scoreFiles, selectProbePatternTerms } from "../lib/directory-scorer.mjs";
 import { isCjkToken } from "../lib/lexicon.cjs";
 import { screenCandidates } from "../lib/jevScreen.mjs";
+import { isDecisionsEndpoint } from "../lib/jevScreen.mjs";
 import { __test as coreTest } from "../lib/core.mjs";
 
 test("file preranker fuses lexical, structure, and probe signals", (t) => {
@@ -526,4 +527,85 @@ test("a long CJK run is not offered as a grep lead", (t) => {
   const cjk = result.rgPatterns.filter(isCjkToken);
   assert.ok(cjk.every((pattern) => pattern.length <= 4));
   assert.ok(cjk.length <= 6);
+});
+
+// Mirrors KIND_CASES (K1-K10) in the relay frontend's scripts/test-jev-endpoint.mjs.
+const JEV_KIND_CASES = [
+  ["K1", "https://api.typesafe.ai/v1/systemone", false],
+  ["K2", "https://freejev.org/api/v1/decisions", true],
+  ["K3", "https://freejev.org/api/v1/decisions/", true],
+  ["K4", "https://h.example.com/decisions", true],
+  ["K5", "https://h.example.com/decisions/v1/systemone", false],
+  ["K6", "https://h.example.com/Decisions/v1/systemone", false],
+  ["K7", "https://h.example.com/mydecisions/v1/systemone", false],
+  ["K8", "http://10.0.0.5:8080/decisions", true],
+  ["K9", "not a url/v1/systemone", false],
+  ["K10", "sub.nekopeer.com/decisions", false],
+];
+
+for (const [id, url, expected] of JEV_KIND_CASES) {
+  test(`isDecisionsEndpoint ${id}: ${url}`, () => {
+    assert.equal(isDecisionsEndpoint(url), expected);
+  });
+}
+
+async function screenBody(t, endpoint, files, overrides = {}) {
+  const root = mkdtempSync(join(tmpdir(), "yce-jev-kind-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const name of files) writeFileSync(join(root, name), `package main\nfunc ${name.replace(/\W/g, "_")}() {}\n`);
+  let captured = null;
+  const probabilities = Object.fromEntries(files.map((_, i) => [`file_${i}`, 0.9 - i * 0.1]));
+  const result = await screenCandidates({
+    query: "choose an upstream key",
+    projectRoot: root,
+    candidates: files.map((path) => ({ path })),
+    apiKey: "fixture-typesafe-key",
+    endpoint,
+    fetchImpl: async (url, options) => {
+      captured = JSON.parse(options.body);
+      return new Response(JSON.stringify({
+        answers: { pick: { type: "choice", probabilities: { ...probabilities, __none__: 0.5 }, confidence: 0.9 } },
+        usage: { input_tokens: 10, output_tokens: 0 },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+    ...overrides,
+  });
+  return { result, body: captured };
+}
+
+test("Jev decisions endpoint with one candidate drops model, adds request_id and pads criteria", async (t) => {
+  const { result, body } = await screenBody(t, "https://freejev.org/api/v1/decisions", ["a.go"], { model: "jev-family-v2" });
+  assert.equal("model" in body, false);
+  assert.equal(typeof body.request_id, "string");
+  assert.ok(body.request_id.length > 0);
+  const keys = Object.keys(body.questions.pick.criteria);
+  assert.equal(keys.length, 2);
+  assert.ok(keys.includes("__none__"));
+  assert.ok(keys.includes("file_0"));
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.candidates.map((item) => item.path), ["a.go"]);
+});
+
+test("Jev decisions endpoint generates a fresh request_id per call", async (t) => {
+  const first = await screenBody(t, "https://freejev.org/api/v1/decisions", ["a.go"]);
+  const second = await screenBody(t, "https://freejev.org/api/v1/decisions", ["a.go"]);
+  assert.notEqual(first.body.request_id, second.body.request_id);
+});
+
+test("Jev decisions endpoint with two candidates adds no placeholder", async (t) => {
+  const { body } = await screenBody(t, "https://freejev.org/api/v1/decisions", ["a.go", "b.go"]);
+  const keys = Object.keys(body.questions.pick.criteria);
+  assert.equal(keys.length, 2);
+  assert.equal(keys.includes("__none__"), false);
+  assert.equal("model" in body, false);
+  assert.equal(typeof body.request_id, "string");
+});
+
+test("Jev systemone endpoints keep model, omit request_id and never pad a single candidate", async (t) => {
+  for (const endpoint of [undefined, "https://api.typesafe.ai/v1/systemone", "https://h.example.com/decisions/v1/systemone"]) {
+    const { body } = await screenBody(t, endpoint, ["a.go"], endpoint === undefined ? {} : { endpoint });
+    assert.equal(body.model, "jev-latest");
+    assert.equal("request_id" in body, false);
+    assert.deepEqual(Object.keys(body.questions.pick.criteria), ["file_0"]);
+  }
 });

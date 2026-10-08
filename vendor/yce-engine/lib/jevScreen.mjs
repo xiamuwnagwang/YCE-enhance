@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { relative, resolve, sep } from "node:path";
 
 const DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
@@ -45,6 +46,27 @@ function buildCandidateRecord(projectRoot, candidate, maxChars) {
     path,
     skeleton: sections.join("\n").slice(0, Math.max(0, Number(maxChars) || DEFAULT_SKELETON_CHARS)),
   };
+}
+
+const NONE_CRITERION_KEY = "__none__";
+const NONE_CRITERION_TEXT = "None of the listed candidates carries the behavior described in `goal`.";
+
+// Two request shapes, told apart by the final request URL only:
+//  - systemone (official api.typesafe.ai/v1/systemone and most pools): `model`
+//    field, no `request_id`. That contract is in production and must not change.
+//  - decisions (e.g. freejev.org/api/v1/decisions): `request_id` is required as
+//    a body string, `model` is rejected (400 invalid_arguments), and a choice
+//    question needs at least 2 criteria. Verified against a real key.
+// A URL that does not parse, or is not http(s), is treated as systemone.
+export function isDecisionsEndpoint(endpoint) {
+  let url;
+  try {
+    url = new URL(String(endpoint));
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  return url.pathname.replace(/\/+$/, "").endsWith("/decisions");
 }
 
 function normalizeProbabilities(answer, ids) {
@@ -99,18 +121,20 @@ export async function screenCandidates({
   const criteria = Object.fromEntries(records.map((record, index) => [
     ids[index], `${record.path}:\n${record.skeleton}`,
   ]));
+  const decisions = isDecisionsEndpoint(endpoint);
+  if (decisions && ids.length === 1) criteria[NONE_CRITERION_KEY] = NONE_CRITERION_TEXT;
   const resolvedModel = (typeof model === "string" ? model.trim() : "") || DEFAULT_MODEL;
-  const body = {
-    model: resolvedModel,
-    state: { goal: String(query || "") },
-    questions: {
-      pick: {
-        type: "choice",
-        instructions: "Which candidate file truly carries the behavior described in `goal` (defines it, not merely calls or mentions it)? Judge from each candidate skeleton and do not require shared vocabulary.",
-        criteria,
-      },
+  const questions = {
+    pick: {
+      type: "choice",
+      instructions: "Which candidate file truly carries the behavior described in `goal` (defines it, not merely calls or mentions it)? Judge from each candidate skeleton and do not require shared vocabulary.",
+      criteria,
     },
   };
+  const state = { goal: String(query || "") };
+  const body = decisions
+    ? { request_id: randomUUID(), state, questions }
+    : { model: resolvedModel, state, questions };
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), Math.max(250, Number(timeoutMs) || DEFAULT_TIMEOUT_MS));
