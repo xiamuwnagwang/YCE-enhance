@@ -30,7 +30,7 @@ server 找 CLI 的顺序是「包相对 `mcp/../scripts/yce.js` → `YCE_MCP_SKI
 
 | 工具 | 转发的 CLI 调用 | 关键参数 | 返回值 |
 |------|----------------|----------|--------|
-| `yce_search` | `--mode search`（`mode=auto` 先增强再检索） | `query`（必填，英文）、`cwd`、`mode`、`history`、`with_network`、`task`/`no_task`、检索调优项（`max_results`、`tree_depth`、`exclude`、`no_cache`…） | 收据 JSON + 人读提示 |
+| `yce_search` | `--mode search`（`mode=auto` 先增强再检索） | `query`（必填，英文）、`cwd`、`mode`、`history`、`with_network`、`task`/`no_task`、检索调优项（`max_results`、`tree_depth`、`exclude`、`no_cache`、`no_jev_screen`…） | 收据 JSON + 人读提示 |
 | `yce_enhance` | `--mode enhance` | `query`（必填）、`history`、`enhance_backend`、`language` | 收据 JSON + 人读提示 |
 | `yce_network_search` | `--mode network` | `query`（必填）、`network_profile`、`library`、`repo` | 收据 JSON + 人读提示 |
 | `yce_plan` | `--mode plan` | `query`（必填）、`cwd`、`with_search`、`search_context`、`plan_backend`、`plan_provider`/`plan_model`、`web_search`、`save` | 收据 JSON + 人读提示 |

@@ -1,6 +1,6 @@
 ---
 name: yce
-version: 3.8.2
+version: 3.8.3
 description: |
   当任务既需要把模糊需求说清楚，又需要去代码库里把实现找出来时使用。适用于"帮我看看这块逻辑在哪""优化任务后再搜代码""增强后检索""auto search""YCE"等场景。
   需要当前外部信息、官方库文档、竞品/行业调研时用 `--mode network` 或 `--with-network`。
@@ -57,6 +57,7 @@ node ./scripts/validate-yce-result.mjs "<result_file>" --expect-sha256 <xml_sha2
 
 | 变量 | 默认 | 作用 |
 |------|------|------|
+| `YCE_JEV_SCREEN` | 开 | `false` 关闭 jev 补屏（prerank 低置信时的可选语义加速）；单次调用用 `--no-jev-screen`，MCP 走 `yce_search` 的 `no_jev_screen`。补屏端点接近 5s 预算时常超时，关掉后本地预排自动兜底 |
 | `YCE_JEV_LEASE_PREFETCH` | 开 | `0` 恢复预排完成后再申请 jev 租约 |
 | `YCE_PRERANK_INDEX` | 开 | `0` 禁用持久预排索引并恢复逐文件读取 |
 | `YCE_PRERANK_INDEX_DIR` | `~/.cache/yce-engine/prerank-index` | 覆盖预排索引目录 |

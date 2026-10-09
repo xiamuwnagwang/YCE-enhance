@@ -306,6 +306,37 @@ main() {
   info "Tag: $TAG"
   info "资产目录: $DIST_DIR"
 
+  # 发版一致性防线（2026-10 v3.8.2 事故：Release 先建、main 没收到 version bump，
+  # GitHub 首页/SKILL.md 与 Releases 版本漂移了 8 天）。发布前确认远端
+  # <target> 分支的 SKILL.md 已是本次版本；不是就停，先走 publish-release.js
+  # （它会先推脱敏快照提交到 main 再建 Release），或手工推完 bump 再来。
+  info "检查远端 ${TARGET_COMMITISH} 的 SKILL.md 版本..."
+  remote_version_http="$(api_request GET "${API_BASE}/repos/${REPO_SLUG}/contents/SKILL.md?ref=${TARGET_COMMITISH}" "$TMP_DIR/remote-skill.json")"
+  if [[ "$remote_version_http" == "200" ]]; then
+    remote_version="$(python3 - "$TMP_DIR/remote-skill.json" <<'PY'
+import base64, json, re, sys
+obj = json.load(open(sys.argv[1]))
+text = base64.b64decode(obj["content"]).decode("utf-8", "replace")
+m = re.search(r'(?m)^version:\s*([0-9]+\.[0-9]+\.[0-9]+)\s*$', text)
+print(m.group(1) if m else "")
+PY
+)"
+    if [[ "$remote_version" != "$version" ]]; then
+      die "远端 ${TARGET_COMMITISH} 的 SKILL.md 版本是「${remote_version:-未找到}」，与本次 Release ${version} 不一致。先把 version bump 推到 main（或直接用 scripts/publish-release.js 一步完成），再上传资产。"
+    fi
+    ok "远端 SKILL.md 已是 ${version}"
+  else
+    warn "读不到远端 SKILL.md（HTTP ${remote_version_http}），跳过一致性检查"
+  fi
+  # 本地 README 的「当前版本」标注与 SKILL.md 同步（版本标注漂移的另一处来源）。
+  python3 - "$ROOT/README.md" "$version" <<'PY' || die "README 的「当前版本」行与 SKILL.md ${version} 不一致，两处必须同一次 bump"
+import re, sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+m = re.search(r"当前版本：\*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*", text)
+sys.exit(0 if m and m.group(1) == sys.argv[2] else 1)
+PY
+
   local release_http
   release_http="$(api_request GET "${API_BASE}/repos/${REPO_SLUG}/releases/tags/${TAG}" "$TMP_DIR/release.json")"
   if [[ "$release_http" == "404" ]]; then

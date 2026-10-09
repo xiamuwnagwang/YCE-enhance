@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "SKILL.md"
@@ -40,7 +41,7 @@ REQUIRED_IN_SKILL = (
 )
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     print(f"FAIL: {message}", file=sys.stderr)
     raise SystemExit(1)
 
@@ -177,10 +178,46 @@ def check_gate_shared() -> None:
     print("OK CLI and validator share one gate implementation")
 
 
+def check_version_consistency() -> None:
+    """README 的「当前版本」必须与 SKILL.md 一致；mcp 子包走独立 2.0 序列，只验形状。
+
+    2026-10 的 v3.8.2 曾出现 Release 已发、main 与首页还停在 3.8.1 的漂移；
+    本地两处版本标注先在这里挡住，远端 main 的一致性由 upload-release.sh
+    发布时再挡一道。
+    """
+    skill_text = SKILL.read_text(encoding="utf-8")
+    match = re.search(r"^version:\s*(\d+\.\d+\.\d+)\s*$", skill_text, re.MULTILINE)
+    if not match:
+        fail("SKILL.md frontmatter is missing a semver 'version:' line")
+    version = match.group(1)
+    readme = ROOT / "README.md"
+    if not readme.is_file():
+        fail(f"missing README: {readme}")
+    readme_text = readme.read_text(encoding="utf-8")
+    readme_match = re.search(r"当前版本：\*\*(\d+\.\d+\.\d+)\*\*", readme_text)
+    if not readme_match:
+        fail("README.md is missing the '当前版本：**x.y.z**' line")
+    if readme_match.group(1) != version:
+        fail(
+            f"README 当前版本 {readme_match.group(1)} != SKILL.md version {version};"
+            " 两处必须同一次 bump"
+        )
+    mcp_pkg = ROOT / "mcp" / "package.json"
+    if mcp_pkg.is_file():
+        try:
+            mcp_version = json.loads(mcp_pkg.read_text(encoding="utf-8")).get("version", "")
+        except json.JSONDecodeError as error:
+            fail(f"mcp/package.json is not valid JSON: {error}")
+        if not re.fullmatch(r"\d+\.\d+\.\d+", str(mcp_version)):
+            fail(f"mcp/package.json version {mcp_version!r} is not semver")
+    print(f"OK version consistency: SKILL.md=README={version}")
+
+
 def main() -> None:
     if not VALIDATOR.is_file():
         fail(f"missing validator: {VALIDATOR}")
     check_skill()
+    check_version_consistency()
     check_gate_shared()
     check_adversarial_suite()
     check_fixtures()

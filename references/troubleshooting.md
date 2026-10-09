@@ -13,6 +13,7 @@
 |------|------|------|
 | 空结果或搜到别的项目 | 没传 `--cwd` | 显式绝对路径 |
 | `TIMEOUT` | 外层短 timeout 轮询 | 一次阻塞等待；search/auto ≥ 120s，plan ≥ 300s |
+| `jev-screen-skip-reason` 为 `timeout`，或 `jev_lease_error` 含超时 | 补屏调用（5s 预算）或租约（4s 预算）贴线：池端点慢（免费渠道常见）、大项目满候选、中文 query 必触发补屏 | 补屏是可选加速，失败自动回退本地预排，结果仍可用；要彻底关掉用 `--no-jev-screen`（单次）、`YCE_JEV_SCREEN=false`（全局）、MCP `yce_search` 的 `no_jev_screen` |
 | 加了 `--no-search` 仍在搜代码 | 该参数只关增强阶段外部搜索 | 只要增强就用 `--mode enhance` |
 | success=true 但没定位到代码 | 空结果时 success 仍可能为 true | 看 `result-present` 和校验退出码 3 |
 | `PARSE_ERROR` / 没有 `<enhanced>` | 增强输出被污染 | `--raw-events`；核对 `YCE_PROMPT_ENHANCE_SCRIPT` |
