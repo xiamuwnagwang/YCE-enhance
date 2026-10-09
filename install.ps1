@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   YCE 一键安装 / 更新 / 配置脚本 (Windows PowerShell 5.1+)
 
@@ -398,7 +398,10 @@ function Get-LatestSource {
   if ($git) {
     $repoDir = Join-Path $tmpDir "repo"
     try {
-      & git clone --depth 1 "$($RepoUrl).git" $repoDir 2>$null
+      # PS 5.1 里重定向原生命令的 stderr 会被包成 ErrorRecord，叠加
+      # $ErrorActionPreference='Stop' 就在第一条 stderr 输出上抛 NativeCommandError。
+      # 用 --quiet 保持安静（成功时 stderr 无输出），失败交给 $LASTEXITCODE 判断。
+      & git clone --quiet --depth 1 "$($RepoUrl).git" $repoDir
       if ($LASTEXITCODE -eq 0) { return $repoDir }
     } catch {}
   }
@@ -631,6 +634,7 @@ function Select-SyncTargets {
   foreach ($sel in ($choice -split ",")) {
     $trimmed = $sel.Trim()
     if (-not $trimmed) { continue }
+    if ($trimmed -notmatch "^\d+$") { continue }
     $idx = [int]$trimmed - 1
     if ($idx -ge 0 -and $idx -lt $Detected.Count) { $targets += $Detected[$idx] }
   }
@@ -896,6 +900,8 @@ function Invoke-Install {
         foreach ($sel in ($choice -split ',')) {
           $trimmed = $sel.Trim()
           if (-not $trimmed) { continue }
+          # 非数字输入（空回车/误触）不应让整个安装器崩掉
+          if ($trimmed -notmatch '^\d+$') { continue }
           $idx = [int]$trimmed - 1
           if ($idx -ge 0 -and $idx -lt $ToolMap.Count) {
             Install-ToDir -SourceDir $sourceDir -TargetDir $ToolMap[$idx].Dir -ToolName $ToolMap[$idx].Label
@@ -965,6 +971,7 @@ function Invoke-Uninstall {
     foreach ($sel in ($choice -split ',')) {
       $trimmed = $sel.Trim()
       if (-not $trimmed) { continue }
+      if ($trimmed -notmatch '^\d+$') { continue }
       $idx = [int]$trimmed - 1
       if ($idx -ge 0 -and $idx -lt $installed.Count) { $targets += $installed[$idx] }
     }

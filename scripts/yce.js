@@ -15,6 +15,7 @@ const {
 } = require("./lib/utils");
 const { orchestrate } = require("./lib/orchestrator");
 const { checkForUpdate, formatUpdateBanner } = require("./lib/versionCheck");
+const { performSelfUpdate, autoSelfUpdateEnabled, rerunAfterUpdate } = require("./lib/selfUpdate");
 const { buildSummary, exitCodeFor } = require("./lib/resultGate");
 const { buildReceipt, resolveResultPath, writeResultFile } = require("./lib/resultSink");
 
@@ -266,18 +267,34 @@ async function main() {
   const skillRootDir = require("path").resolve(__dirname, "..");
 
   try {
-    // 每次调用先做版本检测：服务端版本升高则立刻提示升级。
+    // 每次调用先做版本检测：服务端版本更高时自动更新自身并重跑本次命令；
+    // 更新失败退回手动升级横幅，绝不阻塞本次调用。
     const updateCheckPromise = checkForUpdate({ rootDir: skillRootDir }).catch(() => null);
-    let updateBannerPrinted = false;
+    let updateAttempted = false;
     try {
       const earlyInfo = await Promise.race([
         updateCheckPromise,
         new Promise((resolve) => setTimeout(() => resolve(null), 800)),
       ]);
-      const earlyBanner = formatUpdateBanner(earlyInfo);
-      if (earlyBanner) {
-        console.error(earlyBanner);
-        updateBannerPrinted = true;
+      if (earlyInfo && earlyInfo.updateAvailable) {
+        updateAttempted = true;
+        if (autoSelfUpdateEnabled()) {
+          const outcome = await performSelfUpdate({ rootDir: skillRootDir, info: earlyInfo });
+          if (outcome.ok) {
+            console.error(
+              `⬆ yce 已自动更新 v${outcome.fromVersion || "?"} → v${outcome.toVersion}，重新执行本次命令...`,
+            );
+            const rerunCode = await rerunAfterUpdate();
+            if (rerunCode !== null) {
+              process.exit(rerunCode);
+            }
+            console.error("⚠ 重启失败，当前进程继续完成本次调用；下次调用即为新版本。");
+          } else {
+            console.error(formatUpdateBanner(earlyInfo));
+          }
+        } else {
+          console.error(formatUpdateBanner(earlyInfo));
+        }
       }
     } catch {}
 
@@ -343,8 +360,8 @@ async function main() {
       console.error("==================================================");
     }
 
-    // 开头未拿到结果时，结束前再补一次提示
-    if (!updateBannerPrinted) {
+    // 开头未拿到检测结果时，结束前再补一次提示；已尝试过自动更新的不重复
+    if (!updateAttempted) {
       try {
         const updateInfo = await Promise.race([
           updateCheckPromise,

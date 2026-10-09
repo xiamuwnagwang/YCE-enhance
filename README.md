@@ -1,7 +1,7 @@
 # YCE Skill
 
 YCE 是面向 AI Agent 的 **提示词增强 + 语义代码检索 + 联网检索 + Y-Plan 规划** skill。
-当前版本：**3.8.3**。
+当前版本：**3.8.4**。
 
 ## License
 
@@ -52,7 +52,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 # 安装到本机 agent skills 目录
 bash ./install.sh --install
 bash ./install.sh --setup
+```
 
+Windows 用 PowerShell（系统默认禁止运行 .ps1，首次需带 `-ExecutionPolicy Bypass`）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Install
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Setup
+```
+
+```bash
 # 检索（先 cd 到目标项目，或传 --cwd）
 node ./scripts/yce.js "Locate the provider list retrieval logic" \
   --mode search \
@@ -60,6 +69,8 @@ node ./scripts/yce.js "Locate the provider list retrieval logic" \
 ```
 
 配置检索密钥（`YCE_RELAY_TOKEN`）等环境变量，详见 [`SKILL.md`](./SKILL.md) 与 [`references/modes.md`](./references/modes.md)。
+
+CLI 每次调用会向 YCE 服务查询 skill 版本；服务端版本更高时**自动下载更新并重跑本次命令**（`.env` 与 `node_modules` 保留，更新横幅打到 stderr，任何一步失败都退回手动升级提示、不阻塞本次调用）。`.env` 里设 `YCE_AUTO_SELF_UPDATE=0` 只提示不自动更新，`YCE_DISABLE_UPDATE_CHECK=1` 连检测一起关。
 
 结果默认写入文件，stdout 只回一份小收据（`<yce-receipt>`），因为长 stdout 会被宿主静默截断、而截断后的文本无法自证。退出码本身就是闸门：`0` 可用，`2` 输出不完整，`3` 完整但没有可用主结果。细节从收据里的 `result_file` 读，文件最后一行是 `<!-- yce:eof … -->` 哨兵，没读到它就说明没读完。任何时候可复核：
 

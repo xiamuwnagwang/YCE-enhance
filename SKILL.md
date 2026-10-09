@@ -1,6 +1,6 @@
 ---
 name: yce
-version: 3.8.3
+version: 3.8.4
 description: |
   当任务既需要把模糊需求说清楚，又需要去代码库里把实现找出来时使用。适用于"帮我看看这块逻辑在哪""优化任务后再搜代码""增强后检索""auto search""YCE"等场景。
   需要当前外部信息、官方库文档、竞品/行业调研时用 `--mode network` 或 `--with-network`。
@@ -64,6 +64,7 @@ node ./scripts/validate-yce-result.mjs "<result_file>" --expect-sha256 <xml_sha2
 | `YCE_PRERANK_CJK` | 开 | `0` 恢复不产生中文二元组的旧 tokenizer |
 | `YCE_DEFER_USAGE_FLUSH` | 开 | `0`/`false`/`off`/`no` 让父进程继续等待 usage 回执 |
 | `YCE_EARLY_ANSWER` | 关 | `1` 启用“证据充分后尽早作答”提示；3×12 双臂 A/B 未测得耗时收益，因此不默认开启 |
+| `YCE_AUTO_SELF_UPDATE` | 开 | `0` 关闭「版本落后时自动更新并重跑本次命令」（`.env` 与 `node_modules` 保留，stderr 可见更新横幅）；`YCE_DISABLE_UPDATE_CHECK=1` 连检测一起关 |
 
 ## 敏感信息
 

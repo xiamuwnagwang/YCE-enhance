@@ -213,12 +213,36 @@ def check_version_consistency() -> None:
     print(f"OK version consistency: SKILL.md=README={version}")
 
 
+def check_self_update() -> None:
+    """强制自更新链路三件套必须齐全：模块 + CLI 接线 + 测试 + 文档开关。"""
+    module = ROOT / "scripts" / "lib" / "selfUpdate.js"
+    if not module.is_file():
+        fail(f"missing self-update module: {module}")
+    module_text = module.read_text(encoding="utf-8")
+    # .env 只能是「永不触碰」，任何交换/保留清单里出现它都算回归。
+    quoted = re.findall(r'"([^"]*)"', module_text)
+    if ".env" in quoted:
+        fail("selfUpdate.js swap/preserve lists must never contain .env")
+    if "readLocalVersion" not in module_text:
+        fail("selfUpdate.js must anchor package version via versionCheck.readLocalVersion")
+    cli_text = (ROOT / "scripts" / "yce.js").read_text(encoding="utf-8")
+    for needle in ("performSelfUpdate", "autoSelfUpdateEnabled", "rerunAfterUpdate"):
+        if needle not in cli_text:
+            fail(f"scripts/yce.js no longer wires {needle}")
+    if not (ROOT / "test" / "self-update.test.cjs").is_file():
+        fail("missing self-update test suite: test/self-update.test.cjs")
+    if "YCE_AUTO_SELF_UPDATE" not in SKILL.read_text(encoding="utf-8"):
+        fail("SKILL.md must document the YCE_AUTO_SELF_UPDATE opt-out")
+    print("OK self-update wiring: module + CLI + test + docs")
+
+
 def main() -> None:
     if not VALIDATOR.is_file():
         fail(f"missing validator: {VALIDATOR}")
     check_skill()
     check_version_consistency()
     check_gate_shared()
+    check_self_update()
     check_adversarial_suite()
     check_fixtures()
     check_receipt_truth()
