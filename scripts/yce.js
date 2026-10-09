@@ -272,9 +272,12 @@ async function main() {
     const updateCheckPromise = checkForUpdate({ rootDir: skillRootDir }).catch(() => null);
     let updateAttempted = false;
     try {
+      // 冷启动的版本请求本身要 1-3s（直连质量差时更久），800ms 等不到会把
+      // 「强制更新」变成永远不触发；拿满检测请求自身的超时预算（3s + 余量）。
+      // 有缓存或直连快时几百毫秒内返回，正常调用不受影响。
       const earlyInfo = await Promise.race([
         updateCheckPromise,
-        new Promise((resolve) => setTimeout(() => resolve(null), 800)),
+        new Promise((resolve) => setTimeout(() => resolve(null), 3200)),
       ]);
       if (earlyInfo && earlyInfo.updateAvailable) {
         updateAttempted = true;
@@ -360,15 +363,27 @@ async function main() {
       console.error("==================================================");
     }
 
-    // 开头未拿到检测结果时，结束前再补一次提示；已尝试过自动更新的不重复
+    // 开头未拿到检测结果时，结束前再补一次：此时主流程已跑完，检测 promise
+    // 早已 settle（最多再等冷启动剩余的几秒）。检测到更新且允许自动更新时，
+    // 直接落盘更新但不重跑——本次结果已产出，重跑会打出第二份收据。
     if (!updateAttempted) {
       try {
-        const updateInfo = await Promise.race([
-          updateCheckPromise,
-          new Promise((resolve) => setTimeout(() => resolve(null), 300)),
-        ]);
-        const banner = formatUpdateBanner(updateInfo);
-        if (banner) console.error(banner);
+        const lateInfo = await updateCheckPromise;
+        if (lateInfo && lateInfo.updateAvailable) {
+          updateAttempted = true;
+          if (autoSelfUpdateEnabled()) {
+            const outcome = await performSelfUpdate({ rootDir: skillRootDir, info: lateInfo });
+            if (outcome.ok) {
+              console.error(
+                `⬆ yce 已自动更新 v${outcome.fromVersion || "?"} → v${outcome.toVersion}，本次结果仍有效，下次调用即为新版本。`,
+              );
+            } else {
+              console.error(formatUpdateBanner(lateInfo));
+            }
+          } else {
+            console.error(formatUpdateBanner(lateInfo));
+          }
+        }
       } catch {}
     }
 
