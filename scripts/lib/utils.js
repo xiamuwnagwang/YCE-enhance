@@ -1332,13 +1332,126 @@ function completeJsonLine(buffer) {
   return line;
 }
 
+// Node's fetch() ignores HTTP_PROXY/HTTPS_PROXY unless --use-env-proxy was
+// present at startup (assigning NODE_USE_ENV_PROXY at runtime has no effect),
+// so without it every relay call dials the relay origin directly. On a slow or
+// flaky direct route that is what pushes the relay key lease past its 10s abort
+// and surfaces as "relay key lease failed". Node reads HTTP(S)_PROXY but not
+// ALL_PROXY, so mirror an http(s) ALL_PROXY (curl-style, common under WSL) onto
+// the two variables it does read.
+const ENV_PROXY_FLAG = "--use-env-proxy";
+const ENV_PROXY_MIN_NODE_MAJOR = 24;
+const ENV_PROXY_OPT_OUT = "YCE_USE_ENV_PROXY";
+const ENV_PROXY_REEXEC_MARKER = "YCE_ENV_PROXY_REEXEC";
+const PROXY_ENV_KEYS = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"];
+const ALL_PROXY_KEYS = ["ALL_PROXY", "all_proxy"];
+
+function readFirstNonEmpty(env, keys) {
+  for (const key of keys) {
+    if (isNonEmptyString(env?.[key])) return String(env[key]).trim();
+  }
+  return "";
+}
+
+function isHttpProxyUrl(value) {
+  return /^https?:\/\//i.test(String(value || "").trim());
+}
+
+function nodeMajorVersion(version = process.versions.node) {
+  const match = /^v?(\d+)/.exec(String(version || "").trim());
+  return match ? Number(match[1]) : 0;
+}
+
+function nodeSupportsEnvProxy(version = process.versions.node) {
+  return nodeMajorVersion(version) >= ENV_PROXY_MIN_NODE_MAJOR;
+}
+
+function proxyEnvPresent(env) {
+  if (PROXY_ENV_KEYS.some((key) => isNonEmptyString(env?.[key]))) return true;
+  return isHttpProxyUrl(readFirstNonEmpty(env, ALL_PROXY_KEYS));
+}
+
+function mirrorAllProxyToSpecific(env) {
+  const merged = { ...env };
+  const allProxy = readFirstNonEmpty(merged, ALL_PROXY_KEYS);
+  // socks:// is deliberately left alone: Node's built-in proxy support handles
+  // http(s) URLs only, so promoting a socks value would break a route that
+  // currently works by going direct.
+  if (!isHttpProxyUrl(allProxy)) return merged;
+  if (!isNonEmptyString(merged.HTTPS_PROXY) && !isNonEmptyString(merged.https_proxy)) {
+    merged.HTTPS_PROXY = allProxy;
+  }
+  if (!isNonEmptyString(merged.HTTP_PROXY) && !isNonEmptyString(merged.http_proxy)) {
+    merged.HTTP_PROXY = allProxy;
+  }
+  return merged;
+}
+
+// Returns the env a node child should inherit plus whether NODE_OPTIONS was
+// just given the proxy flag. The flag has to exist before startup, so a caller
+// that is itself the top-level process (the CLI) re-execs when `applied` is
+// true; children pick it up through NODE_OPTIONS instead.
+let dotEnvProxyCache;
+const DOTENV_PROXY_KEYS = [...PROXY_ENV_KEYS, ...ALL_PROXY_KEYS];
+
+// 由 GUI 拉起的 MCP（Claude Desktop 之类）不会继承 shell 里的代理变量，进程环境里
+// 一条代理都没有，整条链路只能直连。skill 的 .env 是这种情况下唯一可配置的落点：
+// 只挑代理键回退，其余键不灌进子进程，避免顺手改掉 CLI 的配置来源。
+function dotEnvProxyEnv() {
+  if (dotEnvProxyCache !== undefined) return dotEnvProxyCache;
+  const proxyEnv = {};
+  try {
+    const parsed = parseEnvFile(path.join(ROOT_DIR, ".env"));
+    for (const key of DOTENV_PROXY_KEYS) {
+      if (isNonEmptyString(parsed?.[key])) proxyEnv[key] = String(parsed[key]).trim();
+    }
+  } catch {
+    // .env 缺失或不可读：没有可回退的代理配置，保持原样直连。
+  }
+  dotEnvProxyCache = proxyEnv;
+  return dotEnvProxyCache;
+}
+
+function envProxySourceEnv(sourceEnv = process.env) {
+  const env = { ...(sourceEnv || {}) };
+  for (const [key, value] of Object.entries(dotEnvProxyEnv())) {
+    if (!isNonEmptyString(env[key])) env[key] = value;
+  }
+  return env;
+}
+
+function withNodeEnvProxy(sourceEnv) {
+  const env = mirrorAllProxyToSpecific(envProxySourceEnv(sourceEnv));
+  if (hasOwn(env, ENV_PROXY_OPT_OUT) && !toBoolean(env[ENV_PROXY_OPT_OUT], true)) {
+    return { env, applied: false };
+  }
+  if (env[ENV_PROXY_REEXEC_MARKER] === "1") return { env, applied: false };
+  if (!nodeSupportsEnvProxy() || !proxyEnvPresent(env)) return { env, applied: false };
+
+  const nodeOptions = String(env.NODE_OPTIONS || "").trim();
+  if (nodeOptions.split(/\s+/).includes(ENV_PROXY_FLAG)) return { env, applied: false };
+
+  env.NODE_OPTIONS = nodeOptions ? `${ENV_PROXY_FLAG} ${nodeOptions}` : ENV_PROXY_FLAG;
+  env[ENV_PROXY_REEXEC_MARKER] = "1";
+  return { env, applied: true };
+}
+
 function runCommand(command, args, options = {}) {
   const { cwd, timeoutMs, env, resolveOnJsonLine = false } = options;
 
+  const { env: childEnv, applied: envProxyApplied } = withNodeEnvProxy(
+    env ? { ...process.env, ...env } : process.env
+  );
+  // The flag is only safe on an interpreter that understands it, so when it was
+  // injected route a bare "node" through process.execPath (this node, known to
+  // support it) rather than letting PATH pick a possibly older release that
+  // would die on an unknown option. The engine keeps its own argv.
+  const spawnCommand = envProxyApplied && command === "node" ? process.execPath : command;
+
   return new Promise((resolve) => {
-    const child = spawn(command, args, {
+    const child = spawn(spawnCommand, args, {
       cwd,
-      env: env ? { ...process.env, ...env } : process.env,
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -1446,5 +1559,7 @@ module.exports = {
   toBoundedInt,
   normalizeExcludePaths,
   toPositiveInt,
+  withNodeEnvProxy,
+  envProxySourceEnv,
   PLAN_DISABLED_MESSAGE,
 };

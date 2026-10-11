@@ -253,7 +253,17 @@ const networkFields = {
     .describe("联网检索档位，默认 balanced。"),
   library: z.string().optional().describe("限定官方库名。"),
   repo: z.string().optional().describe("限定 owner/name 仓库。"),
-  timeout_network_ms: z.number().int().positive().optional(),
+  timeout_network_ms: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe(
+      "等 relay 联网检索的上限（毫秒），默认 120000。relay 侧默认把自己的等待墙上限钳在"
+      + "110s 之内（exhaustive 档的地板预算本来就到 120s），两边一起调大才有意义："
+      + "单方面调大这里，超过 120s 的部分换来的只是客户端超时，而不是更长的检索。"
+      + "联网 agent 的追加段预算也是从这份墙里出的。",
+    ),
 };
 
 const searchTuningFields = {

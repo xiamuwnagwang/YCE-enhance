@@ -1,6 +1,6 @@
 # yce-mcp：stdio MCP server
 
-把 YCE CLI 包成 MCP 工具，给只会走 MCP 的宿主用。协议正文仍是 `SKILL.md`：闸门、哨兵、读结果的规矩一条不变，MCP 只换了调用方式。子包在 `mcp/`，MCP 版本走自己的 `2.0` 序列（当前 `2.0.0`，与 skill 版本各自独立）。
+把 YCE CLI 包成 MCP 工具，给只会走 MCP 的宿主用。协议正文仍是 `SKILL.md`：闸门、哨兵、读结果的规矩一条不变，MCP 只换了调用方式。子包在 `mcp/`，MCP 版本走自己的 `2.0` 序列（当前 `2.0.1`，与 skill 版本各自独立）。
 
 ## 安装
 
@@ -30,9 +30,9 @@ server 找 CLI 的顺序是「包相对 `mcp/../scripts/yce.js` → `YCE_MCP_SKI
 
 | 工具 | 转发的 CLI 调用 | 关键参数 | 返回值 |
 |------|----------------|----------|--------|
-| `yce_search` | `--mode search`（`mode=auto` 先增强再检索） | `query`（必填，英文）、`cwd`、`mode`、`history`、`with_network`、`task`/`no_task`、检索调优项（`max_results`、`tree_depth`、`exclude`、`no_cache`、`no_jev_screen`…） | 收据 JSON + 人读提示 |
+| `yce_search` | `--mode search`（`mode=auto` 先增强再检索） | `query`（必填，英文）、`cwd`、`mode`、`history`、`with_network`、`task`/`no_task`、检索调优项（`max_results`、`tree_depth`、`exclude`、`no_cache`、`no_jev_screen`…）、`timeout_network_ms`（默认 120000） | 收据 JSON + 人读提示 |
 | `yce_enhance` | `--mode enhance` | `query`（必填）、`history`、`enhance_backend`、`language` | 收据 JSON + 人读提示 |
-| `yce_network_search` | `--mode network` | `query`（必填）、`network_profile`、`library`、`repo` | 收据 JSON + 人读提示 |
+| `yce_network_search` | `--mode network` | `query`（必填）、`network_profile`、`library`、`repo`、`timeout_network_ms`（默认 120000） | 收据 JSON + 人读提示 |
 | `yce_plan` | `--mode plan` | `query`（必填）、`cwd`、`with_search`、`search_context`、`plan_backend`、`plan_provider`/`plan_model`、`web_search`、`save` | 收据 JSON + 人读提示 |
 | `yce_task` | `task show\|list\|check\|done\|new` | `action`（必填）、`task`、`stage`+`evidence`、`goal`+`accept` | `<yce-task>` XML 原样透传 + 人读提示 |
 | `yce_read_result` | 不起子进程，直接分页读文件 | `result_file`（必填，绝对路径）、`offset`（默认 1）、`limit`（默认 400 行，单页另有 256 KiB 上限） | 分页元信息 + 正文片段 |

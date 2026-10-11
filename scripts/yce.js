@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+const { spawnSync } = require("child_process");
+
 const {
   ensureAbsolutePath,
   isDirectory,
@@ -11,6 +13,7 @@ const {
   toBoolean,
   toBoundedInt,
   toPositiveInt,
+  withNodeEnvProxy,
   PLAN_DISABLED_MESSAGE,
 } = require("./lib/utils");
 const { orchestrate } = require("./lib/orchestrator");
@@ -126,7 +129,29 @@ function buildSearchOptions(args, config) {
   };
 }
 
+// Relay requests this process makes itself need the proxy env vars honoured,
+// and Node only applies them when --use-env-proxy was present at startup. Re-exec
+// once with the flag on NODE_OPTIONS so this process and every node child it
+// spawns (the engine inherits NODE_OPTIONS) all dial through the proxy. Returns
+// the child's exit status, or null to keep running without a re-exec.
+function reexecWithEnvProxy() {
+  const { env, applied } = withNodeEnvProxy(process.env);
+  if (!applied) return null;
+
+  const result = spawnSync(process.execPath, [__filename, ...process.argv.slice(2)], {
+    env,
+    stdio: "inherit",
+  });
+  if (result.error) return null; // re-exec unavailable: keep this process running
+  return typeof result.status === "number" ? result.status : 1;
+}
+
 async function main() {
+  const proxyStatus = reexecWithEnvProxy();
+  if (proxyStatus !== null) {
+    process.exit(proxyStatus);
+  }
+
   const args = parseArgs(process.argv.slice(2));
   const config = loadRuntimeConfig();
   if (args["no-cache"] === true) {

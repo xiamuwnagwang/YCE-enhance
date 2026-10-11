@@ -60,6 +60,8 @@ main() {
 
   # Copy only what an installer needs; never include secrets (.env).
   # Also avoid .git and dist recursion.
+  # LICENSE 必须随包走：这是 GPL-3.0 的再分发条件之一，之前只留在仓库根目录，
+  # 解压出来的包里没有任何许可文本。
   local items=(
     "scripts"
     "vendor"
@@ -68,6 +70,7 @@ main() {
     "SKILL.md"
     "install.sh"
     "install.ps1"
+    "LICENSE"
   )
 
   for item in "${items[@]}"; do
@@ -131,10 +134,13 @@ PY
   )
 
   echo "==> Writing checksums"
-  {
-    checksum_file "$tar_path"
-    checksum_file "$zip_path"
-  } >"$sums_path"
+  # 只写裸文件名：用户是在放好资产的目录里跑 `shasum -a 256 -c SHA256SUMS`，写打包机
+  # 的绝对路径既校验不过、又把本机目录结构带进公开产物（3.8.5 及以前一直是绝对路径）。
+  (
+    cd "$DIST_DIR"
+    checksum_file "$pkg_base.tar.gz"
+    checksum_file "$pkg_base.zip"
+  ) >"$sums_path"
 
   rm -rf "$work_dir"
 

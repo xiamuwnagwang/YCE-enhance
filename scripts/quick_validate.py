@@ -210,6 +210,22 @@ def check_version_consistency() -> None:
             fail(f"mcp/package.json is not valid JSON: {error}")
         if not re.fullmatch(r"\d+\.\d+\.\d+", str(mcp_version)):
             fail(f"mcp/package.json version {mcp_version!r} is not semver")
+        # MCP 的版本标注散在三处（package.json + 两份文档）。只验形状会漏掉
+        # 「包发了 2.0.1、文档还写 2.0.0」这类漂移，这里一并钉住。
+        for label, path in (
+            ("mcp/README.md", ROOT / "mcp" / "README.md"),
+            ("references/mcp.md", ROOT / "references" / "mcp.md"),
+        ):
+            if not path.is_file():
+                fail(f"missing {label}")
+            found = re.search(r"当前\s*`(\d+\.\d+\.\d+)`", path.read_text(encoding="utf-8"))
+            if not found:
+                fail(f"{label} is missing the '当前 `x.y.z`' MCP version line")
+            if found.group(1) != str(mcp_version):
+                fail(
+                    f"{label} 的 MCP 版本 {found.group(1)} != mcp/package.json {mcp_version};"
+                    " 三处必须同一次 bump"
+                )
     print(f"OK version consistency: SKILL.md=README={version}")
 
 

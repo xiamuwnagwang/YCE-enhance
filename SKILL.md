@@ -1,6 +1,6 @@
 ---
 name: yce
-version: 3.8.5
+version: 3.8.6
 description: |
   当任务既需要把模糊需求说清楚，又需要去代码库里把实现找出来时使用。适用于"帮我看看这块逻辑在哪""优化任务后再搜代码""增强后检索""auto search""YCE"等场景。
   需要当前外部信息、官方库文档、竞品/行业调研时用 `--mode network` 或 `--with-network`。
@@ -65,6 +65,9 @@ node ./scripts/validate-yce-result.mjs "<result_file>" --expect-sha256 <xml_sha2
 | `YCE_DEFER_USAGE_FLUSH` | 开 | `0`/`false`/`off`/`no` 让父进程继续等待 usage 回执 |
 | `YCE_EARLY_ANSWER` | 关 | `1` 启用“证据充分后尽早作答”提示；3×12 双臂 A/B 未测得耗时收益，因此不默认开启 |
 | `YCE_AUTO_SELF_UPDATE` | 开 | `0` 关闭「版本落后时自动更新并重跑本次命令」（`.env` 与 `node_modules` 保留，stderr 可见更新横幅）；`YCE_DISABLE_UPDATE_CHECK=1` 连检测一起关 |
+| `YCE_USE_ENV_PROXY` | 开 | `0`/`false`/`off`/`no` 关闭「按进程环境里的代理变量给 node 注入 `--use-env-proxy`」。只对 node ≥ 24 生效，只认 `HTTP(S)_PROXY`（大小写都可，小写优先），`ALL_PROXY` 是 http(s) 形态时镜像过去、socks 形态不动。`fetch failed` 类租约/检索失败先按这个开关排查：写进 `.env` 的代理键也会被采用，供 GUI 拉起的 MCP 用（GUI 不继承 shell 代理变量） |
+
+环境里显式设了代理变量就优先用它；没有任何代理变量时才回退到 `.env` 里的代理键（只取代理键，其余键不灌进子进程）。
 
 ## 敏感信息
 
