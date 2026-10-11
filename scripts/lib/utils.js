@@ -68,7 +68,9 @@ const DEFAULTS = {
   timeoutEnhanceMs: 300000,
   timeoutAutoEnhanceMs: 60000,
   timeoutSearchMs: 180000,
-  timeoutNetworkMs: 120000,
+  // relay 的联网检索墙在 agent 意图下最长 155s（检索段 60s + agent 预留 90s + 进程开销 5s），
+  // 客户端必须比它宽，否则用户拿到的是客户端超时而不是检索结果。普通检索仍在十来秒内返回。
+  timeoutNetworkMs: 180000,
   // Relay 侧 y-plan 默认服务端超时为 480s，客户端跟随该预算。
   timeoutPlanMs: 480000,
   // Y-Plan 规划能力默认开启；用户可通过 .env / 安装脚本关闭。

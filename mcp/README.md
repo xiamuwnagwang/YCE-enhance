@@ -2,7 +2,7 @@
 
 stdio MCP server，把本仓的 YCE CLI（`scripts/yce.js`）包成 6 个工具。它只负责转发：每个工具都 `spawn` 一次 `scripts/yce.js`，不复制 `scripts/lib/orchestrator.js` 的分发逻辑，也不直连引擎。模式、参数表、闸门判据仍然只有 CLI 一个来源。
 
-MCP 版本走自己的 `2.0` 序列：当前 `2.0.1`，与 skill 版本各自独立。
+MCP 版本走自己的 `2.0` 序列：当前 `2.0.2`，与 skill 版本各自独立。
 
 ## 安装与启动
 
@@ -36,7 +36,7 @@ CLI 路径解析顺序：① 包相对 `mcp/../scripts/yce.js`；② 环境变�
 |------|------|
 | `YCE_MCP_SKILL_ROOT` | YCE skill 根目录（内含 `scripts/yce.js`），包相对找不到时用 |
 | `YCE_JS` | 直接指向 `scripts/yce.js`，优先级最低 |
-| `YCE_MCP_SPAWN_TIMEOUT_MS` | 子进程硬上限，默认 30 分钟。CLI 自己管分阶段超时（联网检索默认恰好 120s、可用 `YCE_TIMEOUT_NETWORK_MS` 或工具参数 `timeout_network_ms` 调；plan ≥300s），这里只防挂死 |
+| `YCE_MCP_SPAWN_TIMEOUT_MS` | 子进程硬上限，默认 30 分钟。CLI 自己管分阶段超时（联网检索默认 180s、可用 `YCE_TIMEOUT_NETWORK_MS` 或工具参数 `timeout_network_ms` 调；plan ≥300s），这里只防挂死 |
 | CLI 自己的变量 | `YCE_RELAY_TOKEN`、`YCE_RESULT_DIR` 等原样透传给子进程 |
 
 ## 工具表
