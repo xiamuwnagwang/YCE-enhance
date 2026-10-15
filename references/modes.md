@@ -90,7 +90,7 @@ search 在远端 agent 循环之外有四层本地能力，默认全开，可单
 | `--no-context` | 关闭 `<code-context>` 正文回传 |
 | `--no-cache` | 本次调用禁用检索结果缓存 |
 
-超时默认：search 180s、network 120s、plan 480s、auto enhance 60s、explicit enhance 300s。
+超时默认：search 180s、network 240s、plan 480s、auto enhance 60s、explicit enhance 300s。
 
 ## 环境变量（摘要）
 

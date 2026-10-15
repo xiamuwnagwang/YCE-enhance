@@ -82,7 +82,7 @@ const { parseSentinel } = require(SKILL.gate);
 
 const SPAWN_TIMEOUT_MS = (() => {
   const raw = Number(process.env.YCE_MCP_SPAWN_TIMEOUT_MS);
-  // Generous by design: the CLI owns per-stage timeouts (search ≥180s, network ≥180s,
+  // Generous by design: the CLI owns per-stage timeouts (search ≥180s, network ≥240s,
   // plan ≥300s) and a shorter cap here would cut off a healthy run.
   return Number.isFinite(raw) && raw > 0 ? raw : 30 * 60 * 1000;
 })();
@@ -259,9 +259,9 @@ const networkFields = {
     .positive()
     .optional()
     .describe(
-      "等 relay 联网检索的上限（毫秒），默认 180000。relay 侧默认把自己的等待墙上限钳在"
-      + "155s 之内（检索段 60s + 联网 agent 预留 90s + 进程开销 5s），两边一起调大才有"
-      + "意义：单方面调大这里，超过 155s 的部分换来的只是客户端超时，而不是更长的检索。"
+      "等 relay 联网检索的上限（毫秒），默认 240000。relay 侧默认把自己的等待墙上限钳在"
+      + "215s 之内（检索段 100s + 联网 agent 预留 90s + 进程开销 5s），两边一起调大才有"
+      + "意义：单方面调大这里，超过 215s 的部分换来的只是客户端超时，而不是更长的检索。"
       + "联网 agent 的追加段预算也是从这份墙里出的。",
     ),
 };

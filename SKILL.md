@@ -1,6 +1,6 @@
 ---
 name: yce
-version: 3.8.7
+version: 3.8.8
 description: |
   当任务既需要把模糊需求说清楚，又需要去代码库里把实现找出来时使用。适用于"帮我看看这块逻辑在哪""优化任务后再搜代码""增强后检索""auto search""YCE"等场景。
   需要当前外部信息、官方库文档、竞品/行业调研时用 `--mode network` 或 `--with-network`。
@@ -17,7 +17,7 @@ user-invocable: true
 
 1. 确认目标项目绝对路径，不在该目录时必须传 `--cwd`。
 2. 凡最终会进入 search 的调用，先把自然语言检索意图转成准确、简洁的英文 query。代码标识符、路径、命令、报错原文和字符串字面量保持不变。YCE 不会自动翻译。
-3. 按下表选择 **一种** 模式，发起 **一次** YCE 调用，外层阻塞等待完成（search/auto/network ≥ 180s，plan ≥ 300s）。禁止短 timeout 轮询。
+3. 按下表选择 **一种** 模式，发起 **一次** YCE 调用，外层阻塞等待完成（search/auto ≥ 180s，network ≥ 240s，plan ≥ 300s）。禁止短 timeout 轮询。
 4. 直接调用即可。结果自动落盘，stdout 只回一份小收据，**不要**再自己重定向 stdout：
 
 ```bash

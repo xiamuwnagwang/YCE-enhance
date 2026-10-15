@@ -1011,7 +1011,7 @@ cmd_setup() {
     echo ""
 
     echo "YCE Relay URL 当前: ${yce_relay_url:-$DEFAULT_YCE_RELAY_URL}"
-    read -rp "YCE Relay URL（回车默认 $DEFAULT_YCE_RELAY_URL）: " new_val
+    read -rp "YCE Relay URL（回车默认 ${DEFAULT_YCE_RELAY_URL}）: " new_val
     [[ -n "$new_val" ]] && yce_relay_url="$new_val"
     echo ""
 
